@@ -1,0 +1,126 @@
+# Vagrantfile — example Win11 VM provisioned with Agent Remote Hands.
+#
+# Pre-built binary expected at:
+#   ../../agents/windows-modern/build/Release/remote-hands.exe
+# (i.e. produced by the windows-modern CMake build before `vagrant up`).
+#
+# Usage:
+#   cd examples/vagrant
+#   vagrant up
+#   # ...wait for Win11 to boot + provisioning to finish (5-10 min first time)
+#
+# Then from the host:
+#   python ../../client/hostctl-discover     # find the agent on the LAN
+#   python ../../client/hostctl ping          # smoke-test (with REMOTE_HANDS_HOST=127.0.0.1)
+#
+# To wire into Claude Code, point the MCP server at 127.0.0.1:8765
+# (the forwarded port) — see ../../mcp-server/README.md.
+
+REPO_ROOT = File.expand_path('../..', __dir__)
+AGENT_BINARY = File.join(REPO_ROOT,
+  'agents', 'windows-modern', 'build', 'Release', 'remote-hands.exe')
+INSTALLER = File.join(REPO_ROOT, 'Tools', 'install-agent.ps1')
+
+unless File.exist?(AGENT_BINARY)
+  warn "Vagrantfile: agent binary not found at #{AGENT_BINARY}"
+  warn "Build it first:"
+  warn "  cd #{REPO_ROOT}/agents/windows-modern"
+  warn "  cmake -B build -A x64 && cmake --build build --config Release"
+  exit 1
+end
+
+Vagrant.configure('2') do |config|
+  # Community-maintained Windows 11 evaluation box. Switch to
+  # 'gusztavvargadr/windows-10' for Win10 testing or
+  # 'gusztavvargadr/windows-server' for Server SKUs.
+  config.vm.box = 'gusztavvargadr/windows-11'
+  config.vm.communicator = 'winrm'
+
+  # Win11 takes a while to boot the first time after sysprep.
+  config.vm.boot_timeout = 600
+  config.vm.graceful_halt_timeout = 60
+
+  # Forward the agent's TCP port so the host can reach it without bridged
+  # networking. Adjust if 8765 conflicts on your host.
+  config.vm.network 'forwarded_port',
+    guest: 8765, host: 8765, host_ip: '127.0.0.1', id: 'remote-hands'
+
+  # Resource sizing — Win11 wants at least 4 GB RAM and 2 vCPU.
+  config.vm.provider 'virtualbox' do |vb|
+    vb.gui     = false   # set to true for visual debugging
+    vb.memory  = 4096
+    vb.cpus    = 4
+  end
+  config.vm.provider 'hyperv' do |hv|
+    hv.memory  = 4096
+    hv.maxmemory = 8192
+    hv.cpus    = 4
+  end
+  config.vm.provider 'vmware_desktop' do |vmw|
+    vmw.memory = 4096
+    vmw.cpus   = 4
+    # GUI mode is the resilience-default. The plugin's headless path uses
+    # `vmrun start ... nogui` which requires the `VMAuthdService` Windows
+    # service to be running — that service ships disabled on many Workstation
+    # installs and starting it needs admin. GUI mode goes through
+    # vmware.exe directly and works without that service. The VM window
+    # opens on the host; close-button stops the VM.
+    #
+    # If you'd rather run headless: in an elevated PowerShell run
+    #   Start-Service VMAuthdService
+    #   Set-Service VMAuthdService -StartupType Automatic
+    # then set `vmw.gui = false` here.
+    vmw.gui = true
+  end
+  config.vm.provider 'parallels' do |prl|
+    prl.memory = 4096
+    prl.cpus   = 4
+  end
+
+  # Provision: copy the binary and install script in, then run the script.
+  # The script handles firewall, env vars, Task Scheduler registration, and
+  # starting the agent.
+  config.vm.provision 'file',
+    source: AGENT_BINARY,
+    destination: 'C:\\Windows\\Temp\\remote-hands.exe'
+  config.vm.provision 'file',
+    source: INSTALLER,
+    destination: 'C:\\Windows\\Temp\\install-agent.ps1'
+  config.vm.provision 'shell', privileged: true, inline: <<~PS
+    powershell -ExecutionPolicy Bypass -File C:\\Windows\\Temp\\install-agent.ps1 `
+      -LocalBinary C:\\Windows\\Temp\\remote-hands.exe `
+      -Discoverable
+  PS
+
+  config.vm.post_up_message = <<~MSG
+
+    ===================================================================
+      Agent Remote Hands is running in the VM.
+    ===================================================================
+
+    Find it from the host (mDNS):
+      python #{REPO_ROOT}/client/hostctl-discover
+
+    Or hit the forwarded port directly:
+      REMOTE_HANDS_HOST=127.0.0.1 python #{REPO_ROOT}/client/hostctl ping
+      REMOTE_HANDS_HOST=127.0.0.1 python #{REPO_ROOT}/client/hostctl shot-png /tmp/screen.png
+
+    Wire into Claude Code by adding to ~/.claude/claude_desktop_config.json:
+      {
+        "mcpServers": {
+          "agent-remote-hands": {
+            "command": "python",
+            "args": ["#{REPO_ROOT}/mcp-server/server.py"],
+            "env": { "REMOTE_HANDS_HOST": "127.0.0.1" }
+          }
+        }
+      }
+
+    To rebuild and re-deploy the agent without recreating the VM:
+      vagrant provision
+
+    Tear down the VM:
+      vagrant destroy
+
+  MSG
+end

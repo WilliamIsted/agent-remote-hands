@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""hostctl — host-side client for an Agent Remote Hands agent.
+
+Set REMOTE_HANDS_HOST (and optionally REMOTE_HANDS_PORT) to point at the agent:
+    export REMOTE_HANDS_HOST=192.168.x.x
+    export REMOTE_HANDS_PORT=8765   # default
+
+Usage:
+    hostctl ping
+    hostctl caps                       # list verbs the agent supports
+    hostctl info                       # target os/arch/version
+    hostctl screen                     # print "WIDTH HEIGHT"
+    hostctl mpos                       # print "X Y"
+    hostctl shot [path.bmp]            # screenshot (default: /tmp/remote-hands/screen.bmp)
+    hostctl shot-png <path.png>        # screenshot, convert via sips to PNG (macOS host)
+    hostctl move <x> <y>
+    hostctl moverel <dx> <dy>
+    hostctl click [left|right|middle|N]
+    hostctl dclick [button]
+    hostctl mdown [button]
+    hostctl mup [button]
+    hostctl drag <x> <y> [button]
+    hostctl wheel <delta>              # +120 = one notch up, -120 = down
+    hostctl key <combo>                # e.g. enter, alt-F4, ctrl-shift-s
+    hostctl keys <text...>             # type literal text
+    hostctl keydown <key>
+    hostctl keyup <key>
+    hostctl read <remote_path>         # print file contents to stdout
+    hostctl read-to <remote_path> <local_path>
+    hostctl write <remote_path> <local_path>
+    hostctl exec <cmdline...>          # CreateProcess; prints PID
+    hostctl wait <pid> [timeout_ms]
+    hostctl sleep <ms>
+    hostctl winfind <title>
+    hostctl winmove <x> <y> <title>
+    hostctl raw <line...>              # send arbitrary command line
+
+For screenshot inspection, prefer `hostctl shot-png /tmp/screen.png` so the
+output is directly readable by the Read tool.
+"""
+import os
+import socket
+import subprocess
+import sys
+
+HOST = os.environ.get("REMOTE_HANDS_HOST")
+PORT = int(os.environ.get("REMOTE_HANDS_PORT", "8765"))
+
+
+def die(msg, code=1):
+    sys.stderr.write(f"hostctl: {msg}\n")
+    sys.exit(code)
+
+
+def connect():
+    if not HOST:
+        die("REMOTE_HANDS_HOST not set (export REMOTE_HANDS_HOST=192.168.x.x)")
+    try:
+        s = socket.create_connection((HOST, PORT), timeout=10)
+    except OSError as e:
+        die(f"connect {HOST}:{PORT} failed: {e}")
+    s.settimeout(30)
+    return s
+
+
+def recv_line(sock):
+    buf = bytearray()
+    while True:
+        c = sock.recv(1)
+        if not c:
+            return buf.decode("latin-1", errors="replace")
+        if c == b"\n":
+            return buf.decode("latin-1", errors="replace")
+        if c == b"\r":
+            continue
+        buf += c
+
+
+def recv_n(sock, n):
+    chunks = []
+    remaining = n
+    while remaining > 0:
+        chunk = sock.recv(min(65536, remaining))
+        if not chunk:
+            die(f"connection closed; expected {remaining} more bytes")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def send_cmd(sock, line, payload=None):
+    # Use latin-1 (≈ Win-1252 for the bytes we care about) so non-ASCII chars
+    # like 'ü' arrive as their single-byte ANSI value (0xFC), matching what
+    # CreateProcessA / xcopy expect on a Western-codepage Windows. Default
+    # .encode() would use UTF-8 and break path lookups containing umlauts.
+    sock.sendall((line + "\n").encode("latin-1", errors="replace"))
+    if payload is not None:
+        sock.sendall(payload)
+
+
+def expect_ok(resp, ctx=""):
+    if not resp.startswith("OK"):
+        die(f"{ctx + ': ' if ctx else ''}{resp}")
+    return resp
+
+
+def parse_ok_data_len(resp):
+    parts = resp.split()
+    if len(parts) < 2 or parts[0] != "OK":
+        die(f"expected OK <len>, got: {resp}")
+    return int(parts[1])
+
+
+def cmd_simple(args, line):
+    s = connect()
+    try:
+        send_cmd(s, line)
+        print(expect_ok(recv_line(s)))
+    finally:
+        s.close()
+
+
+def cmd_shot(out_path):
+    s = connect()
+    try:
+        send_cmd(s, "SHOT")
+        n = parse_ok_data_len(recv_line(s))
+        data = recv_n(s, n)
+        with open(out_path, "wb") as f:
+            f.write(data)
+        print(f"wrote {n} bytes to {out_path}")
+    finally:
+        s.close()
+
+
+def cmd_shot_png(out_png):
+    bmp_path = out_png + ".tmp.bmp"
+    cmd_shot(bmp_path)
+    subprocess.check_call(["sips", "-s", "format", "png", bmp_path, "--out", out_png],
+                          stdout=subprocess.DEVNULL)
+    os.unlink(bmp_path)
+    print(f"-> {out_png}")
+
+
+def cmd_read(remote_path, out=None):
+    s = connect()
+    try:
+        send_cmd(s, f"READ {remote_path}")
+        n = parse_ok_data_len(recv_line(s))
+        data = recv_n(s, n)
+        if out:
+            with open(out, "wb") as f:
+                f.write(data)
+            print(f"wrote {n} bytes to {out}")
+        else:
+            sys.stdout.buffer.write(data)
+    finally:
+        s.close()
+
+
+def cmd_write(remote_path, local_path):
+    with open(local_path, "rb") as f:
+        data = f.read()
+    s = connect()
+    try:
+        send_cmd(s, f"WRITE {remote_path} {len(data)}", data)
+        print(expect_ok(recv_line(s)))
+    finally:
+        s.close()
+
+
+def cmd_exec(cmdline):
+    s = connect()
+    try:
+        send_cmd(s, f"EXEC {cmdline}")
+        resp = recv_line(s)
+        if resp.startswith("OK"):
+            pid = resp.split()[1] if len(resp.split()) > 1 else "?"
+            print(pid)
+        else:
+            die(resp)
+    finally:
+        s.close()
+
+
+def cmd_wait(pid, timeout=None):
+    s = connect()
+    try:
+        line = f"WAIT {pid}"
+        if timeout is not None:
+            line += f" {timeout}"
+        send_cmd(s, line)
+        resp = recv_line(s)
+        if not resp.startswith("OK"):
+            die(resp)
+        parts = resp.split()
+        print(parts[1] if len(parts) > 1 else "0")
+    finally:
+        s.close()
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(0)
+    cmd = sys.argv[1].lower()
+    args = sys.argv[2:]
+
+    SIMPLE = {
+        "ping":    lambda: "PING",
+        "caps":    lambda: "CAPS",
+        "info":    lambda: "INFO",
+        "screen":  lambda: "SCREEN",
+        "mpos":    lambda: "MPOS",
+        "move":    lambda: f"MOVE {args[0]} {args[1]}",
+        "moverel": lambda: f"MOVEREL {args[0]} {args[1]}",
+        "click":   lambda: f"CLICK {args[0] if args else 'left'}",
+        "dclick":  lambda: f"DCLICK {args[0] if args else 'left'}",
+        "mdown":   lambda: f"MDOWN {args[0] if args else 'left'}",
+        "mup":     lambda: f"MUP {args[0] if args else 'left'}",
+        "drag":    lambda: f"DRAG {' '.join(args)}",
+        "wheel":   lambda: f"WHEEL {args[0]}",
+        "key":     lambda: f"KEY {args[0]}",
+        "keys":    lambda: f"KEYS {' '.join(args)}",
+        "keydown": lambda: f"KEYDOWN {args[0]}",
+        "keyup":   lambda: f"KEYUP {args[0]}",
+        "sleep":   lambda: f"SLEEP {args[0]}",
+        "raw":     lambda: " ".join(args),
+        "winmove": lambda: f"WINMOVE {args[0]} {args[1]} {' '.join(args[2:])}",
+        "winfind": lambda: f"WINFIND {' '.join(args)}",
+    }
+    if cmd in SIMPLE:
+        try:
+            line = SIMPLE[cmd]()
+        except IndexError:
+            die(f"missing arguments for {cmd}")
+        cmd_simple(args, line)
+        return
+    if cmd == "shot":
+        out = args[0] if args else "/tmp/remote-hands/screen.bmp"
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        cmd_shot(out); return
+    if cmd == "shot-png":
+        if not args: die("usage: hostctl shot-png <path.png>")
+        os.makedirs(os.path.dirname(args[0]) or ".", exist_ok=True)
+        cmd_shot_png(args[0]); return
+    if cmd == "read":
+        if not args: die("usage: hostctl read <remote_path>")
+        cmd_read(args[0]); return
+    if cmd == "read-to":
+        if len(args) < 2: die("usage: hostctl read-to <remote_path> <local_path>")
+        cmd_read(args[0], args[1]); return
+    if cmd == "write":
+        if len(args) < 2: die("usage: hostctl write <remote_path> <local_path>")
+        cmd_write(args[0], args[1]); return
+    if cmd == "exec":
+        if not args: die("usage: hostctl exec <cmdline>")
+        cmd_exec(" ".join(args)); return
+    if cmd == "wait":
+        if not args: die("usage: hostctl wait <pid> [timeout_ms]")
+        cmd_wait(args[0], args[1] if len(args) > 1 else None); return
+    die(f"unknown command: {cmd}")
+
+
+if __name__ == "__main__":
+    main()

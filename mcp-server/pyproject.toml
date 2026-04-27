@@ -1,0 +1,19 @@
+[project]
+name = "agent-remote-hands-mcp"
+version = "0.1.0"
+description = "MCP server bridging Claude Code (and other MCP clients) to an Agent Remote Hands binary running on a target machine."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.scripts]
+agent-remote-hands-mcp = "server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["server", "agent_client", "tools"]

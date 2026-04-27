@@ -1,0 +1,36 @@
+# Build artefacts
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.map
+*.exp
+*.lib
+*.res
+
+# Editor / IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Python
+__pycache__/
+*.pyc
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Local screenshots / scratch
+*.bmp
+/tmp/
+_TEMP/
+
+# CMake build dirs
+agents/windows-modern/build/
+agents/*/build/
+
+# Vagrant local state
+examples/vagrant/.vagrant/
+examples/vagrant/*.log

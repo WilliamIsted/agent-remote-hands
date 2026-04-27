@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""hostctl-discover — find Agent Remote Hands instances on the local LAN.
+
+Sends a mDNS PTR query for `_remote-hands._tcp.local.` to 224.0.0.251:5353
+and prints any agents that answer. Stdlib only. No third-party deps.
+
+Usage:
+    client/hostctl-discover                     # 2-second scan, print all hits
+    client/hostctl-discover --timeout 5         # longer scan
+    client/hostctl-discover --quiet --first     # exit on first hit, print just IP:port
+
+Output format (default):
+    192.168.1.42:8765   WINDEV-VM    os=windows-modern  protocol=1
+    192.168.1.51:8765   XP-VM-01     os=windows-nt      protocol=1
+"""
+import argparse
+import socket
+import struct
+import sys
+import time
+
+
+SERVICE = "_remote-hands._tcp.local."
+MDNS_GROUP = "224.0.0.251"
+MDNS_PORT = 5353
+
+
+def encode_dns_name(name):
+    """Pack 'foo._tcp.local.' as length-prefixed labels + 0x00 terminator."""
+    out = bytearray()
+    for label in name.strip(".").split("."):
+        b = label.encode("ascii")
+        out.append(len(b))
+        out.extend(b)
+    out.append(0)
+    return bytes(out)
+
+
+def decode_dns_name(pkt, offset):
+    """Returns (decoded_name, offset_past_name). Follows compression pointers."""
+    parts = []
+    final = None
+    visited = 0
+    while offset < len(pkt):
+        b = pkt[offset]
+        if b == 0:
+            offset += 1
+            if final is None:
+                final = offset
+            break
+        if (b & 0xC0) == 0xC0:
+            ptr = ((b & 0x3F) << 8) | pkt[offset + 1]
+            if final is None:
+                final = offset + 2
+            offset = ptr
+            visited += 1
+            if visited > 16:
+                raise ValueError("dns name pointer loop")
+            continue
+        parts.append(pkt[offset + 1 : offset + 1 + b].decode("ascii", errors="replace"))
+        offset += 1 + b
+    if final is None:
+        final = offset
+    return ".".join(parts) + ".", final
+
+
+def build_query(name, qtype):
+    txid = 0  # mDNS clients use 0
+    flags = 0  # standard query, no recursion
+    header = struct.pack(">HHHHHH", txid, flags, 1, 0, 0, 0)
+    qsection = encode_dns_name(name) + struct.pack(">HH", qtype, 1)
+    return header + qsection
+
+
+def parse_response(pkt):
+    """Parse a mDNS response. Returns dict keyed by 'instance' name with
+    dict of {'ptr', 'srv', 'txt', 'a', 'port'} fields populated as records
+    are seen."""
+    if len(pkt) < 12:
+        return {}
+    qd, an, ns, ar = struct.unpack(">HHHH", pkt[4:12])
+    offset = 12
+    # Skip questions
+    for _ in range(qd):
+        _, offset = decode_dns_name(pkt, offset)
+        offset += 4
+    found = {}
+    total = an + ns + ar
+    for _ in range(total):
+        try:
+            name, offset = decode_dns_name(pkt, offset)
+        except Exception:
+            return found
+        if offset + 10 > len(pkt):
+            return found
+        rtype, _rclass, _ttl, rdlen = struct.unpack(">HHIH", pkt[offset : offset + 10])
+        offset += 10
+        rdata = pkt[offset : offset + rdlen]
+        offset += rdlen
+
+        if rtype == 12:  # PTR
+            try:
+                target, _ = decode_dns_name(pkt, offset - rdlen)
+            except Exception:
+                continue
+            entry = found.setdefault(target.lower(), {})
+            entry["instance"] = target
+        elif rtype == 33:  # SRV
+            if rdlen >= 6:
+                _prio, _weight, port = struct.unpack(">HHH", rdata[:6])
+                try:
+                    target, _ = decode_dns_name(pkt, offset - rdlen + 6)
+                except Exception:
+                    target = ""
+                entry = found.setdefault(name.lower(), {})
+                entry["port"] = port
+                entry["target"] = target
+        elif rtype == 16:  # TXT
+            kvs = {}
+            i = 0
+            while i < len(rdata):
+                ln = rdata[i]
+                i += 1
+                if ln == 0 or i + ln > len(rdata):
+                    break
+                token = rdata[i : i + ln].decode("ascii", errors="replace")
+                i += ln
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    kvs[k] = v
+            entry = found.setdefault(name.lower(), {})
+            entry["txt"] = kvs
+        elif rtype == 1 and rdlen == 4:  # A
+            ip = ".".join(str(b) for b in rdata)
+            entry = found.setdefault(name.lower(), {})
+            entry["ip"] = ip
+    return found
+
+
+def discover(timeout, want_first):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+    sock.settimeout(0.5)
+
+    query = build_query(SERVICE, 12)  # PTR
+    try:
+        sock.sendto(query, (MDNS_GROUP, MDNS_PORT))
+    except OSError as e:
+        print(f"hostctl-discover: send failed: {e}", file=sys.stderr)
+        return []
+
+    deadline = time.time() + timeout
+    aggregated = {}
+    while time.time() < deadline:
+        try:
+            data, src = sock.recvfrom(4096)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        records = parse_response(data)
+        # The PTR target tells us the instance name (e.g. "windev-vm._remote-hands._tcp.local.")
+        for inst, info in records.items():
+            if not inst.endswith("._remote-hands._tcp.local."):
+                continue
+            agg = aggregated.setdefault(inst, {"src": src[0]})
+            agg.update(info)
+        # Try to splice in records from the same packet that aren't directly
+        # under instance keys but reference instance names.
+        for key, info in records.items():
+            if key in aggregated:
+                aggregated[key].update(info)
+        if want_first and any("ip" in v and "port" in v for v in aggregated.values()):
+            break
+    sock.close()
+
+    # Cross-link A records by host target. For each instance with a target
+    # but no ip, look up a corresponding A record in `aggregated`.
+    by_host = {k: v for k, v in aggregated.items() if "ip" in v}
+    for inst, info in aggregated.items():
+        if "target" in info and "ip" not in info:
+            tgt = info["target"].lower()
+            if tgt in by_host:
+                info["ip"] = by_host[tgt]["ip"]
+            elif inst in aggregated and aggregated[inst].get("src"):
+                info["ip"] = aggregated[inst]["src"]
+
+    results = []
+    for inst, info in aggregated.items():
+        if "port" not in info:
+            continue
+        ip = info.get("ip") or info.get("src", "?")
+        port = info["port"]
+        host = inst.split(".")[0]
+        txt = info.get("txt", {})
+        results.append({"ip": ip, "port": port, "host": host, "txt": txt})
+    return results
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--timeout", type=float, default=2.0,
+                   help="seconds to scan (default 2)")
+    p.add_argument("--first", action="store_true",
+                   help="exit on the first complete hit")
+    p.add_argument("--quiet", action="store_true",
+                   help="machine-readable output: just <ip>:<port> per line")
+    args = p.parse_args()
+
+    results = discover(args.timeout, args.first)
+    if not results:
+        if not args.quiet:
+            print("no agents found", file=sys.stderr)
+        return 1
+    for r in sorted(results, key=lambda r: (r["ip"], r["port"])):
+        if args.quiet:
+            print(f"{r['ip']}:{r['port']}")
+        else:
+            txt = "  ".join(f"{k}={v}" for k, v in sorted(r["txt"].items()))
+            print(f"{r['ip']}:{r['port']:<6} {r['host']:<24} {txt}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
