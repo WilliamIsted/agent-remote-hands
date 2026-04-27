@@ -271,6 +271,42 @@ static int capture_bmp(BYTE **out_buf, DWORD *out_size) {
     old_obj = SelectObject(hdc_mem, hbm);
     BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, 0, 0, SRCCOPY);
 
+    /* Overlay the OS cursor onto the captured bitmap. BitBlt doesn't include
+       the hardware cursor, but Claude needs to see where it is to compute
+       relative click positions when the game's own cursor isn't drawn.
+       VC6's stock SDK predates CURSORINFO, so we declare it manually --
+       GetCursorInfo lives in user32.dll on XP+. */
+    {
+        typedef struct tagCURSORINFO_ {
+            DWORD cbSize;
+            DWORD flags;
+            HCURSOR hCursor;
+            POINT ptScreenPos;
+        } CURSORINFO_;
+        typedef BOOL (WINAPI *PGetCursorInfo)(CURSORINFO_*);
+        static PGetCursorInfo pGetCursorInfo = NULL;
+        static int resolved = 0;
+        if (!resolved) {
+            HMODULE hUser = GetModuleHandle("user32.dll");
+            if (hUser) pGetCursorInfo = (PGetCursorInfo)GetProcAddress(hUser, "GetCursorInfo");
+            resolved = 1;
+        }
+        if (pGetCursorInfo) {
+            CURSORINFO_ ci;
+            ci.cbSize = sizeof(ci);
+            if (pGetCursorInfo(&ci) && (ci.flags & 0x00000001 /*CURSOR_SHOWING*/) && ci.hCursor) {
+                ICONINFO ii;
+                int hx = 0, hy = 0;
+                if (GetIconInfo(ci.hCursor, &ii)) {
+                    hx = (int)ii.xHotspot; hy = (int)ii.yHotspot;
+                    if (ii.hbmMask)  DeleteObject(ii.hbmMask);
+                    if (ii.hbmColor) DeleteObject(ii.hbmColor);
+                }
+                DrawIcon(hdc_mem, ci.ptScreenPos.x - hx, ci.ptScreenPos.y - hy, ci.hCursor);
+            }
+        }
+    }
+
     ZeroMemory(&bi, sizeof(bi));
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bi.bmiHeader.biWidth = w;
@@ -546,6 +582,76 @@ static int handle_command(SOCKET s, char *line) {
         char rsp[64];
         GetCursorPos(&p);
         _snprintf(rsp, sizeof(rsp), "OK %ld %ld\n", p.x, p.y);
+        send_str(s, rsp);
+        return 0;
+    }
+    if (!_stricmp(cmd, "WINMOVE")) {
+        /* WINMOVE <x> <y> <title>  — move the top-level window whose title
+           starts with <title> (case-insensitive) to screen position (x,y).
+           Used to align the AT.exe game window with our coord system. */
+        int x, y;
+        char title[128] = "";
+        HWND hwnd = NULL;
+        char rsp[64];
+        if (sscanf(arg, "%d %d %127[^\r\n]", &x, &y, title) < 3) {
+            send_err(s, "usage: WINMOVE x y title"); return 0;
+        }
+        {
+            /* Walk top-level windows looking for matching title prefix. */
+            HWND h = GetTopWindow(NULL);
+            int tlen = (int)strlen(title);
+            while (h) {
+                char buf[256];
+                if (GetWindowTextA(h, buf, sizeof(buf)) > 0) {
+                    if (_strnicmp(buf, title, tlen) == 0 && IsWindowVisible(h)) {
+                        hwnd = h; break;
+                    }
+                }
+                h = GetWindow(h, GW_HWNDNEXT);
+            }
+        }
+        if (!hwnd) { send_err(s, "window not found"); return 0; }
+        if (!SetWindowPos(hwnd, HWND_TOP, x, y, 0, 0,
+                          SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW)) {
+            send_err(s, "SetWindowPos failed"); return 0;
+        }
+        SetForegroundWindow(hwnd);
+        {
+            RECT r; GetWindowRect(hwnd, &r);
+            _snprintf(rsp, sizeof(rsp), "OK %ld %ld %ld %ld\n",
+                      r.left, r.top, r.right - r.left, r.bottom - r.top);
+        }
+        send_str(s, rsp);
+        return 0;
+    }
+    if (!_stricmp(cmd, "WINFIND")) {
+        /* WINFIND <title> — return rect of window matching title prefix.
+           Useful to discover where AT.exe currently is. */
+        char title[128] = "";
+        HWND hwnd = NULL;
+        char rsp[128];
+        if (sscanf(arg, "%127[^\r\n]", title) < 1) {
+            send_err(s, "usage: WINFIND title"); return 0;
+        }
+        {
+            HWND h = GetTopWindow(NULL);
+            int tlen = (int)strlen(title);
+            while (h) {
+                char buf[256];
+                if (GetWindowTextA(h, buf, sizeof(buf)) > 0) {
+                    if (_strnicmp(buf, title, tlen) == 0 && IsWindowVisible(h)) {
+                        hwnd = h; break;
+                    }
+                }
+                h = GetWindow(h, GW_HWNDNEXT);
+            }
+        }
+        if (!hwnd) { send_err(s, "window not found"); return 0; }
+        {
+            RECT r; GetWindowRect(hwnd, &r);
+            _snprintf(rsp, sizeof(rsp), "OK %ld %ld %ld %ld\n",
+                      r.left, r.top, r.right - r.left, r.bottom - r.top);
+        }
         send_str(s, rsp);
         return 0;
     }

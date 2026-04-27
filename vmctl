@@ -85,7 +85,11 @@ def recv_n(sock, n):
 
 
 def send_cmd(sock, line, payload=None):
-    sock.sendall((line + "\n").encode())
+    # Use latin-1 (≈ Win-1252 for the bytes we care about) so non-ASCII chars
+    # like 'ü' arrive as their single-byte ANSI value (0xFC), matching what
+    # CreateProcessA / xcopy expect on a Western-codepage Windows. Default
+    # .encode() would use UTF-8 and break path lookups containing umlauts.
+    sock.sendall((line + "\n").encode("latin-1", errors="replace"))
     if payload is not None:
         sock.sendall(payload)
 
@@ -216,6 +220,8 @@ def main():
         "keyup":   lambda: f"KEYUP {args[0]}",
         "sleep":   lambda: f"SLEEP {args[0]}",
         "raw":     lambda: " ".join(args),
+        "winmove": lambda: f"WINMOVE {args[0]} {args[1]} {' '.join(args[2:])}",
+        "winfind": lambda: f"WINFIND {' '.join(args)}",
     }
     if cmd in SIMPLE:
         try:
