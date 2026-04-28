@@ -70,6 +70,7 @@ target_sources(remote-hands-core PRIVATE
     src/image_encode.cpp
     src/subscription.cpp
     src/crash_check.cpp
+    src/mdns.cpp
     # verbs (one file per namespace)
     src/verbs/system.cpp
     src/verbs/window.cpp

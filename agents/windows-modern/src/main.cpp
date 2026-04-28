@@ -27,10 +27,12 @@
 
 #include "config.hpp"
 #include "log.hpp"
+#include "mdns.hpp"
 #include "server.hpp"
 
 #include <atomic>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 
 #define WIN32_LEAN_AND_MEAN
@@ -106,8 +108,22 @@ int wmain(int argc, wchar_t* argv[]) try {
 
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 
+    // Optional mDNS advertisement (`-Discoverable` / REMOTE_HANDS_DISCOVERABLE=1).
+    std::unique_ptr<rh::mdns::Responder> mdns_responder;
+    if (config.discoverable) {
+        rh::mdns::Config mdns_cfg{};
+        mdns_cfg.tcp_port = config.port;
+        mdns_responder = std::make_unique<rh::mdns::Responder>(std::move(mdns_cfg));
+        mdns_responder->start();
+    }
+
     rh::Server server{config};
     server.run([] { return g_shutdown_requested.load(); });
+
+    if (mdns_responder) {
+        mdns_responder->stop();
+        mdns_responder.reset();
+    }
 
     rh::log::info(L"Agent shutting down cleanly");
     return 0;
