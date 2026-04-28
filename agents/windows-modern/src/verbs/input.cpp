@@ -29,6 +29,7 @@
 // no-op'ing as v1 did.
 
 #include "../connection.hpp"
+#include "../crash_check.hpp"
 #include "../errors.hpp"
 #include "../json.hpp"
 #include "../log.hpp"
@@ -240,6 +241,7 @@ void click(Connection& conn, const wire::Request& req) {
         }
     }
 
+    if (!crash_check::check_focus_or_fail(conn)) return;
     if (!uipi::check_foreground_or_fail(conn)) return;
 
     SetCursorPos(x, y);
@@ -273,6 +275,7 @@ void scroll(Connection& conn, const wire::Request& req) {
         return;
     }
 
+    if (!crash_check::check_focus_or_fail(conn)) return;
     if (!uipi::check_foreground_or_fail(conn)) return;
 
     SetCursorPos(x, y);
@@ -311,6 +314,7 @@ void key(Connection& conn, const wire::Request& req) {
         }
     }
 
+    if (!crash_check::check_focus_or_fail(conn)) return;
     if (!uipi::check_foreground_or_fail(conn)) return;
 
     std::vector<INPUT> inputs;
@@ -358,6 +362,7 @@ void type(Connection& conn, const wire::Request& req) {
 
     auto payload = conn.reader().read_payload(static_cast<std::size_t>(length));
 
+    if (!crash_check::check_focus_or_fail(conn)) return;
     if (!uipi::check_foreground_or_fail(conn)) return;
 
     if (payload.empty()) {

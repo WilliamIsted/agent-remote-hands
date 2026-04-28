@@ -69,6 +69,7 @@ target_sources(remote-hands-core PRIVATE
     src/screen_capture.cpp
     src/image_encode.cpp
     src/subscription.cpp
+    src/crash_check.cpp
     # verbs (one file per namespace)
     src/verbs/system.cpp
     src/verbs/window.cpp

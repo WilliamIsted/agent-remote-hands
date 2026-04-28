@@ -62,6 +62,16 @@ public:
     ElementTable&           element_table() noexcept { return *element_table_; }
     SubscriptionRegistry&   subscriptions() noexcept { return *subscriptions_; }
 
+    // Crash-detection focus tracking (see crash_check.hpp).
+    // window.focus calls note_focus_target() on success. Input verbs
+    // consult focus_track_*() through crash_check::check_focus_or_fail().
+    void note_focus_target(HWND hwnd, DWORD pid) noexcept {
+        focus_track_hwnd_ = hwnd;
+        focus_track_pid_  = pid;
+    }
+    HWND  focus_track_hwnd() const noexcept { return focus_track_hwnd_; }
+    DWORD focus_track_pid()  const noexcept { return focus_track_pid_; }
+
 private:
     enum class State {
         PreHello,
@@ -93,6 +103,9 @@ private:
 
     std::unique_ptr<ElementTable>          element_table_;
     std::unique_ptr<SubscriptionRegistry>  subscriptions_;
+
+    HWND   focus_track_hwnd_ = nullptr;
+    DWORD  focus_track_pid_  = 0;
 };
 
 }  // namespace remote_hands

@@ -283,6 +283,13 @@ void focus(Connection& conn, const wire::Request& req) {
         return;
     }
 
+    // Record the focused target so subsequent input verbs on this connection
+    // can short-circuit with ERR target_gone if the foreground switches away
+    // (see crash_check.hpp / closes #46).
+    DWORD pid = 0;
+    GetWindowThreadProcessId(target, &pid);
+    conn.note_focus_target(target, pid);
+
     std::string body = "{";
     json::append_kv_string(body, "prior_hwnd", hwnd_to_string(prior));
     body += '}';
