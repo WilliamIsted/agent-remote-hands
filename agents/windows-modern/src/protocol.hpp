@@ -49,6 +49,12 @@ struct Request {
     std::vector<std::string>    args;   // whitespace-separated tokens after the verb
 };
 
+// Tokenises a header line (with any trailing \r already stripped) on single
+// spaces into a Request. Empty tokens are skipped (so runs of spaces don't
+// produce empty args). Exposed publicly so unit tests can exercise it
+// without spinning up a socket.
+Request tokenize_header(std::string_view line);
+
 // Reads framed messages from a connected TCP socket.
 // Not thread-safe (one reader per connection thread).
 class Reader {

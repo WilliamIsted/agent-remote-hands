@@ -28,9 +28,8 @@ namespace {
 
 constexpr std::size_t kReadChunkBytes = 4096;
 
-// Tokenises a header line (which has had any trailing \r stripped) on single
-// spaces into a Request. Empty tokens are skipped (so runs of spaces don't
-// produce empty args).
+}  // namespace
+
 Request tokenize_header(std::string_view line) {
     Request req;
     std::size_t start = 0;
@@ -56,8 +55,6 @@ Request tokenize_header(std::string_view line) {
     }
     return req;
 }
-
-}  // namespace
 
 // ---------------------------------------------------------------------------
 // Reader

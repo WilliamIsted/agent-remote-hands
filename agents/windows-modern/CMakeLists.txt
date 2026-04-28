@@ -45,10 +45,18 @@ if(MSVC)
     )
 endif()
 
-add_executable(remote-hands)
+option(REMOTE_HANDS_BUILD_TESTS
+       "Build unit tests (fetches doctest from GitHub at configure time)" OFF)
 
-target_sources(remote-hands PRIVATE
-    src/main.cpp
+# ---------------------------------------------------------------------------
+# Core library — every translation unit except the entry point.
+#
+# Both the agent executable and the unit-test executable link against this so
+# tests can exercise the same code paths the production binary uses.
+
+add_library(remote-hands-core STATIC)
+
+target_sources(remote-hands-core PRIVATE
     src/config.cpp
     src/server.cpp
     src/protocol.cpp
@@ -74,9 +82,9 @@ target_sources(remote-hands PRIVATE
     src/verbs/watch.cpp
 )
 
-target_include_directories(remote-hands PRIVATE src)
+target_include_directories(remote-hands-core PUBLIC src)
 
-target_link_libraries(remote-hands PRIVATE
+target_link_libraries(remote-hands-core PUBLIC
     ws2_32              # Winsock
     iphlpapi            # GetAdaptersAddresses (mDNS)
     user32              # input + window APIs
@@ -89,16 +97,51 @@ target_link_libraries(remote-hands PRIVATE
     windowscodecs       # WIC (PNG encoder)
     bcrypt              # BCryptGenRandom (token entropy)
     powrprof            # SetSuspendState (system.hibernate / sleep)
+    shlwapi             # PathMatchSpec (watch.file)
 )
+
+# ---------------------------------------------------------------------------
+# Agent executable
+
+add_executable(remote-hands src/main.cpp)
+target_link_libraries(remote-hands PRIVATE remote-hands-core)
 
 set_target_properties(remote-hands PROPERTIES
     OUTPUT_NAME "remote-hands"
     SUFFIX ".exe"
 )
 
-# Use the wide-character entry point (wmain).
 if(MSVC)
     set_target_properties(remote-hands PROPERTIES
         LINK_FLAGS "/SUBSYSTEM:CONSOLE /ENTRY:wmainCRTStartup"
     )
+endif()
+
+# ---------------------------------------------------------------------------
+# Unit tests (doctest, opt-in)
+
+if(REMOTE_HANDS_BUILD_TESTS)
+    include(FetchContent)
+    FetchContent_Declare(
+        doctest
+        GIT_REPOSITORY https://github.com/doctest/doctest.git
+        GIT_TAG        v2.4.11
+    )
+    FetchContent_MakeAvailable(doctest)
+
+    add_executable(remote-hands-tests
+        tests/unit/test_main.cpp
+        tests/unit/json_test.cpp
+        tests/unit/errors_test.cpp
+        tests/unit/tier_test.cpp
+        tests/unit/wire_test.cpp
+    )
+
+    target_link_libraries(remote-hands-tests PRIVATE
+        remote-hands-core
+        doctest::doctest
+    )
+
+    enable_testing()
+    add_test(NAME unit COMMAND remote-hands-tests)
 endif()

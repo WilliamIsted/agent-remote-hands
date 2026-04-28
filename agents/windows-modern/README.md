@@ -50,15 +50,33 @@ The agent logs to stderr and `OutputDebugString` (visible in DebugView). Use `--
 - `src/connection.{hpp,cpp}` — per-connection state machine (added in build phase 3)
 - `src/verbs/*.cpp` — per-namespace verb handlers (added in build phases 5–14)
 
-## Conformance
+## Tests
 
-Run the conformance suite against a running agent:
+### Unit tests
+
+Pure-logic modules (framing tokeniser, JSON helpers, error codes, tier model)
+are covered by [doctest](https://github.com/doctest/doctest), fetched at
+configure time. Build with `-DREMOTE_HANDS_BUILD_TESTS=ON`:
+
+```powershell
+cmake -S . -B build -A x64 -DREMOTE_HANDS_BUILD_TESTS=ON
+cmake --build build --config Debug
+.\build\Debug\remote-hands-tests.exe
+```
+
+Test files live under `tests/unit/`, one per module under test.
+
+### Conformance suite
+
+Runs against a built and running agent — covers the OS-touching surface that
+unit tests deliberately skip (Win32, COM, real sockets):
 
 ```bash
 python ../../tests/conformance/run.py <host> 8765
 ```
 
-Tests gate on advertised capabilities — verbs the agent doesn't implement get the test skipped, not failed.
+Tests gate on advertised capabilities — verbs the agent doesn't implement get
+the test skipped, not failed.
 
 ## License
 
