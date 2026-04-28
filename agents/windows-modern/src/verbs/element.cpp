@@ -44,6 +44,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <objbase.h>          // Defines `interface` macro before UIA headers.
 #include <UIAutomation.h>
 #include <wrl/client.h>
 
@@ -206,7 +207,7 @@ std::string value_pattern_value(IUIAutomationElement* elem) {
 void append_element_object(std::string& out,
                            const std::string& id,
                            IUIAutomationElement* elem) {
-    LONG ctype = UIA_CustomControlTypeId;
+    CONTROLTYPEID ctype = UIA_CustomControlTypeId;
     elem->get_CurrentControlType(&ctype);
 
     BSTR name_bstr = nullptr;
@@ -499,7 +500,7 @@ void find(Connection& conn, const wire::Request& req) {
         ComPtr<IUIAutomationElement> elem;
         if (FAILED(arr->GetElement(i, &elem)) || !elem) continue;
 
-        LONG ctype = 0;
+        CONTROLTYPEID ctype = 0;
         if (FAILED(elem->get_CurrentControlType(&ctype))) continue;
         if (role_arg != role_token(ctype)) continue;
 

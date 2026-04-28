@@ -227,7 +227,7 @@ struct Responder::Impl {
         }
 
         ip_mreq mreq{};
-        mreq.imr_multiaddr.s_addr = inet_addr(kMulticastAddr);
+        inet_pton(AF_INET, kMulticastAddr, &mreq.imr_multiaddr);
         mreq.imr_interface.s_addr = htonl(INADDR_ANY);
         if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP,
                        reinterpret_cast<const char*>(&mreq),
@@ -265,9 +265,9 @@ struct Responder::Impl {
                   hostname.c_str(), "remote-hands", cfg.tcp_port);
 
         sockaddr_in mcast{};
-        mcast.sin_family      = AF_INET;
-        mcast.sin_addr.s_addr = inet_addr(kMulticastAddr);
-        mcast.sin_port        = htons(kMulticastPort);
+        mcast.sin_family = AF_INET;
+        inet_pton(AF_INET, kMulticastAddr, &mcast.sin_addr);
+        mcast.sin_port   = htons(kMulticastPort);
 
         char buf[2048];
         while (!stop_requested.load()) {

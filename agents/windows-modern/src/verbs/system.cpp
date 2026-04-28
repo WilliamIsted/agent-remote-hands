@@ -33,8 +33,10 @@
 #include "../log.hpp"
 #include "../sysinfo.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 #define WIN32_LEAN_AND_MEAN
@@ -232,22 +234,19 @@ void do_power(Connection& conn, UINT exit_flags, const wire::Request& req) {
 
     if (args.force) exit_flags |= EWX_FORCE;
 
-    DWORD reason = SHTDN_REASON_MAJOR_OPERATINGSYSTEM | SHTDN_REASON_FLAG_PLANNED;
+    const DWORD reason =
+        SHTDN_REASON_MAJOR_OPERATINGSYSTEM | SHTDN_REASON_FLAG_PLANNED;
 
     if (args.delay_seconds > 0) {
-        const DWORD r = InitiateShutdownW(
-            nullptr,
-            nullptr,
-            args.delay_seconds,
-            exit_flags | SHUTDOWN_GRACE_PERIOD,
-            reason);
-        if (r != ERROR_SUCCESS) {
-            char detail[64];
-            std::snprintf(detail, sizeof(detail),
-                          "{\"win32_error\":%lu}", r);
-            conn.writer().write_err(ErrorCode::NotSupported, detail);
-            return;
-        }
+        // Honour --delay by sleeping in a detached thread, then calling
+        // ExitWindowsEx. We don't use InitiateShutdownW here because its
+        // SHUTDOWN_* flag set is incompatible with the EWX_* flags the
+        // caller has chosen, and ExitWindowsEx covers reboot / shutdown /
+        // logoff uniformly. Trade-off: no "Windows is shutting down" toast.
+        std::thread([exit_flags, reason, delay = args.delay_seconds]() {
+            std::this_thread::sleep_for(std::chrono::seconds(delay));
+            ExitWindowsEx(exit_flags, reason);
+        }).detach();
     } else {
         if (!ExitWindowsEx(exit_flags, reason)) {
             char detail[64];

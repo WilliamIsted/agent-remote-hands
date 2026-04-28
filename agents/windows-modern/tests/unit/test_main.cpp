@@ -15,5 +15,10 @@
 // doctest entry point. The implementation symbol must live in exactly one
 // translation unit; everything else just `#include <doctest/doctest.h>`.
 
+// MSVC 14.44's <string_view> declares helpers that use basic_ostream<>; under
+// /permissive- the bodies are parsed eagerly, so <ostream> must already be
+// complete before any header that pulls in <string_view>. doctest does.
+#include <ostream>
+
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>

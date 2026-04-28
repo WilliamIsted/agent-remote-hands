@@ -53,6 +53,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <objbase.h>          // Defines `interface` macro before UIA headers.
 #include <UIAutomation.h>
 #include <wrl/client.h>
 #include <shlwapi.h>

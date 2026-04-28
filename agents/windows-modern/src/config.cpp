@@ -15,6 +15,7 @@
 #include "config.hpp"
 
 #include <cstdlib>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -48,6 +49,18 @@ std::uint16_t parse_port(const wchar_t* s) {
     return static_cast<std::uint16_t>(v);
 }
 
+// RAII wrapper around `_wdupenv_s`. Returns nullptr if the variable is unset
+// or allocation fails; the buffer is freed automatically when the unique_ptr
+// goes out of scope.
+using EnvBuf = std::unique_ptr<wchar_t, decltype(&std::free)>;
+
+EnvBuf get_env(const wchar_t* name) {
+    wchar_t* raw = nullptr;
+    size_t   len = 0;
+    if (_wdupenv_s(&raw, &len, name) != 0) raw = nullptr;
+    return EnvBuf{raw, std::free};
+}
+
 [[noreturn]] void print_usage_and_exit() {
     std::wprintf(LR"(Agent Remote Hands - windows-modern v2 agent
 
@@ -78,14 +91,14 @@ Config Config::parse(int argc, wchar_t* argv[]) {
     c.token_path = default_token_path();
 
     // Environment first.
-    if (auto* env_port = _wgetenv(L"REMOTE_HANDS_PORT"); env_port && *env_port) {
-        c.port = parse_port(env_port);
+    if (auto env_port = get_env(L"REMOTE_HANDS_PORT"); env_port && *env_port) {
+        c.port = parse_port(env_port.get());
     }
-    if (auto* env_disc = _wgetenv(L"REMOTE_HANDS_DISCOVERABLE"); env_disc) {
-        c.discoverable = (std::wstring_view{env_disc} == L"1");
+    if (auto env_disc = get_env(L"REMOTE_HANDS_DISCOVERABLE"); env_disc) {
+        c.discoverable = (std::wstring_view{env_disc.get()} == L"1");
     }
-    if (auto* env_token = _wgetenv(L"REMOTE_HANDS_TOKEN_PATH"); env_token && *env_token) {
-        c.token_path = env_token;
+    if (auto env_token = get_env(L"REMOTE_HANDS_TOKEN_PATH"); env_token && *env_token) {
+        c.token_path = env_token.get();
     }
 
     // CLI overrides.

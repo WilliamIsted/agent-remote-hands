@@ -12,6 +12,7 @@
 //   See the License for the specific language governing permissions and
 //   limitations under the License.
 
+#include <ostream>           // see test_main.cpp — needed before doctest under MSVC /permissive-
 #include <doctest/doctest.h>
 
 #include "errors.hpp"

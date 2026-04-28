@@ -24,12 +24,16 @@ if(NOT WIN32)
     message(FATAL_ERROR "windows-modern target requires Windows")
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# WIN32_LEAN_AND_MEAN is defined per-source-file before `#include <windows.h>`
+# rather than at compile-line scope, so we don't double-define it (which produces
+# a C4005 "macro redefinition" warning per TU). NOMINMAX MUST be a compile-line
+# definition because windows.h's min/max macros otherwise leak into <algorithm>'s
+# std::min/std::max usages and produce 100+ cascading parse errors.
 add_compile_definitions(
-    WIN32_LEAN_AND_MEAN
     NOMINMAX
     UNICODE
     _UNICODE
@@ -125,6 +129,11 @@ endif()
 
 if(REMOTE_HANDS_BUILD_TESTS)
     include(FetchContent)
+    # doctest v2.4.11's CMakeLists.txt declares `cmake_minimum_required(VERSION 3.0)`.
+    # CMake 4.x deprecates anything below 3.10 ("Compatibility with CMake < 3.10
+    # will be removed"). Override the floor for the sub-project so we don't have
+    # to pass -DCMAKE_POLICY_VERSION_MINIMUM=3.10 on every configure.
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
     FetchContent_Declare(
         doctest
         GIT_REPOSITORY https://github.com/doctest/doctest.git

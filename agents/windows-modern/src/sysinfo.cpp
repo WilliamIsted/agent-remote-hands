@@ -145,9 +145,12 @@ std::vector<std::string> enabled_privileges() {
             (la.Attributes & SE_PRIVILEGE_ENABLED_BY_DEFAULT) == 0) {
             continue;
         }
+        // Copy the LUID out of the const TOKEN_PRIVILEGES; LookupPrivilegeNameW
+        // takes PLUID (non-const) even though it doesn't modify it.
+        LUID    luid     = la.Luid;
         wchar_t name[64] = {};
         DWORD   name_len = static_cast<DWORD>(std::size(name));
-        if (LookupPrivilegeNameW(nullptr, &la.Luid, name, &name_len)) {
+        if (LookupPrivilegeNameW(nullptr, &luid, name, &name_len)) {
             out.push_back(narrow(name, name_len));
         }
     }
