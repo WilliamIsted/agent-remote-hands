@@ -21,6 +21,12 @@
 
 namespace remote_hands {
 
+// Process-wide last-activity timestamp (Unix milliseconds). Updated on each
+// accepted connection; read by the optional watchdog thread (see main.cpp,
+// gated by `--watchdog`). Never decreases.
+long long last_activity_ms() noexcept;
+void      poke_activity() noexcept;
+
 // TCP listener + connection accept loop.
 //
 // Construction binds and listens on the configured port. run() blocks until

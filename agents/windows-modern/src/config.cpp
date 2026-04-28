@@ -72,6 +72,10 @@ Options:
   --token-path <path>     Path to the elevation token file
                           (default: %%ProgramData%%\AgentRemoteHands\token)
   --max-connections <n>   Concurrent connection cap (default: 4)
+  --idle-timeout <s>      Drop connections idle for this many seconds (default: 0 = off)
+  --watchdog <s>          Self-exit if no connection activity for this many
+                          seconds (default: 0 = off; pair with Task Scheduler
+                          restart-on-failure for unattended recovery)
   --install               Register the autostart logon-task and exit
   --uninstall             Remove the autostart task and exit
   -h, --help              Show this help and exit
@@ -80,6 +84,8 @@ Environment variables (overridden by CLI flags):
   REMOTE_HANDS_PORT
   REMOTE_HANDS_DISCOVERABLE   (set to "1" to enable)
   REMOTE_HANDS_TOKEN_PATH
+  REMOTE_HANDS_IDLE_TIMEOUT   (seconds)
+  REMOTE_HANDS_WATCHDOG       (seconds)
 )");
     std::exit(0);
 }
@@ -100,6 +106,14 @@ Config Config::parse(int argc, wchar_t* argv[]) {
     if (auto env_token = get_env(L"REMOTE_HANDS_TOKEN_PATH"); env_token && *env_token) {
         c.token_path = env_token.get();
     }
+    if (auto env_idle = get_env(L"REMOTE_HANDS_IDLE_TIMEOUT"); env_idle && *env_idle) {
+        c.idle_timeout_seconds = static_cast<unsigned int>(
+            std::wcstoul(env_idle.get(), nullptr, 10));
+    }
+    if (auto env_wd = get_env(L"REMOTE_HANDS_WATCHDOG"); env_wd && *env_wd) {
+        c.watchdog_seconds = static_cast<unsigned int>(
+            std::wcstoul(env_wd.get(), nullptr, 10));
+    }
 
     // CLI overrides.
     for (int i = 1; i < argc; ++i) {
@@ -116,6 +130,12 @@ Config Config::parse(int argc, wchar_t* argv[]) {
                 throw std::runtime_error("--max-connections must be 1..1024");
             }
             c.max_connections = static_cast<int>(v);
+        } else if (arg == L"--idle-timeout" && i + 1 < argc) {
+            c.idle_timeout_seconds = static_cast<unsigned int>(
+                std::wcstoul(argv[++i], nullptr, 10));
+        } else if (arg == L"--watchdog" && i + 1 < argc) {
+            c.watchdog_seconds = static_cast<unsigned int>(
+                std::wcstoul(argv[++i], nullptr, 10));
         } else if (arg == L"--install") {
             c.install_mode = InstallMode::Install;
         } else if (arg == L"--uninstall") {

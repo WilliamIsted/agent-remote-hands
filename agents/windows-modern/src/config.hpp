@@ -33,6 +33,13 @@ struct Config {
     bool                    discoverable    = false;
     std::filesystem::path   token_path;       // Default: %ProgramData%\AgentRemoteHands\token
     int                     max_connections = 4;
+    // Per-connection idle-receive timeout in seconds. Connections with no
+    // activity for longer than this are dropped; 0 disables.
+    unsigned int            idle_timeout_seconds = 0;
+    // Whole-agent watchdog in seconds. If no connection activity occurs for
+    // longer than this, the agent self-exits (Task Scheduler is then expected
+    // to restart it). 0 disables.
+    unsigned int            watchdog_seconds     = 0;
     InstallMode             install_mode    = InstallMode::Run;
 
     // Parses argc / argv (wide-char) and returns a populated Config.

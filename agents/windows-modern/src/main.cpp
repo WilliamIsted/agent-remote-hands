@@ -32,9 +32,11 @@
 #include "server.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <thread>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -120,7 +122,35 @@ int wmain(int argc, wchar_t* argv[]) try {
     }
 
     rh::Server server{config};
+
+    // Optional watchdog (`--watchdog <s>` / REMOTE_HANDS_WATCHDOG): self-exits
+    // the agent if no connection activity has been seen for the configured
+    // window. Pair with Task Scheduler restart-on-failure for unattended
+    // recovery from wedged states.
+    std::thread watchdog_thread;
+    if (config.watchdog_seconds > 0) {
+        const auto window_ms = static_cast<long long>(config.watchdog_seconds) * 1000LL;
+        rh::log::info(L"Watchdog enabled: self-exit after %us idle",
+                      config.watchdog_seconds);
+        watchdog_thread = std::thread([window_ms] {
+            while (!g_shutdown_requested.load()) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                const long long now =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                if (now - rh::last_activity_ms() > window_ms) {
+                    rh::log::warning(L"Watchdog: no activity for the configured "
+                                     L"window; requesting shutdown");
+                    g_shutdown_requested.store(true);
+                    return;
+                }
+            }
+        });
+    }
+
     server.run([] { return g_shutdown_requested.load(); });
+
+    if (watchdog_thread.joinable()) watchdog_thread.join();
 
     if (mdns_responder) {
         mdns_responder->stop();

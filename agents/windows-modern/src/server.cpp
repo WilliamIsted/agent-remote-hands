@@ -34,6 +34,29 @@
 
 namespace remote_hands {
 
+namespace {
+
+std::atomic<long long>& last_activity_atomic() noexcept {
+    static std::atomic<long long> v{
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count()};
+    return v;
+}
+
+}  // namespace
+
+long long last_activity_ms() noexcept { return last_activity_atomic().load(); }
+
+void poke_activity() noexcept {
+    const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    auto& v = last_activity_atomic();
+    long long prev = v.load();
+    while (prev < now && !v.compare_exchange_weak(prev, now)) {
+        // retry on contention
+    }
+}
+
 struct Server::Impl {
     Config                              config;
     SOCKET                              listen_socket   = INVALID_SOCKET;
@@ -102,6 +125,18 @@ struct Server::Impl {
             inet_ntop(AF_INET, &client_addr.sin_addr, ipbuf, sizeof(ipbuf));
             log::info(L"Accepted connection from %hs:%u",
                       ipbuf, static_cast<unsigned>(ntohs(client_addr.sin_port)));
+
+            poke_activity();
+
+            // Per-connection idle-receive timeout (--idle-timeout / env var).
+            // SO_RCVTIMEO is in milliseconds; recv() returns WSAETIMEDOUT
+            // after the configured period of silence, which the connection
+            // loop treats as an EOF and shuts down cleanly.
+            if (config.idle_timeout_seconds > 0) {
+                const DWORD ms = config.idle_timeout_seconds * 1000U;
+                setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                           reinterpret_cast<const char*>(&ms), sizeof(ms));
+            }
 
             if (active_connections.load() >= config.max_connections) {
                 refuse_busy(client);
