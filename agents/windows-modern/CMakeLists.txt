@@ -57,6 +57,7 @@ target_sources(remote-hands PRIVATE
     src/capabilities.cpp
     src/sysinfo.cpp
     src/uipi.cpp
+    src/element_table.cpp
     # verbs (one file per namespace)
     src/verbs/system.cpp
     src/verbs/window.cpp
@@ -65,7 +66,8 @@ target_sources(remote-hands PRIVATE
     src/verbs/registry.cpp
     src/verbs/process.cpp
     src/verbs/file.cpp
-    # Future namespaces: screen, element, watch.
+    src/verbs/element.cpp
+    # Future namespaces: screen, watch.
 )
 
 target_include_directories(remote-hands PRIVATE src)

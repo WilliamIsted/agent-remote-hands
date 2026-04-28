@@ -92,6 +92,20 @@ namespace file_verbs {
     void rename(Connection&, const wire::Request&);
 }  // namespace file_verbs
 
+namespace element_verbs {
+    void list(Connection&, const wire::Request&);
+    void tree(Connection&, const wire::Request&);
+    void at(Connection&, const wire::Request&);
+    void find(Connection&, const wire::Request&);
+    void invoke(Connection&, const wire::Request&);
+    void toggle(Connection&, const wire::Request&);
+    void expand(Connection&, const wire::Request&);
+    void collapse(Connection&, const wire::Request&);
+    void focus(Connection&, const wire::Request&);
+    void text(Connection&, const wire::Request&);
+    void set_text(Connection&, const wire::Request&);
+}  // namespace element_verbs
+
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -154,7 +168,20 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"file.mkdir",                 {Tier::Drive,   &file_verbs::mkdir}},
         {"file.rename",                {Tier::Drive,   &file_verbs::rename}},
 
-        // Future phases register screen.*, element.*, watch.* here.
+        // element.*
+        {"element.list",               {Tier::Observe, &element_verbs::list}},
+        {"element.tree",               {Tier::Observe, &element_verbs::tree}},
+        {"element.at",                 {Tier::Observe, &element_verbs::at}},
+        {"element.find",               {Tier::Observe, &element_verbs::find}},
+        {"element.invoke",             {Tier::Drive,   &element_verbs::invoke}},
+        {"element.toggle",             {Tier::Drive,   &element_verbs::toggle}},
+        {"element.expand",             {Tier::Drive,   &element_verbs::expand}},
+        {"element.collapse",           {Tier::Drive,   &element_verbs::collapse}},
+        {"element.focus",              {Tier::Drive,   &element_verbs::focus}},
+        {"element.text",               {Tier::Observe, &element_verbs::text}},
+        {"element.set_text",           {Tier::Drive,   &element_verbs::set_text}},
+
+        // Future phases register screen.*, watch.* here.
     };
     return kVerbs;
 }

@@ -15,6 +15,7 @@
 #include "connection.hpp"
 
 #include "capabilities.hpp"
+#include "element_table.hpp"
 #include "log.hpp"
 
 #include <stdexcept>
@@ -58,7 +59,8 @@ Connection::Connection(SOCKET socket,
       token_store_{std::move(token_store)},
       max_connections_{max_connections},
       reader_{socket},
-      writer_{socket} {}
+      writer_{socket},
+      element_table_{std::make_unique<ElementTable>()} {}
 
 Connection::~Connection() {
     if (socket_ != INVALID_SOCKET) {

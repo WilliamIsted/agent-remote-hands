@@ -37,6 +37,8 @@
 
 namespace remote_hands {
 
+class ElementTable;  // see element_table.hpp; held by every Connection
+
 class Connection {
 public:
     Connection(SOCKET socket,
@@ -56,6 +58,7 @@ public:
     wire::Writer&   writer() noexcept { return writer_; }
     Tier            tier()   const noexcept { return tier_; }
     int             max_connections() const noexcept { return max_connections_; }
+    ElementTable&   element_table() noexcept { return *element_table_; }
 
 private:
     enum class State {
@@ -85,6 +88,8 @@ private:
 
     State           state_  = State::PreHello;
     Tier            tier_   = Tier::Observe;
+
+    std::unique_ptr<ElementTable>       element_table_;
 };
 
 }  // namespace remote_hands
