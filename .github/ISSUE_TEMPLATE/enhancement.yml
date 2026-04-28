@@ -1,0 +1,42 @@
+name: Enhancement
+description: New verb, new MCP tool, new capability, ergonomic improvement
+title: "[enhancement] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: gap
+    attributes:
+      label: What's the gap?
+      description: What can't be expressed today, or what's awkward about how it's expressed?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Verb shape, capability flag, MCP tool wrapper, etc.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      description: What does this touch?
+      options:
+        - "Wire protocol (PROTOCOL.md + agent + conformance test)"
+        - "MCP server only"
+        - "Tooling / installer"
+        - "Documentation only"
+        - "Other"
+    validations:
+      required: true
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Suggested milestone
+      description: Maintainers may reassign during triage.
+      options:
+        - "v1.0 (protocol + tier system + agent-feedback)"
+        - "v2.0 (privsep dispatcher)"
+        - "v3.0 (SSPI auth + caller impersonation)"
+        - "Unsure"

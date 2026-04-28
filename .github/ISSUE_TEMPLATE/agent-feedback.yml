@@ -1,0 +1,61 @@
+name: Agent feedback
+description: Friction or gap surfaced by an LLM agent using the tool in a real task
+title: "[agent-feedback] "
+labels: ["agent-feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when an LLM agent (Claude, GPT, etc.) hit a friction point, observability hole, or gap while driving the agent in a real task. The goal is concrete diagnostic evidence — not feature wishes (use the Enhancement template for those).
+  - type: dropdown
+    id: provenance
+    attributes:
+      label: Was this issue body authored by an LLM?
+      description: If yes, please also apply the `agent-authored` label after filing.
+      options:
+        - "Yes"
+        - "No"
+        - "Partly"
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Client surface
+      description: How was the agent being driven when this surfaced?
+      options:
+        - "MCP server"
+        - "Raw TCP (`client/hostctl` or custom)"
+        - "Both / unclear"
+        - "Other"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What was attempted, and what happened
+      description: Concrete actions and observed responses. Verb names, return shapes, and any error text help.
+    validations:
+      required: true
+  - type: textarea
+    id: what-expected
+    attributes:
+      label: What was expected
+      description: What the protocol / tool should have done — or how it should have surfaced the failure if failure was correct.
+    validations:
+      required: true
+  - type: textarea
+    id: cost
+    attributes:
+      label: Time cost / impact
+      description: Roughly how long did the agent spend on this before recovering, or what task did it block?
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Screenshots, command transcripts, `INFO` / `CAPS` output, error messages.
+  - type: textarea
+    id: agent-build
+    attributes:
+      label: Agent build / environment
+      description: Output of the `INFO` verb (or agent commit, target OS, integrity level).
