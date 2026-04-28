@@ -90,14 +90,13 @@ void info(Connection& conn, const wire::Request&) {
     // Capabilities sub-object.
     json::append_string(j, "capabilities");
     j += ":{";
-    // Capture engine: BitBlt baseline; WGC detection lands in build phase 6.
+    // Capture engine: BitBlt today; WGC fast path is a future runtime probe.
     json::append_kv_string(j, "capture", "gdi"); j += ',';
-    // UIA: detection lands in build phase 9. Default to "uia" on this target.
+    // UIA available on this target.
     json::append_kv_string(j, "ui_automation", "uia"); j += ',';
-    // Image formats: BMP baseline. PNG / WebP are wired alongside the WGC
-    // capture path in build phase 6.
+    // Image formats: BMP (raw) and PNG (via WIC). WebP arrives with libwebp.
     json::append_string(j, "image_formats");
-    j += ":[\"bmp\"]";
+    j += ":[\"png\",\"bmp\"]";
     j += '}';
 
     j += '}';

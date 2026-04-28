@@ -106,6 +106,10 @@ namespace element_verbs {
     void set_text(Connection&, const wire::Request&);
 }  // namespace element_verbs
 
+namespace screen_verbs {
+    void capture(Connection&, const wire::Request&);
+}  // namespace screen_verbs
+
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -181,7 +185,10 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"element.text",               {Tier::Observe, &element_verbs::text}},
         {"element.set_text",           {Tier::Drive,   &element_verbs::set_text}},
 
-        // Future phases register screen.*, watch.* here.
+        // screen.*
+        {"screen.capture",             {Tier::Observe, &screen_verbs::capture}},
+
+        // Future phases register watch.* here.
     };
     return kVerbs;
 }

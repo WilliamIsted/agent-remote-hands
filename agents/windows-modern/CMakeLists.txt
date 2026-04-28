@@ -58,6 +58,8 @@ target_sources(remote-hands PRIVATE
     src/sysinfo.cpp
     src/uipi.cpp
     src/element_table.cpp
+    src/screen_capture.cpp
+    src/image_encode.cpp
     # verbs (one file per namespace)
     src/verbs/system.cpp
     src/verbs/window.cpp
@@ -67,7 +69,8 @@ target_sources(remote-hands PRIVATE
     src/verbs/process.cpp
     src/verbs/file.cpp
     src/verbs/element.cpp
-    # Future namespaces: screen, watch.
+    src/verbs/screen.cpp
+    # Future namespaces: watch.
 )
 
 target_include_directories(remote-hands PRIVATE src)
@@ -76,12 +79,13 @@ target_link_libraries(remote-hands PRIVATE
     ws2_32              # Winsock
     iphlpapi            # GetAdaptersAddresses (mDNS)
     user32              # input + window APIs
-    gdi32               # BitBlt fallback capture
+    gdi32               # BitBlt capture path
     advapi32            # registry, security
     shell32             # ShellExecuteEx
     ole32               # COM core
     oleaut32            # COM extensions
     uiautomationcore    # IUIAutomation
+    windowscodecs       # WIC (PNG encoder)
     bcrypt              # BCryptGenRandom (token entropy)
     powrprof            # SetSuspendState (system.hibernate / sleep)
 )
