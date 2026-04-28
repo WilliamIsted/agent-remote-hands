@@ -60,6 +60,18 @@ namespace input_verbs {
     void send_message(Connection&, const wire::Request&);
 }  // namespace input_verbs
 
+namespace clipboard_verbs {
+    void read(Connection&, const wire::Request&);
+    void write(Connection&, const wire::Request&);
+}  // namespace clipboard_verbs
+
+namespace registry_verbs {
+    void read(Connection&, const wire::Request&);
+    void write(Connection&, const wire::Request&);
+    void delete_(Connection&, const wire::Request&);
+    void wait(Connection&, const wire::Request&);
+}  // namespace registry_verbs
+
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -94,8 +106,18 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"input.type",                 {Tier::Drive,   &input_verbs::type}},
         {"input.send_message",         {Tier::Drive,   &input_verbs::send_message}},
 
+        // clipboard.*
+        {"clipboard.read",             {Tier::Observe, &clipboard_verbs::read}},
+        {"clipboard.write",            {Tier::Drive,   &clipboard_verbs::write}},
+
+        // registry.*
+        {"registry.read",              {Tier::Observe, &registry_verbs::read}},
+        {"registry.write",             {Tier::Drive,   &registry_verbs::write}},
+        {"registry.delete",            {Tier::Power,   &registry_verbs::delete_}},
+        {"registry.wait",              {Tier::Observe, &registry_verbs::wait}},
+
         // Future phases register screen.*, element.*, file.*, process.*,
-        // registry.*, clipboard.*, watch.* here.
+        // watch.* here.
     };
     return kVerbs;
 }
