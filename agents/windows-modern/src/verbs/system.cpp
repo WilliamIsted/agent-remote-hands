@@ -242,10 +242,16 @@ void do_power(Connection& conn, UINT exit_flags, const wire::Request& req) {
         // ExitWindowsEx. We don't use InitiateShutdownW here because its
         // SHUTDOWN_* flag set is incompatible with the EWX_* flags the
         // caller has chosen, and ExitWindowsEx covers reboot / shutdown /
-        // logoff uniformly. Trade-off: no "Windows is shutting down" toast.
+        // logoff uniformly. Trade-offs: no "Windows is shutting down" toast,
+        // and the timer is bound to the agent process — if the agent exits
+        // before it fires the OS-level call never happens. See issue #59.
         std::thread([exit_flags, reason, delay = args.delay_seconds]() {
             std::this_thread::sleep_for(std::chrono::seconds(delay));
-            ExitWindowsEx(exit_flags, reason);
+            if (!ExitWindowsEx(exit_flags, reason)) {
+                log::warning(L"system.power: ExitWindowsEx failed (%lu) "
+                             L"after %lus delay",
+                             GetLastError(), delay);
+            }
         }).detach();
     } else {
         if (!ExitWindowsEx(exit_flags, reason)) {
@@ -257,10 +263,14 @@ void do_power(Connection& conn, UINT exit_flags, const wire::Request& req) {
         }
     }
 
-    char body[128];
+    const auto now_unix = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    char body[160];
     std::snprintf(body, sizeof(body),
-                  "{\"phase\":\"requested\",\"grace_ms\":%lu}",
-                  args.delay_seconds * 1000UL);
+                  "{\"phase\":\"requested\",\"grace_ms\":%lu,"
+                  "\"deadline_unix\":%lld}",
+                  args.delay_seconds * 1000UL,
+                  static_cast<long long>(now_unix + args.delay_seconds));
     conn.writer().write_ok(body);
 }
 

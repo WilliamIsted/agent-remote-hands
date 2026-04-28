@@ -263,6 +263,14 @@ System-level identity, health, and lifecycle operations.
 
 Power verbs MAY return `ERR insufficient_privilege {"missing":"SeShutdownPrivilege"}` if the agent's token lacks the relevant privilege.
 
+**`--delay` semantics (windows-modern).** The agent honours `--delay` by sleeping in an in-process timer and then issuing the OS-level shutdown / reboot / logoff. Three caller-visible consequences follow:
+
+- **Eager `OK`.** The response is sent before the timer fires. `OK` confirms that the request was accepted and the timer was scheduled — not that the OS-level call later succeeded. Failures of the deferred call are written to the agent log but are not surfaced to the wire.
+- **Timer is agent-bound.** If the agent process exits (crash, restart, separate `system.shutdown` without `--delay`, external `taskkill`) before the timer fires, the scheduled action does not happen.
+- **No cancellation.** There is currently no verb to cancel a pending delayed shutdown; once `OK` is returned the only ways to abort it are to kill the agent or wait it out. A future `system.power.cancel` verb is tracked separately and will be capability-gated.
+
+`--delay 0` (the default) bypasses the timer entirely and reports failure synchronously via `ERR not_supported {"win32_error":<n>}`.
+
 ### 4.2 `screen.*`
 
 Pixel capture.
