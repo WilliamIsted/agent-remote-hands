@@ -63,7 +63,9 @@ target_sources(remote-hands PRIVATE
     src/verbs/input.cpp
     src/verbs/clipboard.cpp
     src/verbs/registry.cpp
-    # Future namespaces: screen, element, file, process, watch.
+    src/verbs/process.cpp
+    src/verbs/file.cpp
+    # Future namespaces: screen, element, watch.
 )
 
 target_include_directories(remote-hands PRIVATE src)

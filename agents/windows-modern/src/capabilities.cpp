@@ -72,6 +72,26 @@ namespace registry_verbs {
     void wait(Connection&, const wire::Request&);
 }  // namespace registry_verbs
 
+namespace process_verbs {
+    void list(Connection&, const wire::Request&);
+    void start(Connection&, const wire::Request&);
+    void shell(Connection&, const wire::Request&);
+    void kill(Connection&, const wire::Request&);
+    void wait(Connection&, const wire::Request&);
+}  // namespace process_verbs
+
+namespace file_verbs {
+    void read(Connection&, const wire::Request&);
+    void write(Connection&, const wire::Request&);
+    void list(Connection&, const wire::Request&);
+    void stat(Connection&, const wire::Request&);
+    void delete_(Connection&, const wire::Request&);
+    void exists(Connection&, const wire::Request&);
+    void wait(Connection&, const wire::Request&);
+    void mkdir(Connection&, const wire::Request&);
+    void rename(Connection&, const wire::Request&);
+}  // namespace file_verbs
+
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -116,8 +136,25 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"registry.delete",            {Tier::Power,   &registry_verbs::delete_}},
         {"registry.wait",              {Tier::Observe, &registry_verbs::wait}},
 
-        // Future phases register screen.*, element.*, file.*, process.*,
-        // watch.* here.
+        // process.*
+        {"process.list",               {Tier::Observe, &process_verbs::list}},
+        {"process.start",              {Tier::Drive,   &process_verbs::start}},
+        {"process.shell",              {Tier::Drive,   &process_verbs::shell}},
+        {"process.kill",               {Tier::Power,   &process_verbs::kill}},
+        {"process.wait",               {Tier::Observe, &process_verbs::wait}},
+
+        // file.*
+        {"file.read",                  {Tier::Observe, &file_verbs::read}},
+        {"file.write",                 {Tier::Drive,   &file_verbs::write}},
+        {"file.list",                  {Tier::Observe, &file_verbs::list}},
+        {"file.stat",                  {Tier::Observe, &file_verbs::stat}},
+        {"file.delete",                {Tier::Power,   &file_verbs::delete_}},
+        {"file.exists",                {Tier::Observe, &file_verbs::exists}},
+        {"file.wait",                  {Tier::Observe, &file_verbs::wait}},
+        {"file.mkdir",                 {Tier::Drive,   &file_verbs::mkdir}},
+        {"file.rename",                {Tier::Drive,   &file_verbs::rename}},
+
+        // Future phases register screen.*, element.*, watch.* here.
     };
     return kVerbs;
 }
