@@ -4,6 +4,8 @@
 [![Built for Windows](https://img.shields.io/badge/built%20for-Windows%2010%2B-0078D4?logo=windows&logoColor=white)](agents/windows-modern/COMPATIBILITY.md)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)](agents/windows-modern/CMakeLists.txt)
 [![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange)](https://github.com/WilliamIsted/agent-remote-hands/milestones)
+[![CodeQL](https://github.com/WilliamIsted/agent-remote-hands/actions/workflows/codeql.yml/badge.svg)](https://github.com/WilliamIsted/agent-remote-hands/actions/workflows/codeql.yml)
+[![Last commit](https://img.shields.io/github/last-commit/WilliamIsted/agent-remote-hands?logo=github)](https://github.com/WilliamIsted/agent-remote-hands/commits/main)
 [![MCP-ready](https://img.shields.io/badge/MCP-ready-7B68EE)](https://modelcontextprotocol.io/)
 [![Built with Claude](https://img.shields.io/badge/built%20with-Claude%20Code-D97757)](https://claude.com/code)
 
@@ -52,11 +54,18 @@ To wire it into Claude Code (once `mcp-server/` lands — see the Roadmap), drop
     "agent-remote-hands": {
       "command": "python",
       "args": ["/abs/path/to/mcp-server/server.py"],
-      "env": { "REMOTE_HANDS_HOST": "<vm-host>" }
+      "env": {
+        "REMOTE_HANDS_HOST":        "<vm-host>",
+        "REMOTE_HANDS_PORT":        "8765",
+        "REMOTE_HANDS_GUIDANCE":    "hint",
+        "REMOTE_HANDS_TIER_POLICY": "ask"
+      }
     }
   }
 }
 ```
+
+`REMOTE_HANDS_*` env vars set the project default for each setting; the LLM (or you, in natural language) can override most of them mid-session via MCP tools — see [#55](https://github.com/WilliamIsted/agent-remote-hands/issues/55) for the settings-registry pattern.
 
 ## What's in the repo
 
@@ -121,6 +130,12 @@ Issues and PRs are welcome. Useful labels:
 - standard `bug` / `enhancement` / `documentation`
 
 When filing a wire-protocol change, please update `PROTOCOL.md`, add a conformance test, and run the suite against at least one target build before submitting.
+
+## On authorship
+
+The "Built with Claude Code" badge at the top is honest — a substantial portion of the source code, the v2 wire-protocol spec, and the test suites was drafted by Claude Code under direction. What the badge doesn't capture is the iteration: the architectural decisions, security-model trade-offs, naming conventions, and "wait, this is wrong" course-corrections that shaped the result. Those are human work, and there are many more hours of them than there are of "Claude wrote this and shipped it."
+
+Treat the project as collaborative output, not autonomous agent work. Bug reports, architectural critiques, and PRs are welcome.
 
 ## License
 
