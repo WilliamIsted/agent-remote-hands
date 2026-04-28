@@ -61,3 +61,21 @@ def test_element_list_at_observe(client: WireClient,
     body = json.loads(r.payload)
     assert "elements" in body
     assert isinstance(body["elements"], list)
+
+
+def test_element_wait_invalid_args(client: WireClient,
+                                   capabilities: dict) -> None:
+    needs_verb(capabilities, "element.wait")
+    r = client.request("element.wait", "button")  # missing pattern + timeout
+    assert isinstance(r, ErrResponse)
+    assert r.code == "invalid_args"
+
+
+def test_element_wait_unknown_times_out(client: WireClient,
+                                        capabilities: dict) -> None:
+    """Use a short timeout so the suite stays fast."""
+    needs_verb(capabilities, "element.wait")
+    r = client.request("element.wait", "button",
+                       "DefinitelyNotARealButtonName123", "500")
+    assert isinstance(r, ErrResponse)
+    assert r.code == "timeout"

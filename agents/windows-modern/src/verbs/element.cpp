@@ -35,10 +35,12 @@
 
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -809,6 +811,93 @@ void set_text(Connection& conn, const wire::Request& req) {
         return;
     }
     conn.writer().write_ok();
+}
+
+// ---------------------------------------------------------------------------
+// element.wait — polling form of element.find with timeout. Same matching
+// rules: case-insensitive substring on Name, exact role token, visible-only.
+// Polls every 250 ms; returns on first match or `ERR timeout` on deadline.
+
+void wait(Connection& conn, const wire::Request& req) {
+    if (req.args.size() != 3) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"element.wait requires <role> <name-pattern> <timeout-ms>\"}");
+        return;
+    }
+
+    unsigned long long timeout_ms = 0;
+    {
+        const auto& s = req.args[2];
+        const auto* end = s.data() + s.size();
+        const auto [p, ec] = std::from_chars(s.data(), end, timeout_ms, 10);
+        if (ec != std::errc{} || p != end) {
+            conn.writer().write_err(
+                ErrorCode::InvalidArgs,
+                "{\"message\":\"timeout-ms must be a non-negative integer\"}");
+            return;
+        }
+    }
+
+    IUIAutomation* uia = require_uia(conn);
+    if (!uia) return;
+
+    const std::string& role_arg = req.args[0];
+    std::string needle = req.args[1];
+    for (char& c : needle) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    using clock = std::chrono::steady_clock;
+    const auto deadline = clock::now() + std::chrono::milliseconds(timeout_ms);
+
+    while (true) {
+        ComPtr<IUIAutomationElement> root;
+        if (FAILED(uia->GetRootElement(&root)) || !root) {
+            conn.writer().write_err(ErrorCode::NotSupported);
+            return;
+        }
+        auto cond = build_visible_condition(uia);
+        if (!cond) {
+            conn.writer().write_err(ErrorCode::NotSupported);
+            return;
+        }
+        ComPtr<IUIAutomationElementArray> arr;
+        if (FAILED(root->FindAll(TreeScope_Subtree, cond.Get(), &arr)) || !arr) {
+            conn.writer().write_err(ErrorCode::NotSupported);
+            return;
+        }
+
+        int count = 0;
+        arr->get_Length(&count);
+        for (int i = 0; i < count; ++i) {
+            ComPtr<IUIAutomationElement> elem;
+            if (FAILED(arr->GetElement(i, &elem)) || !elem) continue;
+
+            CONTROLTYPEID ctype = 0;
+            if (FAILED(elem->get_CurrentControlType(&ctype))) continue;
+            if (role_arg != role_token(ctype)) continue;
+
+            BSTR name_bstr = nullptr;
+            elem->get_CurrentName(&name_bstr);
+            std::string name = bstr_to_utf8(name_bstr);
+            if (name_bstr) SysFreeString(name_bstr);
+
+            std::string lname = name;
+            for (char& c : lname) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (lname.find(needle) == std::string::npos) continue;
+
+            const auto id = conn.element_table().register_element(elem.Get());
+            std::string body;
+            append_element_object(body, id, elem.Get());
+            conn.writer().write_ok(body);
+            return;
+        }
+
+        if (clock::now() >= deadline) {
+            conn.writer().write_err(ErrorCode::Timeout);
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
 }
 
 }  // namespace remote_hands::element_verbs

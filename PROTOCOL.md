@@ -260,14 +260,16 @@ System-level identity, health, and lifecycle operations.
 | `system.logoff` | P | `[--force]` | as above | |
 | `system.hibernate` | P | — | `OK 0` | |
 | `system.sleep` | P | — | `OK 0` | |
+| `system.power.cancel` | P | — | `OK <len>\n<json>` or `ERR not_found` | Aborts a pending in-process delayed shutdown. JSON: `{"cancelled_until_ms":<n>}`. `ERR not_found {"message":"no pending shutdown"}` if no shutdown is pending. Capability-gated; absent on builds without delayed-shutdown bookkeeping. |
 
 Power verbs MAY return `ERR insufficient_privilege {"missing":"SeShutdownPrivilege"}` if the agent's token lacks the relevant privilege.
 
-**`--delay` semantics (windows-modern).** The agent honours `--delay` by sleeping in an in-process timer and then issuing the OS-level shutdown / reboot / logoff. Three caller-visible consequences follow:
+**`--delay` semantics (windows-modern).** The agent honours `--delay` by waiting in an in-process timer and then issuing the OS-level shutdown / reboot / logoff. Four caller-visible consequences follow:
 
 - **Eager `OK`.** The response is sent before the timer fires. `OK` confirms that the request was accepted and the timer was scheduled — not that the OS-level call later succeeded. Failures of the deferred call are written to the agent log but are not surfaced to the wire.
 - **Timer is agent-bound.** If the agent process exits (crash, restart, separate `system.shutdown` without `--delay`, external `taskkill`) before the timer fires, the scheduled action does not happen.
-- **No cancellation.** There is currently no verb to cancel a pending delayed shutdown; once `OK` is returned the only ways to abort it are to kill the agent or wait it out. A future `system.power.cancel` verb is tracked separately and will be capability-gated.
+- **One pending request at a time.** A second `--delay`-bearing power verb while one is already pending returns `ERR conflict {"pending_until_ms":<n>}`. Cancel the existing one (`system.power.cancel`) before scheduling another, or omit `--delay` to fire immediately.
+- **Cancellable.** Use `system.power.cancel` to abort a pending delayed shutdown; the detached timer thread wakes early and the OS-level call is skipped. The cancel verb is capability-gated — clients should consult `system.capabilities` before calling.
 
 `--delay 0` (the default) bypasses the timer entirely and reports failure synchronously via `ERR not_supported {"win32_error":<n>}`.
 
@@ -317,6 +319,7 @@ UI Automation. Element identifiers use the prefix `elt:` followed by a connectio
 | `element.tree` | O | `<elt-id>` | `OK <len>\n<json>` | TreeWalker recursive descent. JSON: `{"elements":[{"depth":N,"id":"elt:N","role":"...","name":"...","bounds":[x,y,w,h],"flags":[...]}]}` |
 | `element.at` | O | `<x> <y>` | `OK <len>\n<json>` or `ERR not_found` | Hit test |
 | `element.find` | O | `<role> <name-pattern>` | `OK <len>\n<json>` or `ERR not_found` or `ERR uia_blind` | `not_found` = nothing matched. `uia_blind` = UIA cannot see across the integrity barrier (caller may need to elevate). |
+| `element.wait` | O | `<role> <name-pattern> <timeout-ms>` | `OK <len>\n<json>` or `ERR timeout` | Polling form of `element.find` (re-walks the visible-element subtree every 250 ms until match or deadline). Returned id is valid for `element.invoke` on the same connection. Capability-gated. |
 | `element.invoke` | D | `<elt-id>` | `OK 0` or `ERR not_supported_by_target` or `ERR target_gone` | InvokePattern |
 | `element.toggle` | D | `<elt-id>` | `OK <len>\n<json>` | TogglePattern. JSON: `{"new_state":"<state>"}` ∈ `on`, `off`, `indeterminate` |
 | `element.expand` | D | `<elt-id>` | `OK <len>\n<json>` | ExpandCollapsePattern.Expand. JSON: `{"new_state":"<state>"}` |
@@ -325,7 +328,7 @@ UI Automation. Element identifiers use the prefix `elt:` followed by a connectio
 | `element.text` | O | `<elt-id>` | `OK <len>\n<bytes>` | TextPattern preferred; ValuePattern fallback. Empty payload (`OK 0`) is valid. |
 | `element.set_text` | D | `<elt-id> <length>` | `OK 0` or `ERR readonly` or `ERR not_supported_by_target` | UTF-8 text payload follows |
 
-Element IDs are allocated by the agent on calls that produce element references (`element.list`, `element.tree`, `element.at`, `element.find`). IDs remain valid for the connection's lifetime unless the underlying element is invalidated, in which case subsequent verbs return `ERR target_gone`.
+Element IDs are allocated by the agent on calls that produce element references (`element.list`, `element.tree`, `element.at`, `element.find`, `element.wait`). IDs remain valid for the connection's lifetime unless the underlying element is invalidated, in which case subsequent verbs return `ERR target_gone`.
 
 ### 4.6 `file.*`
 
@@ -422,6 +425,7 @@ Errors take the form:
 | `wire_desync` | — | Caller payload corrupt; recoverable via `connection.reset` |
 | `timeout` | `{deadline}` | `*.wait` or streaming verb expired |
 | `busy` | `{max}` | Too many concurrent connections |
+| `conflict` | varies | Verb cannot proceed because of in-flight state (e.g. `system.power` `--delay` while one is already pending — detail `{"pending_until_ms":<n>}`) |
 | `protocol_mismatch` | `{agent, client}` | Hello specified an incompatible protocol version |
 | `auth_required` | — | Reserved for v3.0 SSPI |
 | `auth_invalid` | — | Reserved for v3.0 SSPI |
@@ -717,6 +721,7 @@ system.shutdown              (P)
 system.logoff                (P)
 system.hibernate             (P)
 system.sleep                 (P)
+system.power.cancel          (P)
 
 screen.capture               (O)
 
@@ -738,6 +743,7 @@ element.list                 (O)
 element.tree                 (O)
 element.at                   (O)
 element.find                 (O)
+element.wait                 (O)
 element.invoke               (D)
 element.toggle               (D)
 element.expand               (D)

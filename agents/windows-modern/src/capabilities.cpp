@@ -40,6 +40,7 @@ namespace system_verbs {
     void logoff(Connection&, const wire::Request&);
     void hibernate(Connection&, const wire::Request&);
     void sleep(Connection&, const wire::Request&);
+    void power_cancel(Connection&, const wire::Request&);
 }  // namespace system_verbs
 
 namespace window_verbs {
@@ -97,6 +98,7 @@ namespace element_verbs {
     void tree(Connection&, const wire::Request&);
     void at(Connection&, const wire::Request&);
     void find(Connection&, const wire::Request&);
+    void wait(Connection&, const wire::Request&);
     void invoke(Connection&, const wire::Request&);
     void toggle(Connection&, const wire::Request&);
     void expand(Connection&, const wire::Request&);
@@ -137,6 +139,7 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"system.logoff",              {Tier::Power,   &system_verbs::logoff}},
         {"system.hibernate",           {Tier::Power,   &system_verbs::hibernate}},
         {"system.sleep",               {Tier::Power,   &system_verbs::sleep}},
+        {"system.power.cancel",        {Tier::Power,   &system_verbs::power_cancel}},
 
         // window.*
         {"window.list",                {Tier::Observe, &window_verbs::list}},
@@ -187,6 +190,7 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"element.tree",               {Tier::Observe, &element_verbs::tree}},
         {"element.at",                 {Tier::Observe, &element_verbs::at}},
         {"element.find",               {Tier::Observe, &element_verbs::find}},
+        {"element.wait",               {Tier::Observe, &element_verbs::wait}},
         {"element.invoke",             {Tier::Drive,   &element_verbs::invoke}},
         {"element.toggle",             {Tier::Drive,   &element_verbs::toggle}},
         {"element.expand",             {Tier::Drive,   &element_verbs::expand}},

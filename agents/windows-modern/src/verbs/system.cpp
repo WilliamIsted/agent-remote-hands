@@ -34,7 +34,9 @@
 #include "../sysinfo.hpp"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -222,6 +224,25 @@ PowerArgs parse_power_args(const wire::Request& req) {
     return p;
 }
 
+// Single-process pending-shutdown state. A `--delay > 0` request takes the
+// slot; subsequent calls reject with ERR conflict until the timer fires or
+// system.power.cancel clears it. The detached thread waits on the CV so a
+// cancel notification can interrupt the sleep.
+struct PendingShutdown {
+    std::mutex                              mu;
+    std::condition_variable                 cv;
+    bool                                    active = false;
+    std::chrono::steady_clock::time_point   steady_deadline;
+    long long                               unix_deadline_ms = 0;
+    UINT                                    exit_flags = 0;
+    DWORD                                   reason = 0;
+};
+
+PendingShutdown& pending_shutdown() {
+    static PendingShutdown p;
+    return p;
+}
+
 void do_power(Connection& conn, UINT exit_flags, const wire::Request& req) {
     const auto args = parse_power_args(req);
 
@@ -238,19 +259,56 @@ void do_power(Connection& conn, UINT exit_flags, const wire::Request& req) {
         SHTDN_REASON_MAJOR_OPERATINGSYSTEM | SHTDN_REASON_FLAG_PLANNED;
 
     if (args.delay_seconds > 0) {
-        // Honour --delay by sleeping in a detached thread, then calling
+        // Honour --delay by waiting in a detached thread, then calling
         // ExitWindowsEx. We don't use InitiateShutdownW here because its
         // SHUTDOWN_* flag set is incompatible with the EWX_* flags the
         // caller has chosen, and ExitWindowsEx covers reboot / shutdown /
         // logoff uniformly. Trade-offs: no "Windows is shutting down" toast,
         // and the timer is bound to the agent process — if the agent exits
         // before it fires the OS-level call never happens. See issue #59.
-        std::thread([exit_flags, reason, delay = args.delay_seconds]() {
-            std::this_thread::sleep_for(std::chrono::seconds(delay));
-            if (!ExitWindowsEx(exit_flags, reason)) {
-                log::warning(L"system.power: ExitWindowsEx failed (%lu) "
-                             L"after %lus delay",
-                             GetLastError(), delay);
+        auto& p = pending_shutdown();
+        {
+            std::lock_guard<std::mutex> lk(p.mu);
+            if (p.active) {
+                char detail[80];
+                std::snprintf(detail, sizeof(detail),
+                              "{\"pending_until_ms\":%lld}",
+                              p.unix_deadline_ms);
+                conn.writer().write_err(ErrorCode::Conflict, detail);
+                return;
+            }
+            const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            p.active           = true;
+            p.steady_deadline  = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(args.delay_seconds);
+            p.unix_deadline_ms = now_ms + static_cast<long long>(args.delay_seconds) * 1000LL;
+            p.exit_flags       = exit_flags;
+            p.reason           = reason;
+        }
+        std::thread([]() {
+            auto& p = pending_shutdown();
+            UINT  flags;
+            DWORD r;
+            bool  fired;
+            {
+                std::unique_lock<std::mutex> lk(p.mu);
+                const auto deadline = p.steady_deadline;
+                flags = p.exit_flags;
+                r     = p.reason;
+                // Wake on either the deadline or a cancel that clears `active`.
+                p.cv.wait_until(lk, deadline, [&p]() { return !p.active; });
+                fired = p.active;     // still active => deadline expired
+                p.active = false;
+            }
+            if (fired) {
+                if (!ExitWindowsEx(flags, r)) {
+                    log::warning(L"system.power: ExitWindowsEx failed (%lu) "
+                                 L"after delayed fire",
+                                 GetLastError());
+                }
+            } else {
+                log::info(L"system.power: pending shutdown cancelled");
             }
         }).detach();
     } else {
@@ -314,6 +372,31 @@ void sleep(Connection& conn, const wire::Request&) {
         return;
     }
     conn.writer().write_ok();
+}
+
+// ---------------------------------------------------------------------------
+// system.power.cancel — abort a pending in-process delayed shutdown.
+
+void power_cancel(Connection& conn, const wire::Request&) {
+    auto& p = pending_shutdown();
+    bool      was_pending = false;
+    long long unix_deadline_ms = 0;
+    {
+        std::lock_guard<std::mutex> lk(p.mu);
+        was_pending = p.active;
+        unix_deadline_ms = p.unix_deadline_ms;
+        if (was_pending) p.active = false;
+    }
+    if (was_pending) {
+        p.cv.notify_all();
+        char body[80];
+        std::snprintf(body, sizeof(body),
+                      "{\"cancelled_until_ms\":%lld}", unix_deadline_ms);
+        conn.writer().write_ok(body);
+    } else {
+        conn.writer().write_err(ErrorCode::NotFound,
+                                "{\"message\":\"no pending shutdown\"}");
+    }
 }
 
 }  // namespace remote_hands::system_verbs

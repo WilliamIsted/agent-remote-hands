@@ -95,9 +95,9 @@ std::string get_window_title_utf8(HWND hwnd) {
     return out;
 }
 
-// "Phantom" windows are visible-but-not-meaningful: zero geometry, empty title,
-// or marked WS_EX_NOACTIVATE / WS_EX_TOOLWINDOW. Filtered out of window.list
-// by default; --all bypasses.
+// "Phantom" windows are visible-but-not-meaningful: zero geometry, off-monitor,
+// empty title, or marked WS_EX_NOACTIVATE / WS_EX_TOOLWINDOW. Filtered out of
+// window.list by default; --all bypasses.
 bool is_phantom_window(HWND hwnd) {
     if (!IsWindowVisible(hwnd)) return true;
 
@@ -108,6 +108,11 @@ bool is_phantom_window(HWND hwnd) {
     RECT r;
     if (!GetWindowRect(hwnd, &r)) return true;
     if (r.right - r.left <= 0 || r.bottom - r.top <= 0) return true;
+
+    // Windows parks minimised / off-screen windows at coords like (-32000,
+    // -32000) where they intersect no monitor. MONITOR_DEFAULTTONULL returns
+    // null in that case.
+    if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) == nullptr) return true;
 
     if (GetWindowTextLengthW(hwnd) == 0) return true;
 

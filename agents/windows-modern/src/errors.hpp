@@ -33,6 +33,7 @@ enum class ErrorCode {
     WireDesync,
     Timeout,
     Busy,
+    Conflict,
     ProtocolMismatch,
     AuthRequired,
     AuthInvalid,
@@ -57,6 +58,7 @@ constexpr std::string_view to_wire(ErrorCode code) noexcept {
         case ErrorCode::WireDesync:             return "wire_desync";
         case ErrorCode::Timeout:                return "timeout";
         case ErrorCode::Busy:                   return "busy";
+        case ErrorCode::Conflict:               return "conflict";
         case ErrorCode::ProtocolMismatch:       return "protocol_mismatch";
         case ErrorCode::AuthRequired:           return "auth_required";
         case ErrorCode::AuthInvalid:            return "auth_invalid";

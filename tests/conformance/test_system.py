@@ -76,3 +76,50 @@ def test_shutdown_blockers_returns_array(client: WireClient,
     body = json.loads(r.payload)
     assert "blockers" in body
     assert isinstance(body["blockers"], list)
+
+
+def test_power_cancel_requires_power_tier(client: WireClient,
+                                          capabilities: dict) -> None:
+    needs_verb(capabilities, "system.power.cancel")
+    r = client.request("system.power.cancel")
+    assert isinstance(r, ErrResponse)
+    assert r.code == "tier_required"
+    assert r.detail.get("required") == "power"
+
+
+def test_power_cancel_no_pending_returns_not_found(power_client: WireClient,
+                                                    capabilities: dict) -> None:
+    needs_verb(capabilities, "system.power.cancel")
+    r = power_client.request("system.power.cancel")
+    assert isinstance(r, ErrResponse)
+    assert r.code == "not_found"
+
+
+def test_power_delay_overlap_conflicts_then_cancels(
+        power_client: WireClient, capabilities: dict) -> None:
+    """Schedule a long-delay shutdown, observe pending state via overlap,
+    then cancel. Uses --delay 86400 so the machine remains safe even if
+    cancellation regresses (24h grace to intervene manually)."""
+    needs_verb(capabilities, "system.power.cancel")
+    needs_verb(capabilities, "system.shutdown")
+
+    # Schedule a 24-hour delayed shutdown.
+    r = power_client.request("system.shutdown", "--delay", "86400")
+    assert isinstance(r, OkResponse), f"got {r!r}"
+    try:
+        # A second --delay request must be rejected.
+        r2 = power_client.request("system.shutdown", "--delay", "86400")
+        assert isinstance(r2, ErrResponse)
+        assert r2.code == "conflict"
+        assert "pending_until_ms" in r2.detail
+        assert isinstance(r2.detail["pending_until_ms"], int)
+    finally:
+        # Always cancel — leaving a pending OS-level shutdown around between
+        # tests is unfriendly even with a 24h delay.
+        r3 = power_client.request("system.power.cancel")
+        assert isinstance(r3, OkResponse), f"cancel failed: {r3!r}"
+
+    # And a second cancel returns not_found.
+    r4 = power_client.request("system.power.cancel")
+    assert isinstance(r4, ErrResponse)
+    assert r4.code == "not_found"
