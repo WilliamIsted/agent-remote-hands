@@ -37,7 +37,8 @@
 
 namespace remote_hands {
 
-class ElementTable;  // see element_table.hpp; held by every Connection
+class ElementTable;            // see element_table.hpp
+class SubscriptionRegistry;    // see subscription.hpp
 
 class Connection {
 public:
@@ -54,11 +55,12 @@ public:
     // Public accessors for verb handlers (declared in capabilities.cpp /
     // implemented in verbs/<namespace>.cpp). Verbs read/write the wire via
     // these and consult tier() if they need it.
-    wire::Reader&   reader() noexcept { return reader_; }
-    wire::Writer&   writer() noexcept { return writer_; }
-    Tier            tier()   const noexcept { return tier_; }
-    int             max_connections() const noexcept { return max_connections_; }
-    ElementTable&   element_table() noexcept { return *element_table_; }
+    wire::Reader&           reader() noexcept { return reader_; }
+    wire::Writer&           writer() noexcept { return writer_; }
+    Tier                    tier()   const noexcept { return tier_; }
+    int                     max_connections() const noexcept { return max_connections_; }
+    ElementTable&           element_table() noexcept { return *element_table_; }
+    SubscriptionRegistry&   subscriptions() noexcept { return *subscriptions_; }
 
 private:
     enum class State {
@@ -89,7 +91,8 @@ private:
     State           state_  = State::PreHello;
     Tier            tier_   = Tier::Observe;
 
-    std::unique_ptr<ElementTable>       element_table_;
+    std::unique_ptr<ElementTable>          element_table_;
+    std::unique_ptr<SubscriptionRegistry>  subscriptions_;
 };
 
 }  // namespace remote_hands

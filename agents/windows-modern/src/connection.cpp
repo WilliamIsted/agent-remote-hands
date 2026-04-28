@@ -17,6 +17,7 @@
 #include "capabilities.hpp"
 #include "element_table.hpp"
 #include "log.hpp"
+#include "subscription.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -60,7 +61,8 @@ Connection::Connection(SOCKET socket,
       max_connections_{max_connections},
       reader_{socket},
       writer_{socket},
-      element_table_{std::make_unique<ElementTable>()} {}
+      element_table_{std::make_unique<ElementTable>()},
+      subscriptions_{std::make_unique<SubscriptionRegistry>()} {}
 
 Connection::~Connection() {
     if (socket_ != INVALID_SOCKET) {
@@ -231,8 +233,9 @@ void Connection::handle_reset(const wire::Request& /*req*/) {
 
 void Connection::handle_close(const wire::Request& /*req*/) {
     // PROTOCOL.md §2.5: drain pending EVENT frames before responding.
-    // Subscriptions are not yet implemented (build phase 14); for now
-    // there's nothing to drain.
+    // cancel_all() stops every subscription thread and joins them, so any
+    // in-flight EVENT writes have completed by the time it returns.
+    subscriptions_->cancel_all();
     writer_.write_ok();
     state_ = State::Closed;
 }

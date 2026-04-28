@@ -110,6 +110,16 @@ namespace screen_verbs {
     void capture(Connection&, const wire::Request&);
 }  // namespace screen_verbs
 
+namespace watch_verbs {
+    void region(Connection&, const wire::Request&);
+    void process(Connection&, const wire::Request&);
+    void window(Connection&, const wire::Request&);
+    void element(Connection&, const wire::Request&);
+    void file(Connection&, const wire::Request&);
+    void registry(Connection&, const wire::Request&);
+    void cancel(Connection&, const wire::Request&);
+}  // namespace watch_verbs
+
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -188,7 +198,14 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         // screen.*
         {"screen.capture",             {Tier::Observe, &screen_verbs::capture}},
 
-        // Future phases register watch.* here.
+        // watch.*
+        {"watch.region",               {Tier::Observe, &watch_verbs::region}},
+        {"watch.process",              {Tier::Observe, &watch_verbs::process}},
+        {"watch.window",               {Tier::Observe, &watch_verbs::window}},
+        {"watch.element",              {Tier::Observe, &watch_verbs::element}},
+        {"watch.file",                 {Tier::Observe, &watch_verbs::file}},
+        {"watch.registry",             {Tier::Observe, &watch_verbs::registry}},
+        {"watch.cancel",               {Tier::Observe, &watch_verbs::cancel}},
     };
     return kVerbs;
 }

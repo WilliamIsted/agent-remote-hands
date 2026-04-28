@@ -60,6 +60,7 @@ target_sources(remote-hands PRIVATE
     src/element_table.cpp
     src/screen_capture.cpp
     src/image_encode.cpp
+    src/subscription.cpp
     # verbs (one file per namespace)
     src/verbs/system.cpp
     src/verbs/window.cpp
@@ -70,7 +71,7 @@ target_sources(remote-hands PRIVATE
     src/verbs/file.cpp
     src/verbs/element.cpp
     src/verbs/screen.cpp
-    # Future namespaces: watch.
+    src/verbs/watch.cpp
 )
 
 target_include_directories(remote-hands PRIVATE src)
