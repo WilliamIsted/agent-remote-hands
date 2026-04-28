@@ -59,6 +59,7 @@ namespace input_verbs {
     void key(Connection&, const wire::Request&);
     void type(Connection&, const wire::Request&);
     void send_message(Connection&, const wire::Request&);
+    void post_message(Connection&, const wire::Request&);
 }  // namespace input_verbs
 
 namespace clipboard_verbs {
@@ -99,6 +100,8 @@ namespace element_verbs {
     void at(Connection&, const wire::Request&);
     void find(Connection&, const wire::Request&);
     void wait(Connection&, const wire::Request&);
+    void find_invoke(Connection&, const wire::Request&);
+    void at_invoke(Connection&, const wire::Request&);
     void invoke(Connection&, const wire::Request&);
     void toggle(Connection&, const wire::Request&);
     void expand(Connection&, const wire::Request&);
@@ -156,6 +159,7 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"input.key",                  {Tier::Drive,   &input_verbs::key}},
         {"input.type",                 {Tier::Drive,   &input_verbs::type}},
         {"input.send_message",         {Tier::Drive,   &input_verbs::send_message}},
+        {"input.post_message",         {Tier::Drive,   &input_verbs::post_message}},
 
         // clipboard.*
         {"clipboard.read",             {Tier::Observe, &clipboard_verbs::read}},
@@ -191,6 +195,8 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"element.at",                 {Tier::Observe, &element_verbs::at}},
         {"element.find",               {Tier::Observe, &element_verbs::find}},
         {"element.wait",               {Tier::Observe, &element_verbs::wait}},
+        {"element.find_invoke",        {Tier::Drive,   &element_verbs::find_invoke}},
+        {"element.at_invoke",          {Tier::Drive,   &element_verbs::at_invoke}},
         {"element.invoke",             {Tier::Drive,   &element_verbs::invoke}},
         {"element.toggle",             {Tier::Drive,   &element_verbs::toggle}},
         {"element.expand",             {Tier::Drive,   &element_verbs::expand}},

@@ -283,6 +283,8 @@ Pixel capture.
 
 If neither `--region` nor `--window` is supplied, the entire virtual screen is captured.
 
+**Format guidance.** PNG is lossless and the right default for one-shot stills, but compresses poorly on the kind of large-flat-region content that dominates Windows UI screenshots (~1.5 MB for a 1080p flat dark UI is typical). For bandwidth-sensitive use — `watch.region` streams or polling-style `screen.capture` loops — prefer `webp:70` (or `webp:50` for lower-fidelity acceptable cases). Reserve PNG for cases where pixel-exact comparison or downstream diffing matters.
+
 ### 4.3 `window.*`
 
 Top-level window enumeration and control. All `<hwnd>` values use the prefix `win:` followed by the hex window handle (e.g. `win:0x1A2B`).
@@ -307,7 +309,8 @@ Synthetic input. All input verbs check the foreground window's integrity level b
 | `input.scroll` | D | `<x> <y> <delta>` | `OK 0` | Delta in wheel notches (positive = up) |
 | `input.key` | D | `<vk> [--modifiers <list>]` | `OK 0` | `<vk>` is a key name (`enter`, `F4`, `a`, …); modifiers comma-separated (`ctrl,shift`) |
 | `input.type` | D | `<length>` | `OK 0` | UTF-8 text payload follows the header. Handles Unicode and quote-escape hazards. |
-| `input.send_message` | D | `<hwnd> <msg> <wparam> <lparam>` | `OK 0` | Low-level escape hatch for `SendMessage` |
+| `input.send_message` | D | `<hwnd> <msg> <wparam> <lparam>` | `OK 0` | Low-level escape hatch for `SendMessage` (synchronous) |
+| `input.post_message` | D | `<hwnd> <msg> <wparam> <lparam>` | `OK 0` | Non-blocking peer of `input.send_message`; uses `PostMessage`. Use when the target's message pump is unresponsive to a synchronous send. |
 
 ### 4.5 `element.*`
 
@@ -320,6 +323,8 @@ UI Automation. Element identifiers use the prefix `elt:` followed by a connectio
 | `element.at` | O | `<x> <y>` | `OK <len>\n<json>` or `ERR not_found` | Hit test |
 | `element.find` | O | `<role> <name-pattern>` | `OK <len>\n<json>` or `ERR not_found` or `ERR uia_blind` | `not_found` = nothing matched. `uia_blind` = UIA cannot see across the integrity barrier (caller may need to elevate). |
 | `element.wait` | O | `<role> <name-pattern> <timeout-ms>` | `OK <len>\n<json>` or `ERR timeout` | Polling form of `element.find` (re-walks the visible-element subtree every 250 ms until match or deadline). Returned id is valid for `element.invoke` on the same connection. Capability-gated. |
+| `element.find_invoke` | D | `<role> <name-pattern>` | `OK 0` or `ERR not_found` / `ERR uia_blind` / `ERR not_supported_by_target` / `ERR target_gone` | Compound verb: `element.find` + `element.invoke` in one round-trip. Same matching rules as `element.find`. |
+| `element.at_invoke` | D | `<x> <y>` | `OK 0` or `ERR not_found` / `ERR not_supported_by_target` / `ERR target_gone` | Compound verb: `element.at` + `element.invoke` in one round-trip. |
 | `element.invoke` | D | `<elt-id>` | `OK 0` or `ERR not_supported_by_target` or `ERR target_gone` | InvokePattern |
 | `element.toggle` | D | `<elt-id>` | `OK <len>\n<json>` | TogglePattern. JSON: `{"new_state":"<state>"}` ∈ `on`, `off`, `indeterminate` |
 | `element.expand` | D | `<elt-id>` | `OK <len>\n<json>` | ExpandCollapsePattern.Expand. JSON: `{"new_state":"<state>"}` |
@@ -354,7 +359,7 @@ Process management.
 |---|---|---|---|---|
 | `process.list` | O | `[--filter <pattern>]` | `OK <len>\n<json>` | JSON: `{"processes":[{"pid":N,"image":"...","ppid":N}]}` |
 | `process.start` | D | `<argv> [--stdin <length>]` | `OK <len>\n<json>` | `CreateProcess`. Returns `{"pid":N}`. Optional length-prefixed stdin payload. |
-| `process.shell` | D | `<command-line>` | `OK <len>\n<json>` | `ShellExecuteEx`. Handles paths with spaces / unicode without shell-escape hazards. |
+| `process.shell` | D | `<path> [--args <s>] [--verb <v>]` | `OK <len>\n<json>` | `ShellExecuteEx`. Handles paths with spaces / unicode without shell-escape hazards. `--args` is the parameter string passed verbatim to the spawned program; `--verb` selects a non-default verb (e.g. `runas` for elevation, `print`, `edit`). Returns `{"pid":N}` (PID may be 0 for verbs that don't spawn a process). |
 | `process.kill` | P | `<pid>` | `OK 0` | `TerminateProcess` |
 | `process.wait` | O | `<pid> <timeout-ms>` | `OK <len>\n<json>` or `ERR timeout` | JSON: `{"exit_code":N}`. Returns successfully even if the process has already exited. |
 
@@ -738,12 +743,15 @@ input.scroll                 (D)
 input.key                    (D)
 input.type                   (D)
 input.send_message           (D)
+input.post_message           (D)
 
 element.list                 (O)
 element.tree                 (O)
 element.at                   (O)
 element.find                 (O)
 element.wait                 (O)
+element.find_invoke          (D)
+element.at_invoke            (D)
 element.invoke               (D)
 element.toggle               (D)
 element.expand               (D)

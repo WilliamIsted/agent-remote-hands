@@ -814,6 +814,127 @@ void set_text(Connection& conn, const wire::Request& req) {
 }
 
 // ---------------------------------------------------------------------------
+// Internal helper: invoke the InvokePattern on `elem` and write the verb
+// response. Used by element.invoke (after id lookup) and the compound verbs
+// element.find_invoke / element.at_invoke.
+
+static void invoke_on_element(Connection& conn, IUIAutomationElement* elem) {
+    ComPtr<IUIAutomationInvokePattern> ip;
+    if (FAILED(elem->GetCurrentPatternAs(
+            UIA_InvokePatternId, IID_PPV_ARGS(&ip))) || !ip) {
+        conn.writer().write_err(
+            ErrorCode::NotSupportedByTarget,
+            "{\"pattern\":\"InvokePattern\"}");
+        return;
+    }
+    const HRESULT hr = ip->Invoke();
+    if (hr == UIA_E_ELEMENTNOTAVAILABLE) {
+        conn.writer().write_err(ErrorCode::TargetGone);
+        return;
+    }
+    if (FAILED(hr)) {
+        char detail[64];
+        std::snprintf(detail, sizeof(detail),
+                      "{\"hresult\":\"0x%08lx\"}", hr);
+        conn.writer().write_err(ErrorCode::NotSupported, detail);
+        return;
+    }
+    conn.writer().write_ok();
+}
+
+// ---------------------------------------------------------------------------
+// element.find_invoke / element.at_invoke — compound verbs that collapse a
+// find→invoke or at→invoke pair into one round-trip. Useful for callers that
+// don't want to keep a persistent connection just to span a search and click.
+
+void find_invoke(Connection& conn, const wire::Request& req) {
+    if (req.args.size() != 2) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"element.find_invoke requires <role> <name-pattern>\"}");
+        return;
+    }
+    IUIAutomation* uia = require_uia(conn);
+    if (!uia) return;
+
+    const std::string& role_arg = req.args[0];
+    std::string needle = req.args[1];
+    for (char& c : needle) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    ComPtr<IUIAutomationElement> root;
+    if (FAILED(uia->GetRootElement(&root)) || !root) {
+        conn.writer().write_err(ErrorCode::NotSupported);
+        return;
+    }
+    auto cond = build_visible_condition(uia);
+    if (!cond) {
+        conn.writer().write_err(ErrorCode::NotSupported);
+        return;
+    }
+    ComPtr<IUIAutomationElementArray> arr;
+    if (FAILED(root->FindAll(TreeScope_Subtree, cond.Get(), &arr)) || !arr) {
+        conn.writer().write_err(ErrorCode::NotSupported);
+        return;
+    }
+    int count = 0;
+    arr->get_Length(&count);
+    for (int i = 0; i < count; ++i) {
+        ComPtr<IUIAutomationElement> elem;
+        if (FAILED(arr->GetElement(i, &elem)) || !elem) continue;
+        CONTROLTYPEID ctype = 0;
+        if (FAILED(elem->get_CurrentControlType(&ctype))) continue;
+        if (role_arg != role_token(ctype)) continue;
+        BSTR name_bstr = nullptr;
+        elem->get_CurrentName(&name_bstr);
+        std::string name = bstr_to_utf8(name_bstr);
+        if (name_bstr) SysFreeString(name_bstr);
+        std::string lname = name;
+        for (char& c : lname) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lname.find(needle) == std::string::npos) continue;
+        invoke_on_element(conn, elem.Get());
+        return;
+    }
+    // Same uia_blind / not_found distinction as element.find.
+    HWND fg = GetForegroundWindow();
+    const auto target_il = uipi::window_integrity(fg);
+    const auto& self_il  = uipi::agent_integrity();
+    if (!uipi::input_allowed(self_il, target_il)) {
+        std::string detail = "{";
+        json::append_kv_string(detail, "agent_il", self_il);   detail += ',';
+        json::append_kv_string(detail, "target_il", target_il);
+        detail += '}';
+        conn.writer().write_err(ErrorCode::UiaBlind, detail);
+        return;
+    }
+    conn.writer().write_err(ErrorCode::NotFound);
+}
+
+void at_invoke(Connection& conn, const wire::Request& req) {
+    if (req.args.size() != 2) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"element.at_invoke requires <x> <y>\"}");
+        return;
+    }
+    int x = 0, y = 0;
+    if (!parse_int(req.args[0], x) || !parse_int(req.args[1], y)) {
+        conn.writer().write_err(ErrorCode::InvalidArgs,
+                                "{\"message\":\"x and y must be integers\"}");
+        return;
+    }
+    IUIAutomation* uia = require_uia(conn);
+    if (!uia) return;
+
+    POINT pt{x, y};
+    ComPtr<IUIAutomationElement> elem;
+    if (FAILED(uia->ElementFromPoint(pt, &elem)) || !elem) {
+        conn.writer().write_err(ErrorCode::NotFound);
+        return;
+    }
+    invoke_on_element(conn, elem.Get());
+}
+
+// ---------------------------------------------------------------------------
 // element.wait — polling form of element.find with timeout. Same matching
 // rules: case-insensitive substring on Name, exact role token, visible-only.
 // Polls every 250 ms; returns on first match or `ERR timeout` on deadline.

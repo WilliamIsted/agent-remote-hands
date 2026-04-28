@@ -75,3 +75,25 @@ def test_process_start_and_wait(drive_client: WireClient,
     assert isinstance(r, OkResponse)
     body = json.loads(r.payload)
     assert body["exit_code"] == 7
+
+
+def test_process_wait_after_exit_returns_cached_code(drive_client: WireClient,
+                                                      capabilities: dict) -> None:
+    """Regression for #16: the agent must retain the spawned process handle so
+    process.wait returns the exit code even after the OS has reaped the
+    process. Without the cache this returns ERR target_gone."""
+    import time
+    needs_verb(capabilities, "process.start")
+    needs_verb(capabilities, "process.wait")
+
+    r = drive_client.request("process.start", "cmd.exe /c exit 5")
+    assert isinstance(r, OkResponse)
+    pid = json.loads(r.payload)["pid"]
+
+    # Let the OS finish reaping the process.
+    time.sleep(0.5)
+
+    r = drive_client.request("process.wait", str(pid), "1000")
+    assert isinstance(r, OkResponse), f"got {r!r}"
+    body = json.loads(r.payload)
+    assert body["exit_code"] == 5

@@ -31,9 +31,11 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 #define WIN32_LEAN_AND_MEAN
@@ -44,6 +46,36 @@
 namespace remote_hands::process_verbs {
 
 namespace {
+
+// Track HANDLEs of agent-spawned processes so process.wait can query the
+// exit code even after the OS has reaped the process. Without this, the
+// caller gets `ERR target_gone` from `OpenProcess` rather than the cached
+// exit code.
+//
+// Bookkeeping is best-effort: a handle is leaked if process.start is called
+// without matching process.wait. In practice the map size is bounded by
+// per-session orphan-spawn count and each entry is small.
+std::mutex& spawned_mutex() {
+    static std::mutex m;
+    return m;
+}
+std::unordered_map<DWORD, HANDLE>& spawned_processes() {
+    static std::unordered_map<DWORD, HANDLE> m;
+    return m;
+}
+void track_spawned(DWORD pid, HANDLE handle) {
+    std::lock_guard<std::mutex> lk(spawned_mutex());
+    spawned_processes()[pid] = handle;
+}
+// Returns the stored HANDLE for `pid` (caller now owns) or NULL if untracked.
+HANDLE take_spawned(DWORD pid) {
+    std::lock_guard<std::mutex> lk(spawned_mutex());
+    auto it = spawned_processes().find(pid);
+    if (it == spawned_processes().end()) return nullptr;
+    HANDLE h = it->second;
+    spawned_processes().erase(it);
+    return h;
+}
 
 bool contains_ci(std::string_view haystack, std::string_view needle) {
     if (needle.empty()) return true;
@@ -215,7 +247,9 @@ void start(Connection& conn, const wire::Request& req) {
 
     const DWORD pid = pi.dwProcessId;
     CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+    // Retain pi.hProcess for later process.wait — see track_spawned. The
+    // handle is closed by take_spawned + the eventual wait response.
+    track_spawned(pid, pi.hProcess);
 
     char body[64];
     std::snprintf(body, sizeof(body), "{\"pid\":%lu}", pid);
@@ -233,18 +267,31 @@ void shell(Connection& conn, const wire::Request& req) {
     if (req.args.empty()) {
         conn.writer().write_err(
             ErrorCode::InvalidArgs,
-            "{\"message\":\"process.shell requires <command-line>\"}");
+            "{\"message\":\"process.shell requires <path> [--args <s>] [--verb <v>]\"}");
         return;
     }
 
-    std::wstring target = text::utf8_to_wide(req.args[0]);
+    std::string verb_arg;
+    std::string args_arg;
+    for (std::size_t i = 1; i < req.args.size(); ++i) {
+        if (req.args[i] == "--verb" && i + 1 < req.args.size()) {
+            verb_arg = req.args[++i];
+        } else if (req.args[i] == "--args" && i + 1 < req.args.size()) {
+            args_arg = req.args[++i];
+        }
+    }
+
+    std::wstring target     = text::utf8_to_wide(req.args[0]);
+    std::wstring wide_args   = args_arg.empty() ? std::wstring{} : text::utf8_to_wide(args_arg);
+    std::wstring wide_verb   = verb_arg.empty() ? std::wstring{} : text::utf8_to_wide(verb_arg);
 
     SHELLEXECUTEINFOW sei{};
-    sei.cbSize = sizeof(sei);
-    sei.fMask  = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-    sei.lpVerb = nullptr;
-    sei.lpFile = target.c_str();
-    sei.nShow  = SW_SHOWNORMAL;
+    sei.cbSize       = sizeof(sei);
+    sei.fMask        = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb       = wide_verb.empty() ? nullptr : wide_verb.c_str();
+    sei.lpFile       = target.c_str();
+    sei.lpParameters = wide_args.empty() ? nullptr : wide_args.c_str();
+    sei.nShow        = SW_SHOWNORMAL;
 
     if (!ShellExecuteExW(&sei)) {
         char detail[64];
@@ -323,19 +370,27 @@ void wait(Connection& conn, const wire::Request& req) {
         return;
     }
 
-    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                           FALSE, static_cast<DWORD>(pid_v));
+    // Prefer the tracked handle from process.start: GetExitCodeProcess on a
+    // retained handle works whether the process is alive or already reaped,
+    // so callers get the cached exit code rather than ERR target_gone.
+    HANDLE h = take_spawned(static_cast<DWORD>(pid_v));
     if (!h) {
-        std::string detail = "{";
-        json::append_kv_uint(detail, "pid", pid_v);
-        detail += '}';
-        conn.writer().write_err(ErrorCode::TargetGone, detail);
-        return;
+        h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                        FALSE, static_cast<DWORD>(pid_v));
+        if (!h) {
+            std::string detail = "{";
+            json::append_kv_uint(detail, "pid", pid_v);
+            detail += '}';
+            conn.writer().write_err(ErrorCode::TargetGone, detail);
+            return;
+        }
     }
 
     const DWORD wr = WaitForSingleObject(h, static_cast<DWORD>(timeout_v));
     if (wr == WAIT_TIMEOUT) {
-        CloseHandle(h);
+        // Re-track the handle so a subsequent wait can reuse it; otherwise
+        // the next call falls back to OpenProcess and we lose the cache.
+        track_spawned(static_cast<DWORD>(pid_v), h);
         conn.writer().write_err(ErrorCode::Timeout);
         return;
     }

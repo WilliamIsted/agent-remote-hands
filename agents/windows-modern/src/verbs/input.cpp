@@ -433,4 +433,41 @@ void send_message(Connection& conn, const wire::Request& req) {
     conn.writer().write_ok();
 }
 
+// ---------------------------------------------------------------------------
+// input.post_message — non-blocking peer of input.send_message. Posts to the
+// window's queue and returns immediately; useful when the target window is
+// unresponsive to a synchronous SendMessage.
+
+void post_message(Connection& conn, const wire::Request& req) {
+    if (req.args.size() != 4) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"input.post_message requires <hwnd> <msg> <wparam> <lparam>\"}");
+        return;
+    }
+    HWND target = parse_hwnd(req.args[0]);
+    if (!target || !IsWindow(target)) {
+        std::string detail = "{";
+        json::append_kv_string(detail, "handle", req.args[0]);
+        detail += '}';
+        conn.writer().write_err(ErrorCode::TargetGone, detail);
+        return;
+    }
+
+    UINT      msg    = static_cast<UINT>(std::strtoul(req.args[1].c_str(), nullptr, 0));
+    WPARAM    wparam = static_cast<WPARAM>(std::strtoull(req.args[2].c_str(), nullptr, 0));
+    LPARAM    lparam = static_cast<LPARAM>(std::strtoll(req.args[3].c_str(), nullptr, 0));
+
+    if (!uipi::check_window_or_fail(conn, target)) return;
+
+    if (!PostMessageW(target, msg, wparam, lparam)) {
+        char detail[64];
+        std::snprintf(detail, sizeof(detail),
+                      "{\"win32_error\":%lu}", GetLastError());
+        conn.writer().write_err(ErrorCode::NotSupported, detail);
+        return;
+    }
+    conn.writer().write_ok();
+}
+
 }  // namespace remote_hands::input_verbs
