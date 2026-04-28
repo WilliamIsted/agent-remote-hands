@@ -58,8 +58,9 @@ target_sources(remote-hands PRIVATE
     src/sysinfo.cpp
     # verbs (one file per namespace)
     src/verbs/system.cpp
-    # Future namespaces: screen, window, input, element, file, process,
-    # registry, clipboard, watch.
+    src/verbs/window.cpp
+    # Future namespaces: screen, input, element, file, process, registry,
+    # clipboard, watch.
 )
 
 target_include_directories(remote-hands PRIVATE src)

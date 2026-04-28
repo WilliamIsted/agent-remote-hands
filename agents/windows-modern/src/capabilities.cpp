@@ -42,6 +42,15 @@ namespace system_verbs {
     void sleep(Connection&, const wire::Request&);
 }  // namespace system_verbs
 
+namespace window_verbs {
+    void list(Connection&, const wire::Request&);
+    void find(Connection&, const wire::Request&);
+    void focus(Connection&, const wire::Request&);
+    void close(Connection&, const wire::Request&);
+    void move(Connection&, const wire::Request&);
+    void state(Connection&, const wire::Request&);
+}  // namespace window_verbs
+
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -60,8 +69,16 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"system.hibernate",           {Tier::Power,   &system_verbs::hibernate}},
         {"system.sleep",               {Tier::Power,   &system_verbs::sleep}},
 
-        // Future phases register screen.*, window.*, input.*, element.*,
-        // file.*, process.*, registry.*, clipboard.*, watch.* here.
+        // window.*
+        {"window.list",                {Tier::Observe, &window_verbs::list}},
+        {"window.find",                {Tier::Observe, &window_verbs::find}},
+        {"window.focus",               {Tier::Drive,   &window_verbs::focus}},
+        {"window.close",               {Tier::Drive,   &window_verbs::close}},
+        {"window.move",                {Tier::Drive,   &window_verbs::move}},
+        {"window.state",               {Tier::Observe, &window_verbs::state}},
+
+        // Future phases register screen.*, input.*, element.*, file.*,
+        // process.*, registry.*, clipboard.*, watch.* here.
     };
     return kVerbs;
 }
