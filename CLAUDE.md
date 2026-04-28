@@ -175,6 +175,19 @@ Long-form design proposals (RFC-shaped, pre-implementation) live as **GitHub iss
 
 Don't drop large design docs into this repo unprompted. A `docs/` folder, when needed in future, is for **operational** guidance only (runbooks, gotcha explainers, deployment notes) — not speculative design.
 
+## Binary naming convention
+
+The **current edge target** ships an unsuffixed binary; **legacy targets** carry a suffix:
+
+- `agents/windows-modern/` (today's edge) → `remote-hands.exe`
+- `agents/windows-nt/` (future legacy build) → `remote-hands-nt.exe`
+
+When the current edge is one day superseded by a newer target (e.g. an arm64- or v3-era successor), the new target takes the unsuffixed name and the present modern build is renamed at that handover (e.g. `remote-hands-mic.exe`). One-shot rename, documented in the release notes.
+
+The same rule applies to CMake targets: edge targets are `remote-hands` / `remote-hands-core` / `remote-hands-tests`; legacy targets carry the suffix (`remote-hands-nt`, etc.).
+
+mDNS service type (`_remote-hands._tcp.local.`) is target-agnostic; targets distinguish via the `os=` TXT record field.
+
 ## Future structure decisions (don't pre-empt)
 
 - **v2.0 privsep dispatcher** will need a second binary alongside the agent. Two viable shapes — flat (`agents/windows-modern/dispatcher.cpp` + `worker.cpp` in the same target) or nested (`agents/windows-modern/{dispatcher,worker}/` separate targets). Decide when the work starts; current single-target structure is right for v1.0.
