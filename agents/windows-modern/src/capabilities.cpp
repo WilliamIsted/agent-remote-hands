@@ -51,6 +51,15 @@ namespace window_verbs {
     void state(Connection&, const wire::Request&);
 }  // namespace window_verbs
 
+namespace input_verbs {
+    void click(Connection&, const wire::Request&);
+    void move(Connection&, const wire::Request&);
+    void scroll(Connection&, const wire::Request&);
+    void key(Connection&, const wire::Request&);
+    void type(Connection&, const wire::Request&);
+    void send_message(Connection&, const wire::Request&);
+}  // namespace input_verbs
+
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -77,8 +86,16 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"window.move",                {Tier::Drive,   &window_verbs::move}},
         {"window.state",               {Tier::Observe, &window_verbs::state}},
 
-        // Future phases register screen.*, input.*, element.*, file.*,
-        // process.*, registry.*, clipboard.*, watch.* here.
+        // input.*
+        {"input.click",                {Tier::Drive,   &input_verbs::click}},
+        {"input.move",                 {Tier::Drive,   &input_verbs::move}},
+        {"input.scroll",               {Tier::Drive,   &input_verbs::scroll}},
+        {"input.key",                  {Tier::Drive,   &input_verbs::key}},
+        {"input.type",                 {Tier::Drive,   &input_verbs::type}},
+        {"input.send_message",         {Tier::Drive,   &input_verbs::send_message}},
+
+        // Future phases register screen.*, element.*, file.*, process.*,
+        // registry.*, clipboard.*, watch.* here.
     };
     return kVerbs;
 }

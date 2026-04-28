@@ -56,10 +56,12 @@ target_sources(remote-hands PRIVATE
     src/token.cpp
     src/capabilities.cpp
     src/sysinfo.cpp
+    src/uipi.cpp
     # verbs (one file per namespace)
     src/verbs/system.cpp
     src/verbs/window.cpp
-    # Future namespaces: screen, input, element, file, process, registry,
+    src/verbs/input.cpp
+    # Future namespaces: screen, element, file, process, registry,
     # clipboard, watch.
 )
 
