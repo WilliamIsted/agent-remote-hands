@@ -26,6 +26,7 @@
 // matching modules added in subsequent build phases).
 
 #include "config.hpp"
+#include "install.hpp"
 #include "log.hpp"
 #include "mdns.hpp"
 #include "server.hpp"
@@ -95,10 +96,11 @@ public:
 int wmain(int argc, wchar_t* argv[]) try {
     auto config = rh::Config::parse(argc, argv);
 
-    if (config.install_mode != rh::InstallMode::Run) {
-        // --install / --uninstall are wired in build phase 18.
-        std::wcerr << L"--install / --uninstall not yet implemented\n";
-        return 1;
+    if (config.install_mode == rh::InstallMode::Install) {
+        return rh::install::run_install(config);
+    }
+    if (config.install_mode == rh::InstallMode::Uninstall) {
+        return rh::install::run_uninstall(config);
     }
 
     rh::log::info(L"Agent Remote Hands v2.0 starting on TCP port %u", config.port);

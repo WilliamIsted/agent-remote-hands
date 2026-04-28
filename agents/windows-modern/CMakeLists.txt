@@ -71,6 +71,7 @@ target_sources(remote-hands-core PRIVATE
     src/subscription.cpp
     src/crash_check.cpp
     src/mdns.cpp
+    src/install.cpp
     # verbs (one file per namespace)
     src/verbs/system.cpp
     src/verbs/window.cpp
