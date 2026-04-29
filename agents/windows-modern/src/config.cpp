@@ -76,6 +76,8 @@ Options:
   --watchdog <s>          Self-exit if no connection activity for this many
                           seconds (default: 0 = off; pair with Task Scheduler
                           restart-on-failure for unattended recovery)
+  --install               Register the autostart logon-task and exit
+  --uninstall             Remove the autostart task and exit
   -h, --help              Show this help and exit
 
 Environment variables (overridden by CLI flags):
@@ -84,9 +86,6 @@ Environment variables (overridden by CLI flags):
   REMOTE_HANDS_TOKEN_PATH
   REMOTE_HANDS_IDLE_TIMEOUT   (seconds)
   REMOTE_HANDS_WATCHDOG       (seconds)
-
-Install / uninstall: see Tools\install-agent.ps1 (run from elevated
-PowerShell). The agent itself is a wire-protocol server, not an installer.
 )");
     std::exit(0);
 }
@@ -137,11 +136,10 @@ Config Config::parse(int argc, wchar_t* argv[]) {
         } else if (arg == L"--watchdog" && i + 1 < argc) {
             c.watchdog_seconds = static_cast<unsigned int>(
                 std::wcstoul(argv[++i], nullptr, 10));
-        } else if (arg == L"--install" || arg == L"--uninstall") {
-            std::fwprintf(stderr,
-                L"--install / --uninstall were removed in this build.\n"
-                L"Use Tools\\install-agent.ps1 (elevated PowerShell). See README.\n");
-            std::exit(2);
+        } else if (arg == L"--install") {
+            c.install_mode = InstallMode::Install;
+        } else if (arg == L"--uninstall") {
+            c.install_mode = InstallMode::Uninstall;
         } else if (arg == L"--help" || arg == L"-h") {
             print_usage_and_exit();
         } else {

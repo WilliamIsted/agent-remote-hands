@@ -31,15 +31,13 @@ cmake -S agents/windows-modern -B agents/windows-modern/build -A x64
 cmake --build agents/windows-modern/build --config Release
 ```
 
-Install on the target Windows machine (Administrator PowerShell):
+Self-install on the target Windows machine (Administrator PowerShell):
 
 ```powershell
-.\Tools\install-agent.ps1 -Discoverable
+.\agents\windows-modern\build\Release\remote-hands.exe --install --discoverable
 ```
 
-That copies the binary to `%ProgramFiles%\AgentRemoteHands\`, adds binary-scoped Windows Firewall rules (TCP/8765 + UDP/5353 for mDNS when `-Discoverable`), and registers a Task Scheduler logon-task with restart-on-failure so the agent autostarts in the user's interactive desktop session on next logon. `-Uninstall` reverses everything.
-
-Installation logic lives in the PowerShell script — not the binary — because Microsoft Defender's machine-learning heuristic flags self-installing binaries as `Program:Win32/Contebrew.A!ml`. The agent itself is just a wire-protocol server.
+That copies the binary to `%ProgramFiles%\AgentRemoteHands\`, opens TCP/8765 in the firewall, and registers a Task Scheduler logon-task so the agent autostarts in the user's interactive desktop session on next logon. The `--discoverable` flag turns on mDNS advertisement as `<machine>._remote-hands._tcp.local.`.
 
 Sanity-check from another machine using the conformance suite:
 
@@ -82,7 +80,7 @@ To wire it into Claude Code (once `mcp-server/` lands — see the Roadmap), drop
 | [`mcp-server/`](mcp-server/) | Python MCP bridge — exposes wire verbs as named tools to MCP-aware clients (Claude Code, Claude Desktop, …) with tier-aware tool filtering |
 | `client/hostctl` | *(planned)* Reference Python CLI |
 | `client/hostctl-discover` | *(planned)* mDNS LAN scanner |
-| [`Tools/install-agent.ps1`](Tools/install-agent.ps1) | PowerShell installer — copies the binary to `%ProgramFiles%`, adds binary-scoped firewall rules, registers a Task Scheduler logon-task with restart-on-failure. `-Uninstall` reverses it. |
+| `Tools/install-agent.ps1` | *(planned)* PowerShell installer for fleet deployment — the agent's own `--install` flag handles single hosts today |
 | `examples/vagrant/` | *(planned)* Win11 dev fixture for VirtualBox / VMware / Hyper-V |
 
 ## Architecture

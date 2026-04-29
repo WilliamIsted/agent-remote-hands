@@ -21,14 +21,12 @@
 //   - Install the Ctrl-C handler so shutdown is graceful
 //   - Construct the Server and run its accept loop until shutdown is requested
 //
-// Token-file generation and mDNS responder startup are handled outside this
-// file. Installation onto a host (binary placement, firewall rules, Task
-// Scheduler registration) lives in `Tools/install-agent.ps1` rather than in
-// the agent itself — a self-installing binary trips Microsoft Defender's
-// `Program:Win32/Contebrew.A!ml` heuristic, the agent's job is to be a
-// wire-protocol server.
+// Token-file generation, mDNS responder startup, and the install / uninstall
+// paths are handled outside this file (see config.cpp for parsing, and the
+// matching modules added in subsequent build phases).
 
 #include "config.hpp"
+#include "install.hpp"
 #include "log.hpp"
 #include "mdns.hpp"
 #include "server.hpp"
@@ -99,6 +97,13 @@ public:
 
 int wmain(int argc, wchar_t* argv[]) try {
     auto config = rh::Config::parse(argc, argv);
+
+    if (config.install_mode == rh::InstallMode::Install) {
+        return rh::install::run_install(config);
+    }
+    if (config.install_mode == rh::InstallMode::Uninstall) {
+        return rh::install::run_uninstall(config);
+    }
 
     rh::log::info(L"Agent Remote Hands v2.0 starting on TCP port %u", config.port);
 

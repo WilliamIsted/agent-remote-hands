@@ -158,8 +158,7 @@ python tests/conformance/run.py 127.0.0.1 18765   # vagrant forwards 8765 -> 187
 - **Don't `git add` from the repo root without confirming `.gitignore` is intact.** Build artefacts are noisy; staging unintentionally is easy.
 - **Don't skip pre-commit hooks** (`--no-verify`). If a hook fails, fix the cause.
 - **Don't amend commits** unless the user explicitly asks. Make a new commit instead.
-- **Don't add `winget` or store-installed tooling to `Tools/install-agent.ps1`** — the installer must work on bare VMs without Microsoft Store availability.
-- **Don't add self-installer behaviour back into `agents/windows-modern/`.** Microsoft Defender's ML heuristic flags self-installing binaries as `Program:Win32/Contebrew.A!ml` regardless of mechanism (netsh shell-out, Firewall COM API, or anything else tried so far). Installation is the PowerShell script's job; the binary is purely a wire-protocol server.
+- **Don't add `winget` or store-installed tooling to install scripts** — the agent's own `--install` (and the planned `Tools/install-agent.ps1`) must work on bare VMs without Microsoft Store availability.
 - **Don't disable SEH / structured exception handling barriers in the agent** — they catch driver-induced crashes from third-party UI hooks.
 - **Don't ship a verb without a conformance test.** The suite is the contract.
 

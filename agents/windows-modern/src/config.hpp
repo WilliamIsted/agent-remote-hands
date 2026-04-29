@@ -19,13 +19,15 @@
 
 namespace remote_hands {
 
+enum class InstallMode {
+    Run,        // Normal operation: listen and serve
+    Install,    // --install: register Task Scheduler logon-task and exit
+    Uninstall,  // --uninstall: remove the task and exit
+};
+
 // Parsed configuration from environment variables and command-line flags.
 //
 // Precedence: CLI flags override environment, environment overrides defaults.
-//
-// The agent is purely a wire-protocol server. Installation onto a host
-// (binary placement, firewall rules, Task Scheduler registration) lives in
-// `Tools/install-agent.ps1`, not in this binary — see the README.
 struct Config {
     std::uint16_t           port            = 8765;
     bool                    discoverable    = false;
@@ -38,6 +40,7 @@ struct Config {
     // longer than this, the agent self-exits (Task Scheduler is then expected
     // to restart it). 0 disables.
     unsigned int            watchdog_seconds     = 0;
+    InstallMode             install_mode    = InstallMode::Run;
 
     // Parses argc / argv (wide-char) and returns a populated Config.
     // Exits the process on --help. Throws std::runtime_error on unknown flags.
