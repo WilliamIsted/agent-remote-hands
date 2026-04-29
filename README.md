@@ -24,16 +24,29 @@ Agent Remote Hands sits between those: a native agent on the target exposes a wi
 
 ## Quick start
 
-Build the agent (from a Developer PowerShell with CMake on PATH):
+Easiest: install via [Scoop](https://scoop.sh/) on the target machine.
+
+```powershell
+# One-time prep — add a Defender exclusion for ~/scoop (a common Scoop
+# practice for any non-mainstream binary; the install script also adds
+# one for the agent's eventual install dir).
+Add-MpPreference -ExclusionPath "$env:USERPROFILE\scoop"
+
+# Add the bucket and install:
+scoop bucket add isted https://github.com/WilliamIsted/scoop-bucket
+scoop install agent-remote-hands
+
+# From an elevated PowerShell, complete the system-level setup
+# (firewall + Task Scheduler logon-task with restart-on-failure):
+agent-remote-hands-setup -Discoverable
+```
+
+Or build from source and install manually (Administrator PowerShell):
 
 ```powershell
 cmake -S agents/windows-modern -B agents/windows-modern/build -A x64
 cmake --build agents/windows-modern/build --config Release
-```
 
-Install on the target Windows machine (Administrator PowerShell):
-
-```powershell
 # Step 1: configure Defender exclusion BEFORE the binary lands
 .\Tools\install-agent.ps1 -PrepareDefender
 
@@ -45,7 +58,7 @@ Install on the target Windows machine (Administrator PowerShell):
 .\Tools\install-agent.ps1 -Discoverable
 ```
 
-Or, if you can fetch the binary by URL (e.g. from a release asset), one-shot:
+Or one-shot from a URL (release-asset, internal share, etc.):
 
 ```powershell
 .\Tools\install-agent.ps1 -SourceUrl 'https://example/remote-hands.exe' -Discoverable
@@ -98,7 +111,9 @@ To wire it into Claude Code (once `mcp-server/` lands — see the Roadmap), drop
 | [`mcp-server/`](mcp-server/) | Python MCP bridge — exposes wire verbs as named tools to MCP-aware clients (Claude Code, Claude Desktop, …) with tier-aware tool filtering |
 | `client/hostctl` | *(planned)* Reference Python CLI |
 | `client/hostctl-discover` | *(planned)* mDNS LAN scanner |
-| [`Tools/install-agent.ps1`](Tools/install-agent.ps1) | PowerShell installer — copies the binary to `%ProgramFiles%`, adds binary-scoped firewall rules, registers a Task Scheduler logon-task with restart-on-failure. `-Uninstall` reverses it. |
+| [`Tools/install-agent.ps1`](Tools/install-agent.ps1) | PowerShell installer — adds a Defender exclusion, copies the binary to `%ProgramFiles%`, adds binary-scoped firewall rules, registers a Task Scheduler logon-task with restart-on-failure. `-Uninstall` reverses it. |
+| [`Tools/scoop/`](Tools/scoop/) | Scoop manifest reference + bucket-update notes. Published manifest lives at [`WilliamIsted/scoop-bucket`](https://github.com/WilliamIsted/scoop-bucket). |
+| [`.github/workflows/release.yml`](.github/workflows/release.yml) | Release CI — on `v*.*.*` tag push, builds `windows-modern` Release, packages `remote-hands.exe` + install script + docs into a zip, attaches the zip + `SHA256SUMS` to the GitHub Release. |
 | `examples/vagrant/` | *(planned)* Win11 dev fixture for VirtualBox / VMware / Hyper-V |
 
 ## Architecture

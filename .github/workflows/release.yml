@@ -1,0 +1,101 @@
+#   Copyright 2026 William Isted and contributors
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+
+# Release pipeline (#43).
+#
+# Triggered on a version tag push (`v*.*.*`). Builds the windows-modern agent
+# in Release mode, packages the binary plus the install script and key docs
+# into a single zip, generates a SHA256SUMS file, and attaches both to a
+# GitHub Release at the tag. The release is marked pre-release for any tag
+# matching `rc|alpha|beta`.
+#
+# The Scoop manifest (Tools/scoop/agent-remote-hands.json, copied into
+# WilliamIsted/scoop-bucket) consumes these assets — it points at the zip
+# and verifies the hash from SHA256SUMS.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write           # gh release create needs this
+
+jobs:
+  build-and-release:
+    name: Build and publish ${{ github.ref_name }}
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0    # need full history to read the tag annotation
+
+      - name: Configure (CMake)
+        shell: pwsh
+        run: cmake -S agents/windows-modern -B agents/windows-modern/build -A x64
+
+      - name: Build (Release)
+        shell: pwsh
+        run: cmake --build agents/windows-modern/build --config Release
+
+      - name: Package release zip + SHA256SUMS
+        id: pkg
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}'
+          $zipName = "agent-remote-hands-$version-x64.zip"
+
+          $stage = New-Item -ItemType Directory -Force -Path 'release-staging'
+          Copy-Item agents/windows-modern/build/Release/remote-hands.exe $stage.FullName
+          Copy-Item Tools/install-agent.ps1 $stage.FullName
+          Copy-Item README.md $stage.FullName
+          Copy-Item PROTOCOL.md $stage.FullName
+          Copy-Item LICENSE $stage.FullName
+          Compress-Archive -Path "$($stage.FullName)/*" -DestinationPath $zipName -Force
+
+          $hash = (Get-FileHash -Algorithm SHA256 $zipName).Hash.ToLower()
+          "$hash  $zipName" | Out-File -Encoding ascii -NoNewline:$false SHA256SUMS
+
+          Write-Host "Packaged $zipName  (sha256: $hash)"
+
+          # Capture the annotated-tag message as the release body. Falls back
+          # to a one-line auto-generated note if the tag is lightweight.
+          $body = git tag -l --format='%(contents)' $version
+          if ([string]::IsNullOrWhiteSpace($body)) {
+            $body = "Release $version. See PROTOCOL.md for the wire spec."
+          }
+          $body | Out-File -Encoding utf8 release-body.md
+
+          # Surface the zip name so the next step can attach it.
+          "zip=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ github.ref_name }}'
+          $args = @(
+            'release', 'create', $version,
+            '${{ steps.pkg.outputs.zip }}',
+            'SHA256SUMS',
+            '--title',      "Agent Remote Hands $version",
+            '--notes-file', 'release-body.md'
+          )
+          if ($version -match 'rc|alpha|beta') { $args += '--prerelease' }
+          gh @args
