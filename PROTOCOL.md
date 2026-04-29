@@ -44,6 +44,8 @@ If the directive's grammar specifies a `<length>` argument (always the final arg
 | `EVENT sub:7 142\n{...142 bytes...}` | Async event for subscription `sub:7` |
 | `file.write /path/foo.txt 1024\n{...1024 bytes...}` | Verb with payload |
 
+**Response framing is uniform.** Every `OK` and `ERR` response carries a length prefix — `0` for empty bodies, otherwise the byte count of the payload that follows. There is no separate "inline-text" shape: verbs that conceptually return scalars wrap them in JSON (e.g. `process.start` → `{"pid":N}`, not `OK N`). The verb tables in §4 list the JSON shape per OK response in the Notes column. Subscriptions emit `EVENT` frames asynchronously between request/response pairs — see §6.
+
 ### 1.3 Encoding
 
 - Header bytes are UTF-8.
@@ -527,7 +529,55 @@ This is OS-enforced confinement layered on top of protocol-level tier checks. v2
 
 ---
 
-## 8. Discovery
+## 8. Elevation and integrity levels
+
+Windows runs each process at one of four mandatory integrity levels — `low`, `medium`, `high`, `system`. User Interface Privilege Isolation (UIPI) silently blocks synthetic input from a lower-IL process to a higher-IL window. This is the agent's most common silent-failure mode and is worth understanding before deploying.
+
+The OS-level integrity model is **separate** from the wire-protocol tier model in §7: tiers gate wire verbs (observe / drive / power) and live entirely in the agent process; integrity levels gate cross-process effects and are enforced by the kernel. A connection at the `power` tier whose agent runs at `medium` IL still cannot drive a `high`-IL installer wizard.
+
+### 8.1 The Medium-IL agent / High-IL installer trap
+
+When started by a Task Scheduler logon-task with default settings, the agent runs at **Medium IL** in the logged-on user's session. Common installers — Mozilla NSIS, MSI installs, Steam, anything carrying a `requestedExecutionLevel="requireAdministrator"` manifest — auto-elevate to **High IL**.
+
+UIPI then drops every synthesised input that crosses the IL boundary upward. From the wire, every diagnostic looks fine: `element.find` returns `OK <id>`, `element.invoke` returns `OK`, `input.key` returns `OK` — but the wizard never advances. v1 agents had no observability into this; v2 agents surface it explicitly (see §8.3).
+
+### 8.2 Surfacing the agent's IL
+
+`system.info` (§3.1) returns two fields:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `integrity` | `low` / `medium` / `high` / `system`, or `null` on platforms without IL | The agent's own IL |
+| `uiaccess` | boolean | Whether the agent's binary is signed with `uiAccess="true"` — exempts it from UIPI for synthetic input |
+
+A caller that sees `integrity=medium` and `uiaccess=false` knows up front that cross-IL automation against any high-IL installer will fail.
+
+### 8.3 Runtime UIPI failure surfaces
+
+| Error | Detail | Returned by | Meaning |
+|---|---|---|---|
+| `uipi_blocked` | `{agent_il, target_il}` | `input.*`, `element.invoke`, `element.find_invoke`, `element.at_invoke` | Synthetic input rejected because the target window's IL exceeds the agent's |
+| `uia_blind` | `{agent_il, target_il}` | `element.find`, `element.find_invoke`, `element.wait` | UIA tree walk completed without a match, *and* a higher-IL foreground window is present — distinguishes "element doesn't exist" from "I can't see across the barrier" |
+
+Both are deterministic: callers can branch on the code rather than retrying blindly.
+
+### 8.4 Workarounds for cross-IL automation
+
+1. **Spawn a second, elevated agent.** Run a second `remote-hands.exe --port 8766` under an elevated token. The Medium-IL agent handles ordinary automation; the elevated one drives installer wizards. Callers pick the agent that matches the target window's IL.
+2. **Sign the agent with `uiAccess="true"`.** Embedding `<requestedExecutionLevel uiAccess="true" level="asInvoker"/>` in the manifest, signing with a trusted code-signing certificate, and installing the binary under `Program Files` exempts the agent from UIPI without making it elevated. This is the path accessibility tools use; once `system.info.uiaccess=true`, cross-IL input verbs work as if the agent were High-IL.
+3. **`--install` with the registering user already in `BUILTIN\Administrators`.** The installed Task Scheduler task uses `HighestAvailable`; if the user is an admin, the task runs elevated on their next logon, making the agent itself High-IL.
+
+(1) is simplest; (2) is most ergonomic for production deployments; (3) is the fastest path on dev boxes where the user is already a local admin.
+
+### 8.5 Related sections
+
+- `system.info` field shapes — §3.1
+- Error codes `uipi_blocked` and `uia_blind` — §5.2
+- Wire-protocol tier model — §7
+
+---
+
+## 9. Discovery
 
 Agents MAY advertise themselves on the local network via mDNS / DNS-SD when started with `REMOTE_HANDS_DISCOVERABLE=1` or `--discoverable`.
 
@@ -546,39 +596,39 @@ Discovery is opt-in per deployment. The protocol has no transport authentication
 
 ---
 
-## 9. Behaviour notes
+## 10. Behaviour notes
 
-### 9.1 Concurrency
+### 10.1 Concurrency
 
 Verbs from a single connection are serialised — the agent processes them in receive order and responses arrive in the same order. Verbs across different connections may run concurrently.
 
-### 9.2 Idempotency
+### 10.2 Idempotency
 
 Most verbs are not idempotent. Callers that require at-most-once semantics SHOULD wrap retry logic with appropriate guards.
 
 `watch.cancel` is idempotent: cancelling an already-cancelled subscription returns `OK 0`.
 
-### 9.3 Element id stability
+### 10.3 Element id stability
 
 Element IDs are stable for the connection lifetime unless the underlying UI element is destroyed or invalidated. After invalidation, calls referencing the ID return `ERR target_gone`. The ID is not reused for a different element on the same connection.
 
-### 9.4 Foreground locks
+### 10.4 Foreground locks
 
 Windows enforces foreground-window locks to prevent applications from stealing focus. When `window.focus` is denied by this mechanism, the agent returns `ERR lock_held` rather than silently succeeding. Callers may retry after granting their own process the foreground privilege via `AllowSetForegroundWindow`.
 
-### 9.5 UIPI behaviour
+### 10.5 UIPI behaviour
 
-When the agent runs at a lower integrity level than the foreground window, synthetic input verbs (`input.*`, `element.invoke`) return `ERR uipi_blocked` with detail `{"agent_il":"medium","target_il":"high"}`. v1 agents silently dropped such input; v2 agents MUST surface it.
+See §8 for the full discussion of integrity-level interactions. Briefly: synthetic input verbs (`input.*`, `element.invoke`) and UIA-based search verbs (`element.find`, `element.wait`) surface cross-IL barriers explicitly via `ERR uipi_blocked` and `ERR uia_blind` rather than silently succeeding.
 
-### 9.6 Wire-desync recovery
+### 10.6 Wire-desync recovery
 
 If a client sends a malformed request (mis-stated payload length, header exceeding 65 535 bytes, etc.), the agent SHOULD return `ERR wire_desync` and discard the inbound buffer. The client recovers by sending `connection.reset` and resuming.
 
 ---
 
-## 10. Worked examples
+## 11. Worked examples
 
-### 10.1 Minimal session
+### 11.1 Minimal session
 
 ```
 > connection.hello agent-remote-hands 2.0
@@ -593,7 +643,7 @@ If a client sends a malformed request (mis-stated payload length, header exceedi
 < OK 0
 ```
 
-### 10.2 Tier elevation and input
+### 11.2 Tier elevation and input
 
 ```
 > input.click 100 200
@@ -612,7 +662,7 @@ a3f1c8...e9b2
 < OK 0
 ```
 
-### 10.3 UIPI surfacing
+### 11.3 UIPI surfacing
 
 ```
 > input.type 11
@@ -622,7 +672,7 @@ hello world
 {"agent_il":"medium","target_il":"high","message":"foreground window owned by elevated process"}
 ```
 
-### 10.4 Subscription with interleaved verbs
+### 11.4 Subscription with interleaved verbs
 
 ```
 > watch.window --title-prefix "Mozilla Firefox"
@@ -644,7 +694,7 @@ hello world
 < OK 0
 ```
 
-### 10.5 Reboot
+### 11.5 Reboot
 
 ```
 > connection.tier_raise power <token>
@@ -658,7 +708,7 @@ hello world
 (connection drops within ~6 seconds)
 ```
 
-### 10.6 Wire desync recovery
+### 11.6 Wire desync recovery
 
 ```
 > file.write /path/foo.txt 1024
@@ -673,9 +723,9 @@ hello world
 
 ---
 
-## 11. Versioning policy
+## 12. Versioning policy
 
-### 11.1 Major version
+### 12.1 Major version
 
 The protocol major version (currently `2`) appears in:
 
@@ -685,11 +735,11 @@ The protocol major version (currently `2`) appears in:
 
 Major version changes when the wire format, framing rules, or core semantics break compatibility. Clients MUST refuse to operate against an agent whose major version differs from the version they were built against.
 
-### 11.2 Minor version
+### 12.2 Minor version
 
 Minor versions add verbs, capability flags, or error codes without breaking existing clients. Clients SHOULD ignore unrecognised fields in `system.info`, unrecognised verbs in `system.capabilities`, and unrecognised error codes (treating them as opaque strings).
 
-### 11.3 Conformance
+### 12.3 Conformance
 
 An agent claims conformance to a protocol version by:
 
@@ -699,7 +749,7 @@ An agent claims conformance to a protocol version by:
 
 The conformance suite under `tests/conformance/` is the executable contract.
 
-### 11.4 Capability advertisement
+### 12.4 Capability advertisement
 
 Verbs not implemented on a particular target MUST be omitted from `system.capabilities`. Clients MUST NOT issue verbs absent from the capabilities map; agents MAY return `ERR not_supported` if they do.
 

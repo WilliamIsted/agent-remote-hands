@@ -72,6 +72,7 @@ To wire it into Claude Code (once `mcp-server/` lands — see the Roadmap), drop
 | Path | Purpose |
 |---|---|
 | [`PROTOCOL.md`](PROTOCOL.md) | v2 wire-protocol spec — length-prefixed framing, structured errors, three-tier permission model, 66 verbs across 11 namespaces |
+| [`docs/windows-automation-notes.md`](docs/windows-automation-notes.md) | Operational gotchas — MSI mutex, Session 0 isolation, foreground lock policy, integrity-level pitfalls |
 | [`agents/windows-modern/`](agents/windows-modern/) | Windows 10 / 11 agent — C++17, IUIAutomation, WIC for PNG, hand-rolled mDNS responder. Built with CMake. |
 | [`tests/conformance/`](tests/conformance/) | Python pytest suite — capability-gated tests across all 11 namespaces; runs against any agent that speaks the protocol |
 | [`agents/windows-modern/tests/unit/`](agents/windows-modern/tests/unit/) | doctest unit tests for the pure-logic modules (framing, JSON, error codes, tier model) |
