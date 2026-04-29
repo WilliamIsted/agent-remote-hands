@@ -34,12 +34,28 @@ cmake --build agents/windows-modern/build --config Release
 Install on the target Windows machine (Administrator PowerShell):
 
 ```powershell
+# Step 1: configure Defender exclusion BEFORE the binary lands
+.\Tools\install-agent.ps1 -PrepareDefender
+
+# Step 2: drop remote-hands.exe into C:\Program Files\AgentRemoteHands\
+#         (drag-drop, RDP file paste, scp, etc — any path that lands it
+#         directly in the now-excluded directory)
+
+# Step 3: complete the install
 .\Tools\install-agent.ps1 -Discoverable
 ```
 
-That copies the binary to `%ProgramFiles%\AgentRemoteHands\`, adds binary-scoped Windows Firewall rules (TCP/8765 + UDP/5353 for mDNS when `-Discoverable`), and registers a Task Scheduler logon-task with restart-on-failure so the agent autostarts in the user's interactive desktop session on next logon. `-Uninstall` reverses everything.
+Or, if you can fetch the binary by URL (e.g. from a release asset), one-shot:
 
-Installation logic lives in the PowerShell script — not the binary — because Microsoft Defender's machine-learning heuristic flags self-installing binaries as `Program:Win32/Contebrew.A!ml`. The agent itself is just a wire-protocol server.
+```powershell
+.\Tools\install-agent.ps1 -SourceUrl 'https://example/remote-hands.exe' -Discoverable
+```
+
+The script adds a Microsoft Defender exclusion for `%ProgramFiles%\AgentRemoteHands\`, places the binary there, adds binary-scoped Windows Firewall rules (TCP/8765 + UDP/5353 for mDNS when `-Discoverable`), and registers a Task Scheduler logon-task with restart-on-failure so the agent autostarts in the user's interactive desktop session on next logon. `-Uninstall` reverses everything (including the Defender exclusion).
+
+### Why the Defender exclusion?
+
+Microsoft Defender's machine-learning heuristic flags any unsigned remote-control tool of this shape (synthetic input + screen capture + arbitrary file I/O + process kill + TCP listener) as `Program:Win32/Contebrew.A!ml` — regardless of the binary's specific build, install behaviour, or strings present. The detection is structural. Without a code-signing certificate, the only mitigation is to deploy into a path Defender doesn't scan. Code signing is tracked as the v1.0 GA blocker.
 
 Sanity-check from another machine using the conformance suite:
 
