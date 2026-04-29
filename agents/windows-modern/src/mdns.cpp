@@ -27,7 +27,6 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
-#include <netioapi.h>
 
 #pragma comment(lib, "iphlpapi.lib")
 
@@ -204,12 +203,6 @@ struct Responder::Impl {
     std::string         hostname;
     std::uint32_t       ipv4 = 0;
 
-    // Set by the IP-change callback; the run loop notices, re-queries the
-    // local IPv4, and emits an unsolicited announcement so listening browsers
-    // refresh their cache without waiting for the next query.
-    std::atomic<bool>   ip_dirty{false};
-    HANDLE              addr_notify_handle = nullptr;
-
     explicit Impl(Config c) : cfg{std::move(c)} {}
 
     void open_socket() {
@@ -257,36 +250,6 @@ struct Responder::Impl {
         }
     }
 
-    // System-thread-pool callback fired by NotifyIpInterfaceChange. We can't
-    // safely do mDNS I/O from this thread, so we just flip a flag the run
-    // loop notices on its next 100 ms wakeup.
-    static VOID NETIOAPI_API_ on_ip_change(PVOID context,
-                                           PMIB_IPINTERFACE_ROW /*row*/,
-                                           MIB_NOTIFICATION_TYPE /*type*/) {
-        if (auto* self = static_cast<Impl*>(context)) {
-            self->ip_dirty.store(true);
-        }
-    }
-
-    void register_ip_change_notify() {
-        const DWORD status = NotifyIpInterfaceChange(
-            AF_INET, &Impl::on_ip_change, this, FALSE,
-            &addr_notify_handle);
-        if (status != NO_ERROR) {
-            log::warning(L"mDNS: NotifyIpInterfaceChange failed (%lu); "
-                         L"announcements will not refresh on IP change",
-                         status);
-            addr_notify_handle = nullptr;
-        }
-    }
-
-    void unregister_ip_change_notify() {
-        if (addr_notify_handle) {
-            CancelMibChangeNotify2(addr_notify_handle);
-            addr_notify_handle = nullptr;
-        }
-    }
-
     void announce_unsolicited(const sockaddr_in& mcast) {
         const auto resp = build_response(hostname, cfg.tcp_port,
                                          cfg.os_tag, ipv4);
@@ -330,13 +293,21 @@ struct Responder::Impl {
         inet_pton(AF_INET, kMulticastAddr, &mcast.sin_addr);
         mcast.sin_port   = htons(kMulticastPort);
 
-        register_ip_change_notify();
+        // Poll for IP changes every ~5 seconds via the same
+        // GetAdaptersAddresses path used at startup. We previously used
+        // NotifyIpInterfaceChange for this, but Microsoft Defender's ML
+        // heuristic (Program:Win32/Contebrew.A!ml) flagged unsigned
+        // binaries that import that callback API as worm-shaped. Polling
+        // is functionally equivalent for the slow-change scenario we
+        // care about (DHCP renewal, VM-adapter mode swap) and adds no
+        // new imports.
+        constexpr int kPollEvery100msTicks = 50;   // ~5 seconds
+        int ticks_until_poll = kPollEvery100msTicks;
 
         char buf[2048];
         while (!stop_requested.load()) {
-            // Refresh cached IP + send unsolicited announcement when the
-            // OS-level IP-change callback has fired since we last looked.
-            if (ip_dirty.exchange(false)) {
+            if (--ticks_until_poll <= 0) {
+                ticks_until_poll = kPollEvery100msTicks;
                 handle_ip_change(mcast);
             }
 
@@ -362,7 +333,6 @@ struct Responder::Impl {
             announce_unsolicited(mcast);
         }
 
-        unregister_ip_change_notify();
         close_socket();
     }
 };
