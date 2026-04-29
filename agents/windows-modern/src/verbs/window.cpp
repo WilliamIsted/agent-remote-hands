@@ -39,6 +39,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -130,9 +131,41 @@ bool starts_with_ci(std::string_view s, std::string_view prefix) {
     return true;
 }
 
-void append_window_object(std::string& out, HWND hwnd) {
+// HMONITOR → 0-based index, ordering matches EnumDisplayMonitors callback
+// order (typically primary monitor first on conventional Windows configs).
+// Built once per request so window.list / window.find don't pay repeated
+// monitor-enum cost per row.
+struct MonitorIndexMap {
+    std::vector<HMONITOR> ordered;
+
+    int index_of(HMONITOR m) const noexcept {
+        for (std::size_t i = 0; i < ordered.size(); ++i) {
+            if (ordered[i] == m) return static_cast<int>(i);
+        }
+        return -1;
+    }
+};
+
+BOOL CALLBACK collect_monitor(HMONITOR mon, HDC, LPRECT, LPARAM lparam) {
+    auto* map = reinterpret_cast<MonitorIndexMap*>(lparam);
+    map->ordered.push_back(mon);
+    return TRUE;
+}
+
+MonitorIndexMap build_monitor_index_map() {
+    MonitorIndexMap m;
+    EnumDisplayMonitors(nullptr, nullptr, collect_monitor,
+                        reinterpret_cast<LPARAM>(&m));
+    return m;
+}
+
+void append_window_object(std::string& out, HWND hwnd,
+                          const MonitorIndexMap& monitors) {
     RECT r{};
     GetWindowRect(hwnd, &r);
+
+    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    const int monitor_index = mon ? monitors.index_of(mon) : -1;
 
     out += '{';
     json::append_kv_string(out, "hwnd", hwnd_to_string(hwnd));         out += ',';
@@ -141,7 +174,8 @@ void append_window_object(std::string& out, HWND hwnd) {
     json::append_kv_int(out, "w", r.right - r.left);                   out += ',';
     json::append_kv_int(out, "h", r.bottom - r.top);                   out += ',';
     json::append_kv_string(out, "title", get_window_title_utf8(hwnd)); out += ',';
-    json::append_kv_uint(out, "pid", get_window_pid(hwnd));
+    json::append_kv_uint(out, "pid", get_window_pid(hwnd));            out += ',';
+    json::append_kv_int(out, "monitor_index", monitor_index);
     out += '}';
 }
 
@@ -174,10 +208,11 @@ HWND require_target(Connection& conn, std::string_view raw) {
 // EnumWindows callbacks
 
 struct ListContext {
-    bool        include_all = false;
-    std::string filter_prefix;
-    std::string out;
-    bool        first = true;
+    bool             include_all = false;
+    std::string      filter_prefix;
+    std::string      out;
+    bool             first = true;
+    MonitorIndexMap  monitors;
 };
 
 BOOL CALLBACK enum_for_list(HWND hwnd, LPARAM lparam) {
@@ -193,7 +228,7 @@ BOOL CALLBACK enum_for_list(HWND hwnd, LPARAM lparam) {
 
     if (!ctx->first) ctx->out += ',';
     ctx->first = false;
-    append_window_object(ctx->out, hwnd);
+    append_window_object(ctx->out, hwnd, ctx->monitors);
 
     return TRUE;
 }
@@ -220,6 +255,7 @@ BOOL CALLBACK enum_for_find(HWND hwnd, LPARAM lparam) {
 
 void list(Connection& conn, const wire::Request& req) {
     ListContext ctx;
+    ctx.monitors = build_monitor_index_map();
 
     for (std::size_t i = 0; i < req.args.size(); ++i) {
         if (req.args[i] == "--all") {
@@ -255,8 +291,9 @@ void find(Connection& conn, const wire::Request& req) {
         return;
     }
 
+    const auto monitors = build_monitor_index_map();
     std::string out;
-    append_window_object(out, ctx.result);
+    append_window_object(out, ctx.result, monitors);
     conn.writer().write_ok(out);
 }
 

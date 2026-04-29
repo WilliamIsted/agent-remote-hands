@@ -74,6 +74,7 @@ void info(Connection& conn, const wire::Request&) {
     j += ',';
 
     json::append_kv_bool(j, "uiaccess", sysinfo::uiaccess_enabled());        j += ',';
+    json::append_kv_int(j, "monitors", GetSystemMetrics(SM_CMONITORS));      j += ',';
     json::append_string_array(j, "privileges", sysinfo::enabled_privileges()); j += ',';
 
     json::append_string(j, "tiers");

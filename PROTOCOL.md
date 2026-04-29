@@ -183,6 +183,7 @@ The negotiation contract. Returns a JSON object describing the agent's identity,
   "user": "<run-as-account>",
   "integrity": "medium",
   "uiaccess": false,
+  "monitors": 2,
   "privileges": ["SeShutdownPrivilege"],
   "tiers": ["observe", "drive", "power"],
   "current_tier": "observe",
@@ -214,6 +215,7 @@ Field semantics:
 | `user` | string | Run-as account name |
 | `integrity` | string \| null | `"low"`, `"medium"`, `"high"`, `"system"`, or `null` if integrity levels don't exist on this OS |
 | `uiaccess` | boolean | `true` if the agent process has the UIAccess flag set (lets it drive higher-IL UI) |
+| `monitors` | int | Number of physical monitors attached. The 0-based index used by `window.list.monitor_index` and `screen.capture --monitor` matches `EnumDisplayMonitors` enumeration order (typically primary first). |
 | `privileges` | array of strings | Win32 privilege names enabled in the agent's token |
 | `tiers` | array of strings | Tiers this agent supports. Always at least `["observe"]`. |
 | `current_tier` | string | Tier of the current connection |
@@ -281,7 +283,7 @@ Pixel capture.
 
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
-| `screen.capture` | O | `[--region <x>,<y>,<w>,<h>] [--window <hwnd>] [--format <fmt>]` | `OK <len>\n<bytes>` | `<fmt>` ∈ `png` (default), `webp`, `webp:<quality>`, `bmp`. Format availability is advertised in `system.info.capabilities.image_formats`. |
+| `screen.capture` | O | `[--region <x>,<y>,<w>,<h>] [--window <hwnd>] [--monitor <index>] [--format <fmt>]` | `OK <len>\n<bytes>` | `<fmt>` ∈ `png` (default), `webp`, `webp:<quality>`, `bmp`. Format availability is advertised in `system.info.capabilities.image_formats`. `--monitor <N>` captures the Nth physical monitor (0-based, ordering matches `system.info.monitors` count and `window.list.monitor_index`); `ERR not_found` if `N` is out of range. `--region` / `--window` / `--monitor` are mutually exclusive. |
 
 If neither `--region` nor `--window` is supplied, the entire virtual screen is captured.
 
@@ -293,7 +295,7 @@ Top-level window enumeration and control. All `<hwnd>` values use the prefix `wi
 
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
-| `window.list` | O | `[--filter <pattern>] [--all]` | `OK <len>\n<json>` | Visible top-level windows by default; `--all` includes invisible. JSON: `{"windows":[{"hwnd":"win:...","x":N,"y":N,"w":N,"h":N,"title":"...","pid":N}]}` |
+| `window.list` | O | `[--filter <pattern>] [--all]` | `OK <len>\n<json>` | Visible top-level windows by default; `--all` includes invisible. JSON: `{"windows":[{"hwnd":"win:...","x":N,"y":N,"w":N,"h":N,"title":"...","pid":N,"monitor_index":N}]}`. `monitor_index` is the 0-based monitor the window is anchored on (`-1` if the window is fully off-screen). |
 | `window.find` | O | `<title-pattern>` | `OK <len>\n<json>` or `ERR not_found` | Returns first match |
 | `window.focus` | D | `<hwnd>` | `OK <len>\n<json>` | JSON: `{"prior_hwnd":"win:..."}`. `ERR lock_held` if foreground-lock denied. |
 | `window.close` | D | `<hwnd>` | `OK 0` | `WM_CLOSE`. Window may decline. |

@@ -89,13 +89,48 @@ HWND parse_hwnd(std::string_view s) {
     return reinterpret_cast<HWND>(static_cast<uintptr_t>(v));
 }
 
+bool parse_nonneg_int(std::string_view s, int& out) {
+    int v = 0;
+    const auto* end = s.data() + s.size();
+    const auto [p, ec] = std::from_chars(s.data(), end, v, 10);
+    if (ec != std::errc{} || p != end || v < 0) return false;
+    out = v;
+    return true;
+}
+
+// EnumDisplayMonitors callback that selects the Nth monitor (0-based),
+// matching the same enumeration order as window.list's monitor_index.
+struct MonitorByIndex {
+    int target_index = 0;
+    int current_index = 0;
+    RECT rect{};
+    bool found = false;
+};
+
+BOOL CALLBACK find_monitor_by_index(HMONITOR mon, HDC, LPRECT, LPARAM lparam) {
+    auto* state = reinterpret_cast<MonitorByIndex*>(lparam);
+    if (state->current_index == state->target_index) {
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (GetMonitorInfoW(mon, &info)) {
+            state->rect = info.rcMonitor;
+            state->found = true;
+        }
+        return FALSE;
+    }
+    state->current_index++;
+    return TRUE;
+}
+
 }  // namespace
 
 void capture(Connection& conn, const wire::Request& req) {
     Format format = Format::Png;
-    bool   has_region = false;
-    bool   has_window = false;
+    bool   has_region  = false;
+    bool   has_window  = false;
+    bool   has_monitor = false;
     int    rx = 0, ry = 0, rw = 0, rh = 0;
+    int    monitor_index = 0;
     HWND   hwnd = nullptr;
 
     for (std::size_t i = 0; i < req.args.size(); ++i) {
@@ -116,6 +151,14 @@ void capture(Connection& conn, const wire::Request& req) {
                 return;
             }
             has_window = true;
+        } else if (req.args[i] == "--monitor" && i + 1 < req.args.size()) {
+            if (!parse_nonneg_int(req.args[++i], monitor_index)) {
+                conn.writer().write_err(
+                    ErrorCode::InvalidArgs,
+                    "{\"message\":\"--monitor must be a non-negative integer\"}");
+                return;
+            }
+            has_monitor = true;
         } else if (req.args[i] == "--format" && i + 1 < req.args.size()) {
             if (!parse_format(req.args[++i], format)) {
                 conn.writer().write_err(
@@ -126,10 +169,11 @@ void capture(Connection& conn, const wire::Request& req) {
         }
     }
 
-    if (has_region && has_window) {
+    const int region_likes = (has_region ? 1 : 0) + (has_window ? 1 : 0) + (has_monitor ? 1 : 0);
+    if (region_likes > 1) {
         conn.writer().write_err(
             ErrorCode::InvalidArgs,
-            "{\"message\":\"--region and --window are mutually exclusive\"}");
+            "{\"message\":\"--region / --window / --monitor are mutually exclusive\"}");
         return;
     }
 
@@ -138,6 +182,22 @@ void capture(Connection& conn, const wire::Request& req) {
         frame = screen::capture_window(hwnd);
     } else if (has_region) {
         frame = screen::capture_region(rx, ry, rw, rh);
+    } else if (has_monitor) {
+        MonitorByIndex state{};
+        state.target_index = monitor_index;
+        EnumDisplayMonitors(nullptr, nullptr, find_monitor_by_index,
+                            reinterpret_cast<LPARAM>(&state));
+        if (!state.found) {
+            char detail[80];
+            std::snprintf(detail, sizeof(detail),
+                          "{\"message\":\"monitor index %d not present\"}",
+                          monitor_index);
+            conn.writer().write_err(ErrorCode::NotFound, detail);
+            return;
+        }
+        frame = screen::capture_region(state.rect.left, state.rect.top,
+                                       state.rect.right - state.rect.left,
+                                       state.rect.bottom - state.rect.top);
     } else {
         frame = screen::capture_virtual_screen();
     }
