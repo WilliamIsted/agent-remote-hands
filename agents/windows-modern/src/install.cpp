@@ -242,17 +242,44 @@ int run_install(const Config& config) {
     }
     log::info(L"Installed binary at %s", dst.c_str());
 
-    // Firewall rule (best-effort — log on failure but don't abort install).
+    // Firewall rules. Both the TCP listener and (if --discoverable) the mDNS
+    // responder need to be pre-authorised so Defender doesn't show its
+    // per-app prompt on first launch. Three things matter:
+    //
+    //   - `program=<path>` scopes the rule to this binary. Without it,
+    //     port-only rules satisfy the network-layer firewall but NOT the
+    //     per-application layer — Defender still prompts.
+    //   - `profile=any` covers Private + Public + Domain. Host-only and
+    //     newly-classified networks default to Public, so a Private-only
+    //     rule silently doesn't apply.
+    //   - Both rules carry the same `name=`; the uninstall path's
+    //     `delete rule name=<name>` removes them together.
+    const std::wstring exe_path = dst.wstring();
     {
-        wchar_t cmd[512] = {};
+        wchar_t cmd[1024] = {};
         std::swprintf(cmd, std::size(cmd),
                       L"netsh advfirewall firewall add rule name=\"%s\" "
-                      L"dir=in action=allow protocol=TCP localport=%u",
+                      L"dir=in action=allow protocol=TCP localport=%u "
+                      L"program=\"%s\" profile=any",
                       kFirewallRuleName,
-                      static_cast<unsigned>(config.port));
+                      static_cast<unsigned>(config.port),
+                      exe_path.c_str());
         const int rc = run_command(cmd);
-        if (rc == 0) log::info(L"Firewall rule added (TCP %u inbound)", config.port);
+        if (rc == 0) log::info(L"Firewall rule added (TCP %u inbound, scoped to %s)",
+                               config.port, exe_path.c_str());
         else         log::warning(L"Firewall rule add returned %d (continuing)", rc);
+    }
+    if (config.discoverable) {
+        wchar_t cmd[1024] = {};
+        std::swprintf(cmd, std::size(cmd),
+                      L"netsh advfirewall firewall add rule name=\"%s\" "
+                      L"dir=in action=allow protocol=UDP localport=5353 "
+                      L"program=\"%s\" profile=any",
+                      kFirewallRuleName,
+                      exe_path.c_str());
+        const int rc = run_command(cmd);
+        if (rc == 0) log::info(L"Firewall rule added (UDP 5353 mDNS inbound)");
+        else         log::warning(L"mDNS firewall rule add returned %d (continuing)", rc);
     }
 
     // Task Scheduler logon-task. Imported from generated XML so we can set
