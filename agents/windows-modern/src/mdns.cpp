@@ -27,6 +27,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+#include <netioapi.h>
 
 #pragma comment(lib, "iphlpapi.lib")
 
@@ -203,6 +204,12 @@ struct Responder::Impl {
     std::string         hostname;
     std::uint32_t       ipv4 = 0;
 
+    // Set by the IP-change callback; the run loop notices, re-queries the
+    // local IPv4, and emits an unsolicited announcement so listening browsers
+    // refresh their cache without waiting for the next query.
+    std::atomic<bool>   ip_dirty{false};
+    HANDLE              addr_notify_handle = nullptr;
+
     explicit Impl(Config c) : cfg{std::move(c)} {}
 
     void open_socket() {
@@ -250,6 +257,60 @@ struct Responder::Impl {
         }
     }
 
+    // System-thread-pool callback fired by NotifyIpInterfaceChange. We can't
+    // safely do mDNS I/O from this thread, so we just flip a flag the run
+    // loop notices on its next 100 ms wakeup.
+    static VOID NETIOAPI_API_ on_ip_change(PVOID context,
+                                           PMIB_IPINTERFACE_ROW /*row*/,
+                                           MIB_NOTIFICATION_TYPE /*type*/) {
+        if (auto* self = static_cast<Impl*>(context)) {
+            self->ip_dirty.store(true);
+        }
+    }
+
+    void register_ip_change_notify() {
+        const DWORD status = NotifyIpInterfaceChange(
+            AF_INET, &Impl::on_ip_change, this, FALSE,
+            &addr_notify_handle);
+        if (status != NO_ERROR) {
+            log::warning(L"mDNS: NotifyIpInterfaceChange failed (%lu); "
+                         L"announcements will not refresh on IP change",
+                         status);
+            addr_notify_handle = nullptr;
+        }
+    }
+
+    void unregister_ip_change_notify() {
+        if (addr_notify_handle) {
+            CancelMibChangeNotify2(addr_notify_handle);
+            addr_notify_handle = nullptr;
+        }
+    }
+
+    void announce_unsolicited(const sockaddr_in& mcast) {
+        const auto resp = build_response(hostname, cfg.tcp_port,
+                                         cfg.os_tag, ipv4);
+        sendto(sock,
+               reinterpret_cast<const char*>(resp.data()),
+               static_cast<int>(resp.size()), 0,
+               reinterpret_cast<const sockaddr*>(&mcast), sizeof(mcast));
+    }
+
+    // Re-query the local IPv4. If it changed, refresh the cache and send an
+    // unsolicited announcement on the multicast group.
+    void handle_ip_change(const sockaddr_in& mcast) {
+        const std::uint32_t fresh = find_local_ipv4_host_order();
+        if (fresh == 0 || fresh == ipv4) return;
+        log::info(L"mDNS: local IPv4 changed (%u.%u.%u.%u → %u.%u.%u.%u); "
+                  L"re-announcing",
+                  (ipv4 >> 24) & 0xff, (ipv4 >> 16) & 0xff,
+                  (ipv4 >>  8) & 0xff,  ipv4        & 0xff,
+                  (fresh >> 24) & 0xff, (fresh >> 16) & 0xff,
+                  (fresh >>  8) & 0xff,  fresh        & 0xff);
+        ipv4 = fresh;
+        announce_unsolicited(mcast);
+    }
+
     void run() {
         hostname = get_hostname_lc();
         ipv4     = find_local_ipv4_host_order();
@@ -269,8 +330,16 @@ struct Responder::Impl {
         inet_pton(AF_INET, kMulticastAddr, &mcast.sin_addr);
         mcast.sin_port   = htons(kMulticastPort);
 
+        register_ip_change_notify();
+
         char buf[2048];
         while (!stop_requested.load()) {
+            // Refresh cached IP + send unsolicited announcement when the
+            // OS-level IP-change callback has fired since we last looked.
+            if (ip_dirty.exchange(false)) {
+                handle_ip_change(mcast);
+            }
+
             fd_set rfds;
             FD_ZERO(&rfds);
             FD_SET(sock, &rfds);
@@ -290,14 +359,10 @@ struct Responder::Impl {
             const std::string_view bytes{buf, static_cast<std::size_t>(n)};
             if (bytes.find(kServiceName) == std::string_view::npos) continue;
 
-            const auto resp = build_response(hostname, cfg.tcp_port,
-                                             cfg.os_tag, ipv4);
-            sendto(sock,
-                   reinterpret_cast<const char*>(resp.data()),
-                   static_cast<int>(resp.size()), 0,
-                   reinterpret_cast<sockaddr*>(&mcast), sizeof(mcast));
+            announce_unsolicited(mcast);
         }
 
+        unregister_ip_change_notify();
         close_socket();
     }
 };
