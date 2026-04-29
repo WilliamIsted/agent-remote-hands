@@ -1,0 +1,3 @@
+# Runtime dependencies for the Agent Remote Hands MCP bridge.
+# Install with: pip install -r mcp-server/requirements.txt
+mcp>=1.0.0

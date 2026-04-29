@@ -77,7 +77,7 @@ To wire it into Claude Code (once `mcp-server/` lands — see the Roadmap), drop
 | [`tests/conformance/`](tests/conformance/) | Python pytest suite — capability-gated tests across all 11 namespaces; runs against any agent that speaks the protocol |
 | [`agents/windows-modern/tests/unit/`](agents/windows-modern/tests/unit/) | doctest unit tests for the pure-logic modules (framing, JSON, error codes, tier model) |
 | `agents/windows-nt/` | *(planned)* Legacy agent (NT 4 → Server 2003) — straight C, WinSock, GDI BitBlt |
-| `mcp-server/` | *(planned)* Python MCP bridge — exposes wire verbs as named tools to MCP-aware clients |
+| [`mcp-server/`](mcp-server/) | Python MCP bridge — exposes wire verbs as named tools to MCP-aware clients (Claude Code, Claude Desktop, …) with tier-aware tool filtering |
 | `client/hostctl` | *(planned)* Reference Python CLI |
 | `client/hostctl-discover` | *(planned)* mDNS LAN scanner |
 | `Tools/install-agent.ps1` | *(planned)* PowerShell installer for fleet deployment — the agent's own `--install` flag handles single hosts today |
