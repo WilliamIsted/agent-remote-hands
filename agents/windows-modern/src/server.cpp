@@ -23,6 +23,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <eh.h>          // _set_se_translator
 #include <memory>
 #include <stdexcept>
 #include <thread>
@@ -165,6 +166,23 @@ struct Server::Impl {
     void spawn_connection_thread(SOCKET client) {
         active_connections.fetch_add(1);
         std::thread worker([this, client] {
+            // Translate Win32 SEH (access violation, stack overflow, integer
+            // divide-by-zero, etc.) into C++ runtime_error so the catch
+            // below sees them. Without this an access violation anywhere
+            // in a verb handler unwinds straight past every C++ try/catch
+            // and exits the agent process. Per-thread; needs /EHa from
+            // CMakeLists.txt to actually work. (Defence-in-depth fix
+            // for #61 — pairs with the subscription cancel in
+            // Connection::run.)
+            _set_se_translator([](unsigned int code, EXCEPTION_POINTERS* ep) {
+                char buf[96];
+                std::snprintf(buf, sizeof(buf),
+                              "SEH 0x%08X at %p",
+                              code,
+                              ep ? ep->ExceptionRecord->ExceptionAddress : nullptr);
+                throw std::runtime_error(buf);
+            });
+
             // Each connection gets its own COM apartment for UIA verbs.
             const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
             try {

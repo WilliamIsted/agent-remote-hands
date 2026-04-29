@@ -46,6 +46,12 @@ if(MSVC)
         /permissive-
         /Zc:__cplusplus
         /utf-8
+        /EHa            # SEH translation: lets _set_se_translator (in
+                        # server.cpp's per-connection thread) convert
+                        # Win32 access violations into C++ exceptions
+                        # the existing catch sees. Without /EHa,
+                        # /EHsc (default) lets SEH unwind past every
+                        # C++ try/catch and exit the process. (#61)
     )
 endif()
 

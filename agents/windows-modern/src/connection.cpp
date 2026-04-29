@@ -90,6 +90,17 @@ void Connection::run() {
     } catch (const std::exception& ex) {
         log::warning(L"Connection terminated: %hs", ex.what());
     }
+
+    // Cancel subscriptions BEFORE the destructor runs. Without this, an
+    // exception path (recv() failure on a peer that closed abruptly, etc.)
+    // tears down the Connection while subscription threads are still
+    // holding pointers into our writer_ / element_table_ — use-after-free.
+    // The graceful connection.close path also calls cancel_all() in its
+    // handler; doing it here too is idempotent and covers the exception
+    // path. Closes #61.
+    if (subscriptions_) {
+        subscriptions_->cancel_all();
+    }
     state_ = State::Closed;
 }
 

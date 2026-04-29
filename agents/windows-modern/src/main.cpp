@@ -98,6 +98,19 @@ public:
 }  // namespace
 
 int wmain(int argc, wchar_t* argv[]) try {
+    // Process-wide unhandled-exception filter: belt-and-braces for any SEH
+    // that escapes the per-connection-thread translator (driver-induced
+    // crashes from third-party UI hooks, per CLAUDE.md). Logs and lets
+    // the process exit cleanly so Task Scheduler's restart-on-failure
+    // picks us up. (#61)
+    SetUnhandledExceptionFilter([](EXCEPTION_POINTERS* ep) -> LONG {
+        rh::log::error(L"Unhandled SEH 0x%08X at %p — agent exiting; "
+                       L"Task Scheduler should restart us shortly",
+                       ep ? ep->ExceptionRecord->ExceptionCode : 0,
+                       ep ? ep->ExceptionRecord->ExceptionAddress : nullptr);
+        return EXCEPTION_EXECUTE_HANDLER;
+    });
+
     auto config = rh::Config::parse(argc, argv);
 
     rh::log::info(L"Agent Remote Hands v2.0 starting on TCP port %u", config.port);
