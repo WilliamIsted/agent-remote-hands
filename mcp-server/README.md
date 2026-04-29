@@ -91,7 +91,20 @@ Issues to follow:
 
 ## Tests
 
-There's no live-agent smoke harness yet — the conformance suite under [`tests/conformance/`](../tests/conformance/) covers the wire protocol from the same direction. To verify the bridge end-to-end:
+A pytest smoke harness ships alongside the bridge — runs against an in-process
+mock agent so it works on any platform without needing a live Windows host:
+
+```bash
+pip install pytest
+cd mcp-server
+python -m pytest tests/
+```
+
+The harness exercises wire framing (`agent_client.py`), tier transitions, and
+the tool registry's tier filtering / dispatch / annotation shape. 21 tests,
+sub-second wall clock.
+
+For end-to-end verification against a real agent:
 
 1. Run an agent on a Windows host: `remote-hands.exe --discoverable`
 2. Set `REMOTE_HANDS_HOST` to that host
