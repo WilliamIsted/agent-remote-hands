@@ -73,6 +73,113 @@ bool is_running_as_admin() {
 }
 
 // ---------------------------------------------------------------------------
+// Task-XML builder
+//
+// We generate Task Scheduler XML directly (rather than `schtasks /Create
+// /SC ONLOGON ...`) so we can include <RestartOnFailure>. schtasks's CLI
+// flags don't expose those settings — XML import is the only path. The
+// effective trigger / principal / run-level are equivalent to `/SC ONLOGON
+// /RL HIGHEST` (LogonTrigger fires on any logon, Principal references the
+// BUILTIN\Users SID so the task runs in the logged-on user's context with
+// HighestAvailable elevation).
+
+std::wstring xml_escape(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    for (wchar_t c : s) {
+        switch (c) {
+            case L'&':  out += L"&amp;";  break;
+            case L'<':  out += L"&lt;";   break;
+            case L'>':  out += L"&gt;";   break;
+            case L'"':  out += L"&quot;"; break;
+            case L'\'': out += L"&apos;"; break;
+            default:    out += c;
+        }
+    }
+    return out;
+}
+
+std::wstring build_task_xml(const std::wstring& binary,
+                            const std::wstring& args) {
+    std::wstring xml = LR"(<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Agent Remote Hands wire-protocol agent (autostart on user logon).</Description>
+    <Author>Agent Remote Hands</Author>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <GroupId>S-1-5-32-545</GroupId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{BINARY}</Command>
+      <Arguments>{ARGS}</Arguments>
+    </Exec>
+  </Actions>
+</Task>)";
+
+    auto replace_first = [&](std::wstring_view placeholder,
+                             const std::wstring& value) {
+        const auto pos = xml.find(placeholder);
+        if (pos != std::wstring::npos) {
+            xml.replace(pos, placeholder.size(), value);
+        }
+    };
+    replace_first(L"{BINARY}", xml_escape(binary));
+    replace_first(L"{ARGS}",   xml_escape(args));
+    return xml;
+}
+
+// Writes `xml` to a UTF-16LE file (with BOM) under %TEMP%. Caller deletes.
+bool write_task_xml(const std::wstring& xml, std::filesystem::path& out_path) {
+    wchar_t temp_dir[MAX_PATH] = {};
+    if (GetTempPathW(MAX_PATH, temp_dir) == 0) return false;
+
+    out_path = std::filesystem::path{temp_dir} / L"agent-remote-hands-task.xml";
+
+    HANDLE h = CreateFileW(out_path.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    DWORD written = 0;
+    const unsigned char bom[] = {0xff, 0xfe};
+    if (!WriteFile(h, bom, sizeof(bom), &written, nullptr) ||
+        !WriteFile(h, xml.data(),
+                   static_cast<DWORD>(xml.size() * sizeof(wchar_t)),
+                   &written, nullptr)) {
+        CloseHandle(h);
+        return false;
+    }
+    CloseHandle(h);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Subprocess helper — runs `cmd /c <cmdline>` and returns its exit code.
 
 int run_command(const std::wstring& cmdline) {
@@ -148,29 +255,41 @@ int run_install(const Config& config) {
         else         log::warning(L"Firewall rule add returned %d (continuing)", rc);
     }
 
-    // Task Scheduler logon-task.
+    // Task Scheduler logon-task. Imported from generated XML so we can set
+    // <RestartOnFailure> — schtasks's CLI flags don't expose that.
     {
-        std::wstring task_run = std::wstring{L"\\\""} + dst.wstring() + L"\\\"";
-        if (config.discoverable) {
-            task_run += L" --discoverable";
-        }
+        std::wstring args;
+        if (config.discoverable) args += L"--discoverable";
         if (config.port != 8765) {
+            if (!args.empty()) args += L' ';
             wchar_t portbuf[16] = {};
-            std::swprintf(portbuf, std::size(portbuf), L" --port %u",
+            std::swprintf(portbuf, std::size(portbuf), L"--port %u",
                           static_cast<unsigned>(config.port));
-            task_run += portbuf;
+            args += portbuf;
+        }
+
+        const std::wstring xml = build_task_xml(dst.wstring(), args);
+        std::filesystem::path xml_path;
+        if (!write_task_xml(xml, xml_path)) {
+            std::wcerr << L"Failed to write task XML to %TEMP%\n";
+            return 1;
         }
 
         std::wstring cmd =
             L"schtasks /Create /TN \"" + std::wstring{kTaskName} +
-            L"\" /TR \"" + task_run +
-            L"\" /SC ONLOGON /RL HIGHEST /F";
+            L"\" /XML \"" + xml_path.wstring() + L"\" /F";
         const int rc = run_command(cmd);
+
+        std::error_code ec_remove;
+        std::filesystem::remove(xml_path, ec_remove);   // best-effort cleanup
+
         if (rc != 0) {
-            std::wcerr << L"schtasks /Create failed (rc=" << rc << L")\n";
+            std::wcerr << L"schtasks /Create /XML failed (rc=" << rc << L")\n";
             return 1;
         }
-        log::info(L"Task Scheduler logon-task '%s' registered", kTaskName);
+        log::info(L"Task Scheduler logon-task '%s' registered "
+                  L"(restart-on-failure: 3 attempts, 1 minute apart)",
+                  kTaskName);
     }
 
     log::info(L"Install complete. The agent will autostart on the next user logon.");
