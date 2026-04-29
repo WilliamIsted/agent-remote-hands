@@ -1,11 +1,11 @@
 {
-    "version": "1.0.0-rc.3",
+    "version": "1.0.0-rc.4",
     "description": "Wire-protocol agent giving AI tools (Claude Code etc.) remote hands on Windows machines — mouse, keyboard, screenshots, UIA, process / file / registry / clipboard control over plain TCP.",
     "homepage": "https://github.com/WilliamIsted/agent-remote-hands",
     "license": "Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/WilliamIsted/agent-remote-hands/releases/download/v1.0.0-rc.3/agent-remote-hands-v1.0.0-rc.3-x64.zip",
+            "url": "https://github.com/WilliamIsted/agent-remote-hands/releases/download/v1.0.0-rc.4/agent-remote-hands-v1.0.0-rc.4-x64.zip",
             "hash": "FILL-IN-AFTER-RELEASE-IS-PUBLISHED"
         }
     },
