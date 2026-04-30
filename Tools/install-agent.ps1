@@ -224,6 +224,25 @@ function Install-Agent {
         }
     }
 
+    # Copy LLM-operator docs + the canonical wire client + the PDB alongside
+    # the binary if they're sitting next to the source. These ship in the
+    # release zip so a fresh-VM install lands the operator entry point and
+    # the symbol file in the same directory the agent runs from. An LLM
+    # deployed on the target with $InstallDir in scope can then read
+    # LLM-OPERATORS.md / PROTOCOL.md / wire.py without repo access.
+    $srcDir = Split-Path -Parent (Resolve-Path $src).Path
+    foreach ($companion in @('LLM-OPERATORS.md',
+                             'PROTOCOL.md',
+                             'README.md',
+                             'wire.py',
+                             'remote-hands.pdb')) {
+        $cpath = Join-Path $srcDir $companion
+        if (Test-Path $cpath) {
+            Copy-Item -Path $cpath -Destination $InstallDir -Force
+            Write-Host "  $companion -> $InstallDir"
+        }
+    }
+
     # Firewall rules. Both scoped to the binary so Defender's per-app
     # firewall layer is satisfied (port-only rules don't pre-authorise
     # the app — Defender still prompts on first launch). Profile=Any

@@ -75,3 +75,9 @@ examples/vagrant/*.log
 # Claude Code per-user settings (machine-local; never committed)
 # =============================================================
 .claude/settings.local.json
+
+# MCP bridge configuration is per-developer (each contributor points the
+# bridge at whichever stable agent build they're dogfooding against, with
+# whatever token-path / port / host the local setup happens to use).
+# See Tools/dev/README.md for the dev-against-stable pattern.
+.mcp.json

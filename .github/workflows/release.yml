@@ -62,10 +62,25 @@ jobs:
 
           $stage = New-Item -ItemType Directory -Force -Path 'release-staging'
           Copy-Item agents/windows-modern/build/Release/remote-hands.exe $stage.FullName
+          # Ship the matching Release PDB so production crash dumps can be
+          # symbolicated without a rebuild (which would produce a fresh,
+          # non-matching PDB GUID). The build emits this when /Zi + /DEBUG
+          # are set in CMakeLists.txt's Release config.
+          if (Test-Path agents/windows-modern/build/Release/remote-hands.pdb) {
+            Copy-Item agents/windows-modern/build/Release/remote-hands.pdb $stage.FullName
+          } else {
+            Write-Warning "remote-hands.pdb not found — release will ship without symbols."
+          }
           Copy-Item Tools/install-agent.ps1 $stage.FullName
           Copy-Item README.md $stage.FullName
           Copy-Item PROTOCOL.md $stage.FullName
           Copy-Item LICENSE $stage.FullName
+          # LLM-operator entry point and canonical wire-protocol Python client.
+          # Ships with the binary so an LLM deployed alongside the agent on
+          # a fresh VM has the spec + a working reference client without
+          # needing repo access. See LLM-OPERATORS.md for the full rationale.
+          Copy-Item LLM-OPERATORS.md $stage.FullName
+          Copy-Item tests/conformance/wire.py $stage.FullName
           Compress-Archive -Path "$($stage.FullName)/*" -DestinationPath $zipName -Force
 
           $hash = (Get-FileHash -Algorithm SHA256 $zipName).Hash.ToLower()
