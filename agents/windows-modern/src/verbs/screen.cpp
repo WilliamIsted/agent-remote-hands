@@ -126,9 +126,10 @@ BOOL CALLBACK find_monitor_by_index(HMONITOR mon, HDC, LPRECT, LPARAM lparam) {
 
 void capture(Connection& conn, const wire::Request& req) {
     Format format = Format::Png;
-    bool   has_region  = false;
-    bool   has_window  = false;
-    bool   has_monitor = false;
+    bool   has_region    = false;
+    bool   has_window    = false;
+    bool   has_monitor   = false;
+    bool   include_cursor = true;        // default on; opt-out via --no-cursor
     int    rx = 0, ry = 0, rw = 0, rh = 0;
     int    monitor_index = 0;
     HWND   hwnd = nullptr;
@@ -166,6 +167,19 @@ void capture(Connection& conn, const wire::Request& req) {
                     "{\"reason\":\"unsupported format; advertised in system.info.capabilities.image_formats\"}");
                 return;
             }
+        } else if (req.args[i] == "--no-cursor") {
+            include_cursor = false;
+        } else if (req.args[i].size() >= 2 &&
+                   req.args[i].compare(0, 2, "--") == 0) {
+            // Reject unknown --flags rather than silently accepting them. The
+            // previous behaviour ("ignore everything we don't recognise") was
+            // a footgun: a typo or stale-doc flag like --cursor returned OK
+            // but did nothing.
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
         }
     }
 
@@ -179,9 +193,9 @@ void capture(Connection& conn, const wire::Request& req) {
 
     screen::CapturedFrame frame;
     if (has_window) {
-        frame = screen::capture_window(hwnd);
+        frame = screen::capture_window(hwnd, include_cursor);
     } else if (has_region) {
-        frame = screen::capture_region(rx, ry, rw, rh);
+        frame = screen::capture_region(rx, ry, rw, rh, include_cursor);
     } else if (has_monitor) {
         MonitorByIndex state{};
         state.target_index = monitor_index;
@@ -197,9 +211,10 @@ void capture(Connection& conn, const wire::Request& req) {
         }
         frame = screen::capture_region(state.rect.left, state.rect.top,
                                        state.rect.right - state.rect.left,
-                                       state.rect.bottom - state.rect.top);
+                                       state.rect.bottom - state.rect.top,
+                                       include_cursor);
     } else {
-        frame = screen::capture_virtual_screen();
+        frame = screen::capture_virtual_screen(include_cursor);
     }
 
     if (frame.width == 0 || frame.height == 0 || frame.pixels.empty()) {

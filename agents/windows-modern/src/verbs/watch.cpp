@@ -124,6 +124,12 @@ public:
           x_{x}, y_{y}, w_{width}, h_{height},
           interval_ms_{interval_ms}, until_change_{until_change} {}
 
+    // Join the worker before derived members are destroyed. ~Subscription()
+    // also calls stop() as a safety net, but by then the most-derived members
+    // are already gone — too late to prevent the worker reading freed data.
+    // See the issue tracking the rc.7 watch-cancel destruction-order race.
+    ~RegionWatch() override { stop(); }
+
 protected:
     void run() override {
         std::uint64_t prev_hash = 0;
@@ -174,6 +180,11 @@ public:
     }
 
     ~ProcessWatch() override {
+        // Join FIRST — the worker calls WaitForSingleObject(handle_) and
+        // GetExitCodeProcess(handle_) every iteration, so closing the handle
+        // before the thread is joined is a use-after-CloseHandle on a kernel
+        // object whose slot may already have been reassigned.
+        stop();
         if (handle_) CloseHandle(handle_);
     }
 
@@ -214,6 +225,12 @@ class WindowWatch : public Subscription {
 public:
     WindowWatch(wire::Writer& w, std::string id, std::string prefix)
         : Subscription(w, std::move(id)), prefix_{std::move(prefix)} {}
+
+    // Join the worker before prefix_ is destructed — the run loop reads
+    // prefix_ via EnumContext on every iteration, so destruction-while-running
+    // is a UAF on the std::string's heap buffer. This was the rc.7 crash
+    // (abort+0x35 = std::terminate from an exception escaping the worker).
+    ~WindowWatch() override { stop(); }
 
 protected:
     void run() override {
@@ -299,6 +316,12 @@ public:
     }
 
     ~ElementWatch() override {
+        // Join FIRST. The worker holds a reference to elem_ and calls
+        // get_CurrentBoundingRectangle on every iteration. Releasing the COM
+        // ptr while the worker is still calling through it is a UAF on the
+        // COM object — which on a busy system can mean reading another
+        // thread's reused allocation.
+        stop();
         if (elem_) elem_->Release();
     }
 
@@ -335,6 +358,11 @@ class FileWatch : public Subscription {
 public:
     FileWatch(wire::Writer& w, std::string id, std::wstring pattern)
         : Subscription(w, std::move(id)), pattern_{std::move(pattern)} {}
+
+    // Join the worker before pattern_ is destructed — the run loop derives
+    // `dir` and `spec` from pattern_ at the top, but PathMatchSpecW reads
+    // `spec` (which holds a pointer into the wstring's buffer) every event.
+    ~FileWatch() override { stop(); }
 
 protected:
     void run() override {
@@ -442,6 +470,11 @@ public:
         : Subscription(w, std::move(id)), key_{key}, path_{std::move(path)} {}
 
     ~RegistryWatch() override {
+        // Join FIRST. The worker calls RegNotifyChangeKeyValue(key_) on
+        // every iteration; closing the registry handle before the thread is
+        // joined is a use-after-RegCloseKey on a kernel object whose slot
+        // may already have been reassigned to another caller's handle.
+        stop();
         if (key_) RegCloseKey(key_);
     }
 
@@ -536,6 +569,13 @@ void region(Connection& conn, const wire::Request& req) {
             interval_ms = static_cast<int>(v);
         } else if (req.args[i] == "--until-change") {
             until_change = true;
+        } else if (req.args[i].size() >= 2 &&
+                   req.args[i].compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
         }
     }
 
@@ -576,6 +616,13 @@ void window(Connection& conn, const wire::Request& req) {
     for (std::size_t i = 0; i < req.args.size(); ++i) {
         if (req.args[i] == "--title-prefix" && i + 1 < req.args.size()) {
             prefix = req.args[++i];
+        } else if (req.args[i].size() >= 2 &&
+                   req.args[i].compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
         }
     }
     if (prefix.empty()) {

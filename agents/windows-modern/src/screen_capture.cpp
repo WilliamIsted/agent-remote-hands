@@ -40,6 +40,57 @@ struct BitmapDeleter {
     ~BitmapDeleter() { if (h) DeleteObject(h); }
 };
 
+// Composite the Win32 mouse cursor onto a captured bitmap.
+//
+// The OS cursor is drawn by the system's separate cursor compositor on top of
+// the desktop *after* the GDI device context that BitBlt/PrintWindow captures
+// from. So neither primitive includes the cursor by default. To put it in the
+// image, we explicitly retrieve it via GetCursorInfo + GetIconInfo and draw
+// it onto the captured bitmap's HDC using DrawIconEx, offset by the cursor's
+// hotspot and translated from screen coords to bitmap coords via the bitmap's
+// origin in screen space.
+//
+// `bmp_origin_x/y` is the screen-space coordinate of the bitmap's (0,0).
+// For capture_region(x,y,w,h) that's (x,y); for capture_window it's
+// GetWindowRect's top-left; for capture_virtual_screen it's the virtual-screen
+// origin from SM_X/YVIRTUALSCREEN.
+//
+// No-ops if the cursor is hidden (CURSOR_SHOWING flag clear), if the cursor
+// info or icon info can't be retrieved, or if the cursor's logical position
+// falls outside the bitmap (DrawIconEx will clip but we save the syscall).
+void overlay_cursor(HDC mem_dc, int bmp_w, int bmp_h,
+                    int bmp_origin_x, int bmp_origin_y) {
+    CURSORINFO ci{};
+    ci.cbSize = sizeof(ci);
+    if (!GetCursorInfo(&ci)) return;
+    if (!(ci.flags & CURSOR_SHOWING)) return;
+    if (!ci.hCursor) return;
+
+    ICONINFO ii{};
+    if (!GetIconInfo(ci.hCursor, &ii)) return;
+
+    // The mask/colour bitmaps from GetIconInfo are caller-owned per docs.
+    struct BmpGuard {
+        HBITMAP h;
+        ~BmpGuard() { if (h) DeleteObject(h); }
+    } mask_guard{ii.hbmMask}, color_guard{ii.hbmColor};
+
+    const int draw_x = ci.ptScreenPos.x - bmp_origin_x - static_cast<int>(ii.xHotspot);
+    const int draw_y = ci.ptScreenPos.y - bmp_origin_y - static_cast<int>(ii.yHotspot);
+
+    // Cheap visibility cull: a cursor sprite is at most ~64x64 (large
+    // accessibility cursors can be larger but rarely exceed 128x128).
+    constexpr int kCursorMaxSize = 128;
+    if (draw_x + kCursorMaxSize < 0 || draw_x > bmp_w ||
+        draw_y + kCursorMaxSize < 0 || draw_y > bmp_h) {
+        return;
+    }
+
+    DrawIconEx(mem_dc, draw_x, draw_y, ci.hCursor,
+               0, 0,        // 0 = use cursor's own size
+               0, nullptr, DI_NORMAL);
+}
+
 CapturedFrame extract_dib(HBITMAP bitmap, HDC mem_dc, int width, int height) {
     CapturedFrame frame;
     frame.width  = width;
@@ -64,7 +115,7 @@ CapturedFrame extract_dib(HBITMAP bitmap, HDC mem_dc, int width, int height) {
 
 }  // namespace
 
-CapturedFrame capture_region(int x, int y, int w, int h) {
+CapturedFrame capture_region(int x, int y, int w, int h, bool include_cursor) {
     if (w <= 0 || h <= 0) return {};
 
     HDC screen_dc = GetDC(nullptr);
@@ -84,20 +135,23 @@ CapturedFrame capture_region(int x, int y, int w, int h) {
         SelectObject(mem_dc, prev);
         return {};
     }
+
+    if (include_cursor) overlay_cursor(mem_dc, w, h, x, y);
+
     SelectObject(mem_dc, prev);
 
     return extract_dib(bitmap, mem_dc, w, h);
 }
 
-CapturedFrame capture_virtual_screen() {
+CapturedFrame capture_virtual_screen(bool include_cursor) {
     const int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     const int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
     const int w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     const int h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    return capture_region(x, y, w, h);
+    return capture_region(x, y, w, h, include_cursor);
 }
 
-CapturedFrame capture_window(HWND hwnd) {
+CapturedFrame capture_window(HWND hwnd, bool include_cursor) {
     if (!hwnd || !IsWindow(hwnd)) return {};
 
     RECT rc{};
@@ -130,6 +184,9 @@ CapturedFrame capture_window(HWND hwnd) {
             return {};
         }
     }
+
+    if (include_cursor) overlay_cursor(mem_dc, w, h, rc.left, rc.top);
+
     SelectObject(mem_dc, prev);
 
     return extract_dib(bitmap, mem_dc, w, h);

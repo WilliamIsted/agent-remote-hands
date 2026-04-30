@@ -49,3 +49,21 @@ def test_input_type_requires_drive_tier(client: WireClient,
     r = client.request("input.type", "0")
     assert isinstance(r, ErrResponse)
     assert r.code == "tier_required"
+
+
+def test_input_click_unknown_flag_rejected(drive_client: WireClient,
+                                           capabilities: dict) -> None:
+    """`input.click` must reject unknown --flags rather than silently
+    accepting them. Uses drive_client because tier-required fires before
+    arg parsing in the verb dispatch — the flag-rejection code in the
+    verb body only runs once the caller is past the tier gate. Closes
+    the same contract gap as test_screen_capture_unknown_flag_rejected
+    but on a drive-tier verb whose arg loop has additional state.
+    """
+    needs_verb(capabilities, "input.click")
+    # x=-9999 deliberately off-screen so the click doesn't actually
+    # perturb anything visible if the rejection path ever regresses.
+    r = drive_client.request("input.click", "-9999", "-9999", "--bogus-flag")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args"
+    assert r.detail.get("unknown_flag") == "--bogus-flag"

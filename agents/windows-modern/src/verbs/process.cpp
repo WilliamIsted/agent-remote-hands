@@ -110,6 +110,13 @@ void list(Connection& conn, const wire::Request& req) {
     for (std::size_t i = 0; i < req.args.size(); ++i) {
         if (req.args[i] == "--filter" && i + 1 < req.args.size()) {
             filter = req.args[++i];
+        } else if (req.args[i].size() >= 2 &&
+                   req.args[i].compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
         }
     }
 
@@ -160,9 +167,18 @@ void start(Connection& conn, const wire::Request& req) {
         return;
     }
 
+    // Reconstruct the command line by joining all positional args with spaces.
+    // The wire protocol (v2) tokenizes the header on whitespace and has no
+    // argument-quoting mechanism, so a caller's `cmd.exe /c exit 7` arrives as
+    // four separate args. The previous implementation took only `args[0]` and
+    // silently dropped the rest, producing a bare interactive cmd.exe.
+    // Forward-compatible with the planned protocol quoting in rc.9: a single
+    // quoted arg arrives as one element and joining a one-element list is a
+    // no-op.
+    std::string cmdline_utf8;
     bool                   has_stdin = false;
     std::size_t            stdin_bytes = 0;
-    for (std::size_t i = 1; i < req.args.size(); ++i) {
+    for (std::size_t i = 0; i < req.args.size(); ++i) {
         if (req.args[i] == "--stdin" && i + 1 < req.args.size()) {
             unsigned long long v = 0;
             if (!parse_uint(req.args[++i], v)) {
@@ -173,7 +189,17 @@ void start(Connection& conn, const wire::Request& req) {
             }
             stdin_bytes = static_cast<std::size_t>(v);
             has_stdin = true;
+            continue;
         }
+        if (!cmdline_utf8.empty()) cmdline_utf8 += ' ';
+        cmdline_utf8 += req.args[i];
+    }
+
+    if (cmdline_utf8.empty()) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"process.start requires <command-line> [--stdin <length>]\"}");
+        return;
     }
 
     std::vector<std::byte> stdin_payload;
@@ -181,7 +207,7 @@ void start(Connection& conn, const wire::Request& req) {
         stdin_payload = conn.reader().read_payload(stdin_bytes);
     }
 
-    std::wstring cmdline = text::utf8_to_wide(req.args[0]);
+    std::wstring cmdline = text::utf8_to_wide(cmdline_utf8);
     // CreateProcessW may write to lpCommandLine; ensure it's writable.
     cmdline.push_back(L'\0');
 

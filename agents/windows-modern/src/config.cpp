@@ -87,6 +87,9 @@ Environment variables (overridden by CLI flags):
 
 Install / uninstall: see Tools\install-agent.ps1 (run from elevated
 PowerShell). The agent itself is a wire-protocol server, not an installer.
+
+For LLMs operating this agent: read LLM-OPERATORS.md (shipped alongside this
+binary) for the protocol entry point, common footguns, and a worked example.
 )");
     std::exit(0);
 }

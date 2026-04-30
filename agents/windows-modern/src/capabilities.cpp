@@ -85,6 +85,7 @@ namespace process_verbs {
 namespace file_verbs {
     void read(Connection&, const wire::Request&);
     void write(Connection&, const wire::Request&);
+    void write_at(Connection&, const wire::Request&);
     void list(Connection&, const wire::Request&);
     void stat(Connection&, const wire::Request&);
     void delete_(Connection&, const wire::Request&);
@@ -181,6 +182,7 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         // file.*
         {"file.read",                  {Tier::Observe, &file_verbs::read}},
         {"file.write",                 {Tier::Drive,   &file_verbs::write}},
+        {"file.write_at",              {Tier::Drive,   &file_verbs::write_at}},
         {"file.list",                  {Tier::Observe, &file_verbs::list}},
         {"file.stat",                  {Tier::Observe, &file_verbs::stat}},
         {"file.delete",                {Tier::Power,   &file_verbs::delete_}},

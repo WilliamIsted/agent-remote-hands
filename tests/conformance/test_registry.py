@@ -63,6 +63,19 @@ def test_invalid_root_returns_invalid_args(client: WireClient,
     assert r.code == "invalid_args"
 
 
+def test_registry_read_unknown_flag_rejected(client: WireClient,
+                                             capabilities: dict) -> None:
+    """The path-join branch in registry.read must still reject unknown
+    --flags. This exercises the same contract gap as screen.capture but on
+    a verb whose arg loop has additional positional-collection logic."""
+    needs_verb(capabilities, "registry.read")
+    r = client.request("registry.read",
+                       r"HKLM\Software\Microsoft", "--bogus-flag")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args"
+    assert r.detail.get("unknown_flag") == "--bogus-flag"
+
+
 def test_write_requires_drive_tier(client: WireClient,
                                    capabilities: dict) -> None:
     needs_verb(capabilities, "registry.write")

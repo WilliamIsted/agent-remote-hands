@@ -35,15 +35,24 @@ struct CapturedFrame {
     std::vector<std::byte>  pixels;   // BGRA, top-down, no row padding (stride = width*4)
 };
 
+// Each capture function takes an `include_cursor` flag controlling whether
+// the OS mouse cursor is composited into the bitmap. The default is `true`:
+// the cursor is otherwise drawn by the system separately from the device
+// context BitBlt/PrintWindow capture, so neither GDI primitive includes it
+// "for free." For an LLM-driver tool, omitting the cursor strips the most
+// important context from a screenshot — VM001 callers documented this in
+// `Documents/LLM Feedback/Claude/my-summer-car-test/`. Pass `false` for the
+// rare case where you want the bare desktop with no cursor sprite.
+
 // Captures the full virtual screen (multi-monitor span).
-CapturedFrame capture_virtual_screen();
+CapturedFrame capture_virtual_screen(bool include_cursor = true);
 
 // Captures a screen-coordinate region. Clipped to the virtual screen bounds.
 // Returns an empty frame on failure.
-CapturedFrame capture_region(int x, int y, int w, int h);
+CapturedFrame capture_region(int x, int y, int w, int h, bool include_cursor = true);
 
 // Captures a top-level window using PrintWindow (DWM-composited content
 // included). Returns an empty frame on failure.
-CapturedFrame capture_window(HWND hwnd);
+CapturedFrame capture_window(HWND hwnd, bool include_cursor = true);
 
 }  // namespace remote_hands::screen

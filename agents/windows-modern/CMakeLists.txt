@@ -28,6 +28,16 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Static CRT (/MT, /MTd). The agent ships to fresh Windows VMs that may not
+# have a current Microsoft Visual C++ Redistributable installed — and an
+# older MSVCP140.dll on the host triggers an ABI mismatch with the std::mutex
+# constexpr ctor (newer STL initialises `_Stl_critical_section::_Unused` to
+# nullptr where older mutex.cpp dispatches a vtable through it, AVing at 0x0
+# on the first lock). Statically linking the runtime adds ~600 KB to the
+# binary and removes the runtime-version dependency entirely. See the issue
+# tracking the rc.4–rc.6 MSVCP140+0x13278 crash for the full diagnosis.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # WIN32_LEAN_AND_MEAN is defined per-source-file before `#include <windows.h>`
 # rather than at compile-line scope, so we don't double-define it (which produces
 # a C4005 "macro redefinition" warning per TU). NOMINMAX MUST be a compile-line
@@ -46,12 +56,17 @@ if(MSVC)
         /permissive-
         /Zc:__cplusplus
         /utf-8
-        /EHa            # SEH translation: lets _set_se_translator (in
-                        # server.cpp's per-connection thread) convert
-                        # Win32 access violations into C++ exceptions
-                        # the existing catch sees. Without /EHa,
-                        # /EHsc (default) lets SEH unwind past every
-                        # C++ try/catch and exit the process. (#61)
+        # Emit debug info in Release. Without this, a production crash decodes
+        # as `module+0xRVA` only and is effectively undebuggable — rebuilding
+        # to recover symbols loses the matching PDB GUID anyway. The /OPT
+        # flags below restore the size optimisation that /DEBUG silently
+        # disables.
+        $<$<CONFIG:Release>:/Zi>
+    )
+    add_link_options(
+        $<$<CONFIG:Release>:/DEBUG>
+        $<$<CONFIG:Release>:/OPT:REF>
+        $<$<CONFIG:Release>:/OPT:ICF>
     )
 endif()
 

@@ -100,9 +100,83 @@ Summary:
 If you find yourself wondering why a click "worked" but the wizard didn't
 advance, this is the first thing to check.
 
+## RawInput / DirectInput targets — synthetic keyboard is invisible
+
+A class of targets — most Unity 5+ games, many DirectX games, applications
+opting into RawInput via `RegisterRawInputDevices` — read keyboard state
+from a kernel path (`KBDCLASS` → DirectInput / RawInput / kernel-keyboard
+table polled via `GetAsyncKeyState`) that **synthetic input doesn't reach**.
+`input.key`, `input.type`, `input.send_message`, and `input.post_message`
+all deliver at the user32 message-queue layer. The verbs return `OK` on the
+wire; the in-target effect is silently nil.
+
+```
+   PHYSICAL KEY                        SendInput KEYBDINPUT
+        |                                   |
+        v                                   v
+  KBDCLASS (kernel)                  user32 message queue
+        |                                   |
+        +--> RawInput / DirectInput         +--> WM_KEYDOWN handlers
+        |    (Unity, DirectX read here)     |    (Win32 dialogs, IMGUI,
+        |                                   |     classic controls)
+        |                                   |
+        +--> user32 message queue <---------+
+```
+
+`SendInput` enters at user32 only. `WM_KEYDOWN`/`WM_KEYUP` via
+`SendMessage` and `PostMessage` also enter at user32. Both paths are
+invisible to the kernel side that DirectInput / RawInput poll, because
+that side is only populated by the kernel keyboard driver responding to
+physical hardware.
+
+**Synthetic mouse is not affected** — the equivalent `MOUCLASS` path
+collapses physical and synthetic mouse at a lower point in the stack, so
+`input.click` / `input.move` / `input.scroll` reach DirectInput's mouse
+polling normally. The asymmetry is by design: Microsoft's input stack
+treats keyboard and mouse synthesis differently. There is no flag to
+SendInput to make keyboard behave like mouse.
+
+### Confirming the symptom
+
+If a particular target ignores `input.key` but responds to `input.click`,
+you're looking at this. To rule out other causes:
+
+- Foreground check: confirm the game window has focus when the verb fires.
+- IL check: `input.click` reaching the target rules out a UIPI block (which
+  would affect mouse synthesis equally).
+- Last resort: try `input.send_message <hwnd> 0x100 ...` then
+  `input.post_message`. If both also produce `OK` + no effect, the target
+  is reading kernel keyboard state, not user32.
+
+### Workarounds
+
+There is **no out-of-process software workaround** at the agent layer. The
+only paths that reach DirectInput / RawInput keyboard polling:
+
+1. **Kernel-mode driver injector** (e.g. the
+   [Interception driver](https://github.com/oblitum/Interception)):
+   writes synthetic events into `KBDCLASS` itself. Requires admin install,
+   signed driver, reboot. Not in scope for the agent's distribution model.
+2. **In-process companion** loaded into the target: a Unity mod or DirectX
+   DLL that calls the engine's input API directly, bypassing the entire
+   Win32 input stack. Different category of tool — would be a separate
+   agent target (`agents/unity-mod/` or similar), not a verb addition.
+3. **USB HID emulator** on a separate microcontroller: physically faithful,
+   no software workaround needed. Out of scope but mentioned for
+   completeness.
+4. **Save-game / scene pre-staging** so keyboard navigation isn't required
+   for the automation. Practical workaround in many cases.
+
+If you find yourself wondering why a target's UI responds to `input.click`
+but not `input.key`, this is the first thing to check. See
+[`PROTOCOL.md` §4.4](../PROTOCOL.md#44-input) for the in-spec note and
+[#64](https://github.com/WilliamIsted/agent-remote-hands/issues/64) for the
+empirical chain that confirmed the boundary.
+
 ## Cross-references
 
 - Wire protocol: [`PROTOCOL.md`](../PROTOCOL.md)
 - UIPI / integrity levels: [`PROTOCOL.md` §8](../PROTOCOL.md#8-elevation-and-integrity-levels)
 - Foreground lock surfaces: [`PROTOCOL.md` §10.4](../PROTOCOL.md#104-foreground-locks)
 - Wire desync recovery: [`PROTOCOL.md` §10.6](../PROTOCOL.md#106-wire-desync-recovery)
+- Synthetic-keyboard limitation: [`PROTOCOL.md` §4.4](../PROTOCOL.md#44-input) and [#64](https://github.com/WilliamIsted/agent-remote-hands/issues/64)

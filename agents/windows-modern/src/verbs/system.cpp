@@ -210,19 +210,27 @@ struct PowerArgs {
     std::string reason_code   = "planned";
 };
 
-PowerArgs parse_power_args(const wire::Request& req) {
-    PowerArgs p;
+// Returns false (and writes ERR invalid_args to the wire) if an unknown
+// --flag is present. Otherwise populates `out` and returns true.
+bool parse_power_args(Connection& conn, const wire::Request& req, PowerArgs& out) {
     for (std::size_t i = 0; i < req.args.size(); ++i) {
         if (req.args[i] == "--delay" && i + 1 < req.args.size()) {
-            p.delay_seconds = static_cast<DWORD>(std::strtoul(
+            out.delay_seconds = static_cast<DWORD>(std::strtoul(
                 req.args[++i].c_str(), nullptr, 10));
         } else if (req.args[i] == "--force") {
-            p.force = true;
+            out.force = true;
         } else if (req.args[i] == "--reason" && i + 1 < req.args.size()) {
-            p.reason_code = req.args[++i];
+            out.reason_code = req.args[++i];
+        } else if (req.args[i].size() >= 2 &&
+                   req.args[i].compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return false;
         }
     }
-    return p;
+    return true;
 }
 
 // Single-process pending-shutdown state. A `--delay > 0` request takes the
@@ -245,7 +253,8 @@ PendingShutdown& pending_shutdown() {
 }
 
 void do_power(Connection& conn, UINT exit_flags, const wire::Request& req) {
-    const auto args = parse_power_args(req);
+    PowerArgs args;
+    if (!parse_power_args(conn, req, args)) return;
 
     if (!ensure_shutdown_privilege()) {
         conn.writer().write_err(

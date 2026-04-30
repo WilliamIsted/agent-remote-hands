@@ -173,21 +173,40 @@ void read(Connection& conn, const wire::Request& req) {
         return;
     }
 
-    HKEY root = nullptr;
-    std::wstring subkey;
-    if (!split_path(req.args[0], root, subkey)) {
-        conn.writer().write_err(ErrorCode::InvalidArgs,
-                                "{\"message\":\"unrecognised registry path\"}");
-        return;
-    }
-
+    // Reconstruct the path by joining all non-flag positional args with
+    // spaces. The wire protocol (v2) tokenizes the header on whitespace and
+    // has no argument-quoting mechanism, so a path like
+    // `HKLM\Software\Microsoft\Windows NT\CurrentVersion` arrives as two
+    // separate args. The previous implementation took only `args[0]`, which
+    // landed on a real-but-wrong key (`...\Microsoft\Windows`) and either
+    // returned the wrong values or ERR not_found. Forward-compatible with
+    // the planned protocol quoting in rc.9.
+    std::string path_utf8;
     std::wstring value_name;
     bool has_value = false;
-    for (std::size_t i = 1; i < req.args.size(); ++i) {
+    for (std::size_t i = 0; i < req.args.size(); ++i) {
         if (req.args[i] == "--value" && i + 1 < req.args.size()) {
             value_name = utf8_to_wide(req.args[++i]);
             has_value = true;
+            continue;
         }
+        if (req.args[i].size() >= 2 && req.args[i].compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
+        }
+        if (!path_utf8.empty()) path_utf8 += ' ';
+        path_utf8 += req.args[i];
+    }
+
+    HKEY root = nullptr;
+    std::wstring subkey;
+    if (!split_path(path_utf8, root, subkey)) {
+        conn.writer().write_err(ErrorCode::InvalidArgs,
+                                "{\"message\":\"unrecognised registry path\"}");
+        return;
     }
 
     HKEY hkey = nullptr;
@@ -388,21 +407,34 @@ void delete_(Connection& conn, const wire::Request& req) {
         return;
     }
 
-    HKEY root = nullptr;
-    std::wstring subkey;
-    if (!split_path(req.args[0], root, subkey)) {
-        conn.writer().write_err(ErrorCode::InvalidArgs,
-                                "{\"message\":\"unrecognised registry path\"}");
-        return;
-    }
-
+    // Same path-reconstruction approach as registry.read — see the comment
+    // there for the wire-protocol-quoting context.
+    std::string path_utf8;
     std::wstring value_name;
     bool has_value = false;
-    for (std::size_t i = 1; i < req.args.size(); ++i) {
+    for (std::size_t i = 0; i < req.args.size(); ++i) {
         if (req.args[i] == "--value" && i + 1 < req.args.size()) {
             value_name = utf8_to_wide(req.args[++i]);
             has_value = true;
+            continue;
         }
+        if (req.args[i].size() >= 2 && req.args[i].compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
+        }
+        if (!path_utf8.empty()) path_utf8 += ' ';
+        path_utf8 += req.args[i];
+    }
+
+    HKEY root = nullptr;
+    std::wstring subkey;
+    if (!split_path(path_utf8, root, subkey)) {
+        conn.writer().write_err(ErrorCode::InvalidArgs,
+                                "{\"message\":\"unrecognised registry path\"}");
+        return;
     }
 
     LSTATUS status;

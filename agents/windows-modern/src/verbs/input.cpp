@@ -27,6 +27,37 @@
 // before injecting; if the IL barrier blocks input, the verb returns
 // `ERR uipi_blocked` with `{agent_il, target_il}` rather than silently
 // no-op'ing as v1 did.
+//
+// ---------------------------------------------------------------------------
+// CANONICAL POINTER-INPUT PATTERN
+//
+// Pointer verbs (click, scroll, anything with x/y) MUST pack the cursor move
+// and the button/wheel event into a SINGLE `SendInput` call, with the move
+// using `MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`
+// and `mi.dx / mi.dy` normalised to the [0, 65535] virtual-desktop range.
+//
+// The seductive but wrong shorter form is:
+//
+//     SetCursorPos(x, y);                       // (1) move cursor logically
+//     SendInput(LEFTDOWN); SendInput(LEFTUP);   // (2) click at "current pos"
+//
+// `LEFTDOWN`/`LEFTUP` events without coordinate fields fire at whatever the
+// cursor's position is at *event-processing time*, not at whatever was
+// passed to `SetCursorPos`. Any drift between (1) and (2) — from a mouse
+// hook, the DWM compositor, focus-change event, "enhanced pointer
+// precision" smoothing, P/Invoke marshaling latency — translates directly
+// into click-position drift. On Unity IMGUI surfaces the consequence is
+// non-obvious: the click registers, but on the wrong layer (scene canvas
+// instead of the panel hitbox).
+//
+// The coupled form below cannot drift because the coordinates are *part of*
+// the move event itself, the events are dispatched atomically in one
+// syscall, and the down/up events fire at the cursor position established
+// by the move event in the same atomic batch.
+//
+// See `Documents/LLM Feedback/Claude/my-summer-car-test/` for the
+// real-world case that surfaced this; see Microsoft Win32 input docs on
+// SendInput for the official guidance on absolute coordinates.
 
 #include "../connection.hpp"
 #include "../crash_check.hpp"
@@ -179,6 +210,36 @@ bool parse_int(std::string_view s, int& out) {
     return true;
 }
 
+// Build an absolute-virtual-desktop INPUT move event for (x, y) screen
+// coordinates. The result is intended to be the *first* element in a coupled
+// SendInput batch — see the canonical-pattern comment at the top of this
+// file. dx/dy are normalised to [0, 65535] across the virtual screen, with
+// rounding to the nearest pixel-equivalent to avoid systematic bias to one
+// side on odd screen widths.
+INPUT make_absolute_move(int x, int y) {
+    const int virt_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int virt_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int virt_w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    const int virt_h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+    INPUT in{};
+    in.type        = INPUT_MOUSE;
+    in.mi.dwFlags  = MOUSEEVENTF_MOVE
+                   | MOUSEEVENTF_ABSOLUTE
+                   | MOUSEEVENTF_VIRTUALDESK;
+    if (virt_w > 0) {
+        in.mi.dx = static_cast<LONG>(
+            ((static_cast<long long>(x - virt_x) * 65535LL) +
+                 static_cast<long long>(virt_w / 2)) / virt_w);
+    }
+    if (virt_h > 0) {
+        in.mi.dy = static_cast<LONG>(
+            ((static_cast<long long>(y - virt_y) * 65535LL) +
+                 static_cast<long long>(virt_h / 2)) / virt_h);
+    }
+    return in;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -238,20 +299,30 @@ void click(Connection& conn, const wire::Request& req) {
                                         "{\"message\":\"unknown --button\"}");
                 return;
             }
+        } else if (req.args[i].size() >= 2 &&
+                   req.args[i].compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
         }
     }
 
     if (!crash_check::check_focus_or_fail(conn)) return;
     if (!uipi::check_foreground_or_fail(conn)) return;
 
-    SetCursorPos(x, y);
-
-    INPUT inputs[2] = {};
-    inputs[0].type        = INPUT_MOUSE;
-    inputs[0].mi.dwFlags  = down;
-    inputs[1].type        = INPUT_MOUSE;
-    inputs[1].mi.dwFlags  = up;
-    SendInput(2, inputs, sizeof(INPUT));
+    // Canonical coupled-pattern: move + down + up in a single SendInput
+    // batch with absolute virtual-desktop coordinates on the move event. See
+    // the comment at the top of this file and #63 for why the previous
+    // SetCursorPos + uncoupled-SendInput form was wrong.
+    INPUT inputs[3] = {};
+    inputs[0]            = make_absolute_move(x, y);
+    inputs[1].type       = INPUT_MOUSE;
+    inputs[1].mi.dwFlags = down;
+    inputs[2].type       = INPUT_MOUSE;
+    inputs[2].mi.dwFlags = up;
+    SendInput(3, inputs, sizeof(INPUT));
 
     conn.writer().write_ok();
 }
@@ -278,13 +349,14 @@ void scroll(Connection& conn, const wire::Request& req) {
     if (!crash_check::check_focus_or_fail(conn)) return;
     if (!uipi::check_foreground_or_fail(conn)) return;
 
-    SetCursorPos(x, y);
-
-    INPUT in{};
-    in.type           = INPUT_MOUSE;
-    in.mi.dwFlags     = MOUSEEVENTF_WHEEL;
-    in.mi.mouseData   = static_cast<DWORD>(delta * WHEEL_DELTA);
-    SendInput(1, &in, sizeof(INPUT));
+    // Coupled move + wheel in one SendInput batch — see canonical pattern
+    // comment at top of this file and #63.
+    INPUT inputs[2] = {};
+    inputs[0]              = make_absolute_move(x, y);
+    inputs[1].type         = INPUT_MOUSE;
+    inputs[1].mi.dwFlags   = MOUSEEVENTF_WHEEL;
+    inputs[1].mi.mouseData = static_cast<DWORD>(delta * WHEEL_DELTA);
+    SendInput(2, inputs, sizeof(INPUT));
 
     conn.writer().write_ok();
 }
@@ -311,6 +383,13 @@ void key(Connection& conn, const wire::Request& req) {
     for (std::size_t i = 1; i < req.args.size(); ++i) {
         if (req.args[i] == "--modifiers" && i + 1 < req.args.size()) {
             mods = parse_modifier_list(req.args[++i]);
+        } else if (req.args[i].size() >= 2 &&
+                   req.args[i].compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
         }
     }
 

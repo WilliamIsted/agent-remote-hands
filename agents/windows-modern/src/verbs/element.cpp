@@ -336,6 +336,13 @@ void list(Connection& conn, const wire::Request& req) {
                 return;
             }
             has_region = true;
+        } else if (req.args[i].size() >= 2 &&
+                   req.args[i].compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
         }
     }
 

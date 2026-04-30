@@ -17,6 +17,7 @@
 // Implements PROTOCOL.md §4.6:
 //   file.read    (observe)
 //   file.write   (drive)
+//   file.write_at (drive)  — random-access; chunked-upload primitive
 //   file.list    (observe)
 //   file.stat    (observe)
 //   file.delete  (power)
@@ -116,7 +117,13 @@ void read(Connection& conn, const wire::Request& req) {
         conn.writer().write_err(ErrorCode::NotSupported);
         return;
     }
-    if (size.QuadPart > static_cast<long long>(SIZE_MAX)) {
+    // Compare via unsigned cast: `static_cast<long long>(SIZE_MAX)` wraps to
+    // -1 on x64 (since SIZE_MAX = ULLONG_MAX), so the original `size > -1`
+    // check fired for every non-empty file. The unsigned form is correct on
+    // both 32-bit (where SIZE_MAX = 4 GB and the branch can fire on a real
+    // >4 GB file) and x64 (where the branch is now correctly dead). The
+    // earlier `size.QuadPart < 0` check guards the unsigned cast.
+    if (static_cast<unsigned long long>(size.QuadPart) > SIZE_MAX) {
         CloseHandle(h);
         conn.writer().write_err(
             ErrorCode::NotSupported,
@@ -168,6 +175,122 @@ void write(Connection& conn, const wire::Request& req) {
         nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         write_target_gone_or_not_supported(conn, req.args[0]);
+        return;
+    }
+
+    std::size_t total = 0;
+    while (total < payload.size()) {
+        const DWORD chunk = static_cast<DWORD>(
+            std::min<std::size_t>(payload.size() - total, 0x10000000u));
+        DWORD written = 0;
+        if (!WriteFile(h, payload.data() + total, chunk, &written, nullptr) ||
+            written == 0) {
+            CloseHandle(h);
+            char detail[64];
+            std::snprintf(detail, sizeof(detail),
+                          "{\"win32_error\":%lu}", GetLastError());
+            conn.writer().write_err(ErrorCode::NotSupported, detail);
+            return;
+        }
+        total += written;
+    }
+    CloseHandle(h);
+    conn.writer().write_ok();
+}
+
+// ---------------------------------------------------------------------------
+// file.write_at
+//
+// Random-access write — writes <length> bytes at byte <offset> in <path>.
+// The primitive that makes chunked uploads of large binary content possible
+// without a per-chunk full-file rewrite. The MCP wrapper's `upload_file`
+// drives this for any source over its single-shot threshold; callers
+// needing log-append, partial-update, or resume-after-disconnect semantics
+// can drive it directly.
+//
+// `--truncate` (optional, only meaningful at offset 0): opens the file
+// with `CREATE_ALWAYS` (clearing prior contents) instead of `OPEN_ALWAYS`.
+// First chunk of a multi-chunk upload should pass --truncate; subsequent
+// chunks should not. At offset > 0, the flag is ignored — partial-update
+// semantics never want truncation.
+
+void write_at(Connection& conn, const wire::Request& req) {
+    if (req.args.size() < 3) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"file.write_at requires <path> <offset> <length> [--truncate]\"}");
+        return;
+    }
+
+    bool truncate = false;
+    // Last 1-2 args may be flags. Find the path/offset/length triplet by
+    // walking args and parsing the last two non-flag tokens as offset and
+    // length, with everything before as the path (whitespace-joined to
+    // tolerate the wire's no-quoting limitation for paths with spaces).
+    std::vector<std::size_t> non_flag_indices;
+    for (std::size_t i = 0; i < req.args.size(); ++i) {
+        if (req.args[i] == "--truncate") {
+            truncate = true;
+            continue;
+        }
+        if (req.args[i].size() >= 2 && req.args[i].compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
+        }
+        non_flag_indices.push_back(i);
+    }
+    if (non_flag_indices.size() < 3) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"file.write_at requires <path> <offset> <length> [--truncate]\"}");
+        return;
+    }
+
+    // Last two non-flag args = offset, length.
+    const std::size_t length_idx = non_flag_indices.back();
+    const std::size_t offset_idx = non_flag_indices[non_flag_indices.size() - 2];
+
+    unsigned long long offset = 0;
+    unsigned long long length = 0;
+    if (!parse_uint(req.args[offset_idx], offset) ||
+        !parse_uint(req.args[length_idx], length)) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"offset and length must be non-negative integers\"}");
+        return;
+    }
+
+    // Everything before offset_idx in non_flag_indices is part of the path.
+    std::string path_utf8;
+    for (std::size_t k = 0; k + 2 < non_flag_indices.size(); ++k) {
+        if (!path_utf8.empty()) path_utf8 += ' ';
+        path_utf8 += req.args[non_flag_indices[k]];
+    }
+
+    auto payload = conn.reader().read_payload(static_cast<std::size_t>(length));
+
+    const std::wstring wpath = text::utf8_to_wide(path_utf8);
+    const DWORD disposition = (truncate && offset == 0) ? CREATE_ALWAYS : OPEN_ALWAYS;
+    HANDLE h = CreateFileW(
+        wpath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+        nullptr, disposition, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        write_target_gone_or_not_supported(conn, path_utf8);
+        return;
+    }
+
+    LARGE_INTEGER li{};
+    li.QuadPart = static_cast<LONGLONG>(offset);
+    if (!SetFilePointerEx(h, li, nullptr, FILE_BEGIN)) {
+        CloseHandle(h);
+        char detail[80];
+        std::snprintf(detail, sizeof(detail),
+                      "{\"win32_error\":%lu,\"message\":\"SetFilePointerEx\"}",
+                      GetLastError());
+        conn.writer().write_err(ErrorCode::NotSupported, detail);
         return;
     }
 

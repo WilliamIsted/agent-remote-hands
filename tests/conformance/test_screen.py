@@ -68,3 +68,27 @@ def test_screen_capture_region_and_window_mutually_exclusive(
                        "--window", "win:0x1")
     assert isinstance(r, ErrResponse)
     assert r.code == "invalid_args"
+
+
+def test_screen_capture_no_cursor_flag_accepted(client: WireClient,
+                                                capabilities: dict) -> None:
+    """`--no-cursor` is the documented opt-out from cursor compositing.
+    Must succeed (cursor in screenshot is the default but this flag
+    suppresses the overlay)."""
+    needs_verb(capabilities, "screen.capture")
+    r = client.request("screen.capture", "--region", "0,0,100,100",
+                       "--no-cursor")
+    assert isinstance(r, OkResponse)
+    assert len(r.payload) > 0
+
+
+def test_screen_capture_unknown_flag_rejected(client: WireClient,
+                                              capabilities: dict) -> None:
+    """The verb parser must reject unknown flags rather than silently
+    accepting them. Previously `--cursor` (typo for `--no-cursor`) would
+    return OK with no effect — a real footgun."""
+    needs_verb(capabilities, "screen.capture")
+    r = client.request("screen.capture", "--bogus-flag")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args"
+    assert r.detail.get("unknown_flag") == "--bogus-flag"

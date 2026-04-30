@@ -262,6 +262,13 @@ void list(Connection& conn, const wire::Request& req) {
             ctx.include_all = true;
         } else if (req.args[i] == "--filter" && i + 1 < req.args.size()) {
             ctx.filter_prefix = req.args[++i];
+        } else if (req.args[i].size() >= 2 &&
+                   req.args[i].compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
         }
     }
 
