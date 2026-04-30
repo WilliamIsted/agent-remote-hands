@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 import sys
 import traceback
 from typing import Any
@@ -62,6 +63,30 @@ def _build_agent_client() -> AgentClient:
     return AgentClient(host=host, port=port, client_name=SERVER_NAME)
 
 
+def _format_resolution_diagnostic(host: str, port: int) -> str:
+    """Format a human-readable list of addresses `host` resolves to.
+
+    Used in the connect-failure error message so the user can immediately
+    see whether they're hitting an mDNS-IPv6-multi-prefix scenario rather
+    than guessing whether the agent is up. See issue #65.
+    """
+    try:
+        infos = socket.getaddrinfo(
+            host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        return f"resolution failed: {e}"
+    if not infos:
+        return "no addresses resolved"
+    pretty: list[str] = []
+    for fam, _, _, _, sa in infos:
+        addr = sa[0]
+        if fam == socket.AF_INET6:
+            pretty.append(f"[{addr}]")
+        else:
+            pretty.append(addr)
+    return "resolved to: " + ", ".join(pretty)
+
+
 async def main() -> None:
     client = _build_agent_client()
     try:
@@ -70,8 +95,22 @@ async def main() -> None:
         # the first tool call.
         await asyncio.to_thread(client.connect)
     except (OSError, WireError) as ex:
+        diag = _format_resolution_diagnostic(client.host, client.port)
+        norm_host = client.host.lower().rstrip(".")
+        is_mdns = norm_host.endswith(".local")
+        hint = ""
+        if is_mdns:
+            hint = (
+                "\n  hint: on dual-stack networks, .local hostnames often "
+                "return many IPv6 records ahead of A. agent_client.py "
+                "prefers IPv4 for .local, but if your network's IPv6 "
+                "routing is broken in a way that masks the bridge's "
+                "preference, set REMOTE_HANDS_HOST to the IPv4 literal "
+                "as a workaround. See issue #65."
+            )
         print(
-            f"[mcp-server] could not reach agent at {client.host}:{client.port}: {ex}",
+            f"[mcp-server] could not reach agent at {client.host}:{client.port}: {ex}\n"
+            f"  {diag}{hint}",
             file=sys.stderr,
         )
         sys.exit(1)

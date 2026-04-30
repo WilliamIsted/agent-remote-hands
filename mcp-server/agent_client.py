@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
@@ -37,6 +38,60 @@ from typing import Optional, Union
 
 # ---------------------------------------------------------------------------
 # Wire types
+
+def _create_connection(host: str, port: int, timeout: float) -> socket.socket:
+    """Connect to (host, port), preferring IPv4 for `*.local` hostnames.
+
+    On dual-stack networks, Windows mDNS resolution of `<host>.local`
+    typically returns multiple AAAA records (a mix of link-local, ULA, and
+    public-routable across whatever IPv6 prefixes the host has) ahead of
+    the single A record. Python's `socket.create_connection` walks them in
+    getaddrinfo order and tries each in turn, hanging or timing out per
+    dead IPv6 address — often for the entire bridge-startup budget — before
+    reaching the working IPv4 fallback. From the user's perspective the
+    bridge appears to "not reach the agent" while ICMP ping works.
+
+    For `.local` hostnames we explicitly try AF_INET first and fall back
+    to AF_INET6 only on failure. For non-mDNS hostnames, default
+    OS-preference ordering is fine — public DNS records typically have
+    curated AAAA entries with working IPv6 routing.
+
+    See https://github.com/WilliamIsted/agent-remote-hands/issues/65 for
+    the diagnostic chain that surfaced this on a real cross-VM setup.
+    """
+    norm = host.lower().rstrip(".")
+    is_mdns = norm.endswith(".local")
+    families = (
+        [socket.AF_INET, socket.AF_INET6] if is_mdns else [socket.AF_UNSPEC]
+    )
+
+    last_err: Optional[OSError] = None
+    for family in families:
+        try:
+            infos = socket.getaddrinfo(
+                host, port, family, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            last_err = e
+            continue
+        for fam, type_, proto, _, sa in infos:
+            sock: Optional[socket.socket] = None
+            try:
+                sock = socket.socket(fam, type_, proto)
+                sock.settimeout(timeout)
+                sock.connect(sa)
+                return sock
+            except OSError as e:
+                last_err = e
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+
+    if last_err is not None:
+        raise last_err
+    raise OSError(f"could not resolve {host!r}")
+
 
 @dataclass
 class OkResponse:
@@ -126,8 +181,7 @@ class AgentClient:
         — most callers should `close()` first if they want to reset."""
         if self._sock is not None:
             return
-        self._sock = socket.create_connection(
-            (self.host, self.port), timeout=self.timeout)
+        self._sock = _create_connection(self.host, self.port, self.timeout)
         r = self.request("connection.hello", self.client_name, self.PROTOCOL_VERSION)
         if isinstance(r, ErrResponse):
             self.close()
@@ -266,6 +320,65 @@ class AgentClient:
                     self._read_exact(length)
             return self._read_response()
         raise WireError(f"unknown directive: {directive!r}")
+
+    # ------------------------------------------------------------------
+    # Subscription / EVENT support
+
+    def wait_for_event(self, sub_id: str, timeout_s: float) -> Optional[bytes]:
+        """Block until an EVENT frame arrives with the matching sub_id;
+        return the payload bytes. Return None on timeout. Used by the
+        fire-once `wait_for_*` MCP tools to translate `watch.*` subscriptions
+        into synchronous request/response semantics.
+
+        EVENT frames for OTHER sub_ids (rare on a single-subscription
+        connection but possible) are drained and ignored. OK / ERR frames
+        encountered while waiting raise WireError — they shouldn't occur
+        if the caller isn't issuing other requests on this connection
+        during the wait.
+
+        The caller holds the connection's lock for the duration of the
+        wait, so no other tool calls can complete on this AgentClient
+        until `wait_for_event` returns. That's fine in MCP — tool calls
+        are serialised by the LLM anyway."""
+        deadline = time.time() + timeout_s
+        with self._lock:
+            if self._sock is None:
+                raise WireError("not connected")
+            original_timeout = self._sock.gettimeout()
+            try:
+                while True:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        return None
+                    # Cap each recv at 1s so we re-check the deadline
+                    # frequently — important for clean cancellation if the
+                    # wire goes idle.
+                    self._sock.settimeout(min(remaining, 1.0))
+                    try:
+                        line = self._read_line()
+                    except (socket.timeout, TimeoutError):
+                        if time.time() >= deadline:
+                            return None
+                        continue
+                    parts = line.split(b" ", 2)
+                    directive = parts[0]
+                    if directive == b"EVENT":
+                        if len(parts) < 3:
+                            raise WireError(
+                                f"malformed EVENT line: {line!r}")
+                        event_sub_id = parts[1].decode("ascii", "replace")
+                        length = int(parts[2])
+                        body = self._read_exact(length) if length else b""
+                        if event_sub_id == sub_id:
+                            return body
+                        # EVENT for a different subscription — ignore.
+                        continue
+                    raise WireError(
+                        "unexpected directive while waiting for EVENT: "
+                        + directive.decode("ascii", "replace"))
+            finally:
+                if self._sock is not None:
+                    self._sock.settimeout(original_timeout)
 
     # ------------------------------------------------------------------
     # Framing primitives

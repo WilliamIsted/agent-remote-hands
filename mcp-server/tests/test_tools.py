@@ -175,3 +175,68 @@ def test_request_power_access_requires_drive_first(mock_agent) -> None:
         assert c.current_tier == "power"
     finally:
         c.close()
+
+
+# ---------------------------------------------------------------------------
+# Binary file-write tools (write_file_b64, upload_file)
+
+def test_binary_write_tools_registered() -> None:
+    """Both binary-capable wrappers around file.write must be registered
+    at drive tier. write_file (text) is the third member of the family."""
+    names = {t.name for t in TOOLS}
+    for required in ("write_file", "write_file_b64", "upload_file"):
+        assert required in names, f"{required} missing from registry"
+
+    drive = {t.name for t in tools_by_tier("drive")}
+    for required in ("write_file", "write_file_b64", "upload_file"):
+        assert required in drive, f"{required} should be drive-tier"
+
+
+def test_write_file_b64_rejects_invalid_base64() -> None:
+    """The b64 handler must validate before sending bytes over the wire."""
+    tool = find_tool("write_file_b64")
+    with pytest.raises(ValueError, match="not valid base64"):
+        tool.handler({"path": "C:\\tmp\\x", "content_b64": "@@@not-b64@@@"}, None)
+
+
+def test_upload_file_rejects_missing_source(tmp_path) -> None:
+    """The upload handler must fail with a clear error if the source path
+    on the controller doesn't exist, rather than sending an empty file or
+    leaving the wire in a bad state."""
+    tool = find_tool("upload_file")
+    nonexistent = tmp_path / "definitely-not-here.bin"
+    with pytest.raises(ValueError, match="could not read"):
+        tool.handler(
+            {"source_path": str(nonexistent),
+             "destination_path": "C:\\tmp\\dest.bin"},
+            None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Subscription wait-fors (fire-once)
+
+def test_wait_for_tools_registered() -> None:
+    """All four fire-once wait tools should be registered, observe-tier,
+    and marked read-only."""
+    expected = {
+        "wait_for_visual_change", "wait_for_window",
+        "wait_for_process_exit", "wait_for_file_change",
+    }
+    names = {t.name for t in TOOLS}
+    for name in expected:
+        assert name in names, f"{name} not registered"
+
+    for name in expected:
+        tool = find_tool(name)
+        assert tool.tier == "observe", f"{name} should be observe-tier"
+        assert tool.read_only_hint is True, f"{name} should advertise read_only_hint"
+
+
+def test_wait_for_tools_in_observe_surface() -> None:
+    """Wait-for tools must appear in the observe-tier surface so a fresh
+    session can call them without elevation."""
+    observe = {t.name for t in tools_by_tier("observe")}
+    for name in ("wait_for_visual_change", "wait_for_window",
+                 "wait_for_process_exit", "wait_for_file_change"):
+        assert name in observe
