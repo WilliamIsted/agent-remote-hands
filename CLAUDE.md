@@ -6,9 +6,9 @@ Operational guidance for Claude Code (claude.ai/code) working in this repo. The 
 
 A multi-binary Windows control surface for AI agents. Three top-level deliverables:
 
-- **`agents/windows-modern/`** — C++17 agent for Windows 10 / 11. IUIAutomation, BitBlt + WIC for screen capture, hand-rolled mDNS responder. Built with CMake. **Shipped today.**
+- **`agents/windows-modern/`** — C++17 agent for Windows 10 / 11. IUIAutomation, BitBlt + WIC for screen capture, hand-rolled mDNS responder. Built with CMake. **v0.2.0 release-candidate** (Protocol 2.0) — the wire-protocol surface is feature-complete; the agent 1.0 stable-release blocker is code signing.
 - **`agents/windows-nt/`** *(planned)* — Straight C agent for Windows NT 4 → Server 2003. WinSock, GDI BitBlt, classic input APIs. Built with `build.bat` (cl.exe).
-- **`mcp-server/`** *(planned)* — Python MCP bridge that exposes the wire protocol as named tools to MCP-aware clients.
+- **`mcp-server/`** *(beta — 27 of 66 verbs wrapped)* — Python MCP bridge that exposes the wire protocol as named tools to MCP-aware clients. Tier-filtered tool listing + `tools/list_changed` notifications. Adding the rest of the wrappers is `tools.py` work.
 
 All targets speak the same wire protocol (`PROTOCOL.md`). The conformance suite (`tests/conformance/`) is the contract — anything passing it speaks the protocol correctly.
 
@@ -95,13 +95,15 @@ No `medium-priority` — absence of a high/low label means medium.
 
 ## Milestones
 
-| Milestone | Theme |
-|---|---|
-| `v1.0` | Stable protocol + per-connection tier system + agent-feedback fixes |
-| `v2.0` | Privsep dispatcher (privileged dispatcher + tier-restricted workers) |
-| `v3.0` | SSPI auth + caller impersonation (per-connection workers under the caller's identity) |
+| Milestone | Protocol | Theme |
+|---|---|---|
+| `v0.2` | 2.0 | Stable protocol + per-connection tier system + agent-feedback fixes |
+| `v0.3` | 3.0 | Privsep dispatcher (privileged dispatcher + tier-restricted workers) |
+| `v0.4` | 4.0 | SSPI auth + caller impersonation (per-connection workers under the caller's identity) |
 
-Most agent-surfaced asks live in v1.0. v2.0 and v3.0 are architectural increments that change the security model, not features.
+Each milestone bumps both the agent minor version (pre-1.0 — agent hasn't had a stable release yet) and the wire protocol major version (protocol changes between agent versions are dramatic and abrupt).
+
+Most agent-surfaced asks live in v0.2. v0.3 and v0.4 are architectural increments that change the security model, not features.
 
 ## Filing issues with `gh`
 
@@ -112,7 +114,7 @@ gh issue create \
   --title "ELEMENT_FIND distinguishes 'not found' from 'UIA blind across IL'" \
   --body-file .github/issue-body.md \
   --label "agent-feedback,agent-authored,enhancement,high-priority" \
-  --milestone "v1.0"
+  --milestone "v0.2"
 ```
 
 Native sub-issue link (the GitHub REST endpoint, not just a body reference):
@@ -158,7 +160,7 @@ python tests/conformance/run.py 127.0.0.1 18765   # vagrant forwards 8765 -> 187
 - **Don't `git add` from the repo root without confirming `.gitignore` is intact.** Build artefacts are noisy; staging unintentionally is easy.
 - **Don't skip pre-commit hooks** (`--no-verify`). If a hook fails, fix the cause.
 - **Don't amend commits** unless the user explicitly asks. Make a new commit instead.
-- **Don't add `winget` or store-installed tooling to `Tools/install-agent.ps1`** — the installer must work on bare VMs without Microsoft Store availability.
+- **Don't add `winget` or store-installed tooling to `Tools/install-agent.ps1`** — the installer must work on bare VMs without Microsoft Store availability. (Scoop, in `Tools/scoop/`, is allowed and is the v0.2 distribution channel: it's a user-mode install that runs without admin elevation, doesn't depend on the Microsoft Store, and lets the manifest pin a release zip + SHA256SUMS from this repo's GitHub Releases. Different category from winget despite the surface similarity.)
 - **Don't add self-installer behaviour back into `agents/windows-modern/`.** Microsoft Defender's ML heuristic flags self-installing binaries as `Program:Win32/Contebrew.A!ml` regardless of mechanism (netsh shell-out, Firewall COM API, or anything else tried so far). Installation is the PowerShell script's job; the binary is purely a wire-protocol server.
 - **Don't disable SEH / structured exception handling barriers in the agent** — they catch driver-induced crashes from third-party UI hooks.
 - **Don't ship a verb without a conformance test.** The suite is the contract.
@@ -168,7 +170,7 @@ python tests/conformance/run.py 127.0.0.1 18765   # vagrant forwards 8765 -> 187
 - **Capabilities are dynamic.** Don't hardcode the verb list in clients; read `CAPS` from the agent and gate on it. Older agents and the NT build advertise smaller surfaces.
 - **UIPI is silent on legacy v1 protocol; explicit on v2.** When the foreground window is at a higher integrity level than the agent, v2 input verbs (`input.click` / `input.type` / `element.invoke` / …) return `ERR uipi_blocked` with `{agent_il, target_il}`. The v1 protocol returned `OK` and dropped the input — the v2 redesign closed that observability hole. When debugging "input ignored" reports, check the agent's integrity vs the foreground window's first.
 - **The wire is length-prefixed throughout.** Header lines are line-oriented ASCII; payloads are exactly the byte count stated in the header. `EVENT` frames for `watch.*` subscriptions interleave between command responses on the same connection. `connection.reset` recovers from caller-side wire-desync without dropping the connection.
-- **There is no authentication today.** Discovery is opt-in per deployment for that reason; v3.0 introduces SSPI.
+- **There is no authentication today.** Discovery is opt-in per deployment for that reason; the v0.4 milestone (Protocol 4.0) introduces SSPI.
 
 ## Where design proposals live
 
@@ -191,7 +193,7 @@ mDNS service type (`_remote-hands._tcp.local.`) is target-agnostic; targets dist
 
 ## Future structure decisions (don't pre-empt)
 
-- **v2.0 privsep dispatcher** will need a second binary alongside the agent. Two viable shapes — flat (`agents/windows-modern/dispatcher.cpp` + `worker.cpp` in the same target) or nested (`agents/windows-modern/{dispatcher,worker}/` separate targets). Decide when the work starts; current single-target structure is right for v1.0.
+- **v0.3 privsep dispatcher (Protocol 3.0)** will need a second binary alongside the agent. Two viable shapes — flat (`agents/windows-modern/dispatcher.cpp` + `worker.cpp` in the same target) or nested (`agents/windows-modern/{dispatcher,worker}/` separate targets). Decide when the work starts; current single-target structure is right for v0.2.
 - **`mcp-server/tools.py`** holds all named tools today. If it grows past ~50 tools, split into a `mcp-server/tools/` package by category (`capture.py`, `input.py`, `files.py`, etc.). Don't pre-split.
 - **`client/`** holds Python-only references today. If a non-Python client appears (TS, Go), move existing files under `client/python/` and add the new client alongside. Don't pre-create empty language directories.
 

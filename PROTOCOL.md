@@ -219,7 +219,7 @@ Field semantics:
 | `privileges` | array of strings | Win32 privilege names enabled in the agent's token |
 | `tiers` | array of strings | Tiers this agent supports. Always at least `["observe"]`. |
 | `current_tier` | string | Tier of the current connection |
-| `auth` | array of strings | Supported elevation methods. `"token"` today; `"sspi"` in v3.0. |
+| `auth` | array of strings | Supported elevation methods. `"token"` today; `"sspi"` in the v0.4 milestone (Protocol 4.0). |
 | `max_connections` | integer | Concurrent connection cap |
 | `namespaces` | array of strings | Verb namespaces this agent advertises |
 | `capabilities` | object | Sub-capabilities (capture engine, UIA flavour, image formats, etc.) |
@@ -316,6 +316,16 @@ Synthetic input. All input verbs check the foreground window's integrity level b
 | `input.send_message` | D | `<hwnd> <msg> <wparam> <lparam>` | `OK 0` | Low-level escape hatch for `SendMessage` (synchronous) |
 | `input.post_message` | D | `<hwnd> <msg> <wparam> <lparam>` | `OK 0` | Non-blocking peer of `input.send_message`; uses `PostMessage`. Use when the target's message pump is unresponsive to a synchronous send. |
 
+#### Known limitation: keyboard input does not reach RawInput / DirectInput targets
+
+`input.key`, `input.type`, `input.send_message`, and `input.post_message` all deliver synthetic keyboard events at the **user32 message-queue layer**. Targets that poll keyboard state via RawInput (`RegisterRawInputDevices` + `WM_INPUT`), DirectInput (`IDirectInputDevice8::GetDeviceState`), or `GetAsyncKeyState` against the kernel keyboard table will not see these events — those paths are populated only by the `KBDCLASS` kernel driver responding to physical hardware. The verbs return `OK` on the wire because the events are accepted by user32; the in-target effect is silently nil.
+
+Affected targets include most Unity 5 / Unity 2017+ games configured for low-level input, DirectX games using `IDirectInputDevice8`, and applications that explicitly opt into RawInput. Synthetic *mouse* input is unaffected — the equivalent `MOUCLASS` path collapses physical and synthetic mouse at a lower point in the stack, so `input.click` / `input.move` / `input.scroll` reach DirectInput's mouse polling normally.
+
+There is no out-of-process software workaround. Reaching RawInput / DirectInput keyboard polling requires either a kernel-mode driver injector (e.g. the Interception driver, requires admin install + signed driver) or an in-process companion loaded into the target itself (a Unity/DirectX mod calling the engine's input API directly). Neither is in scope for the agent's standard distribution.
+
+See [#64](https://github.com/WilliamIsted/agent-remote-hands/issues/64) for the empirical chain that confirmed the boundary, including verified-failed tests of `WM_KEYDOWN`/`WM_KEYUP` via both `SendMessage` and `PostMessage`.
+
 ### 4.5 `element.*`
 
 UI Automation. Element identifiers use the prefix `elt:` followed by a connection-scoped sequential integer (e.g. `elt:7`). IDs start at 1 on each new connection and never persist across reconnects.
@@ -346,7 +356,8 @@ Filesystem operations. Paths are UTF-8.
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
 | `file.read` | O | `<path>` | `OK <len>\n<bytes>` | Whole-file read |
-| `file.write` | D | `<path> <length>` | `OK 0` | Whole-file write; payload follows |
+| `file.write` | D | `<path> <length>` | `OK 0` | Whole-file write; payload follows. Truncates any existing file. |
+| `file.write_at` | D | `<path> <offset> <length> [--truncate]` | `OK 0` | Random-access write; `<length>` bytes written at byte `<offset>`. `--truncate` (only meaningful at offset 0) clears the file first; otherwise the file is opened with `OPEN_ALWAYS`. The chunked-upload primitive driven by the MCP bridge's `upload_file` for files over its single-shot threshold. |
 | `file.list` | O | `<path>` | `OK <len>\n<json>` | JSON: `{"entries":[{"name":"...","type":"file\|dir\|link","size":N,"mtime_unix":N}]}` |
 | `file.stat` | O | `<path>` | `OK <len>\n<json>` | Single-entry version of `file.list` |
 | `file.delete` | P | `<path>` | `OK 0` | Files and empty directories |
@@ -436,8 +447,8 @@ Errors take the form:
 | `busy` | `{max}` | Too many concurrent connections |
 | `conflict` | varies | Verb cannot proceed because of in-flight state (e.g. `system.power` `--delay` while one is already pending — detail `{"pending_until_ms":<n>}`) |
 | `protocol_mismatch` | `{agent, client}` | Hello specified an incompatible protocol version |
-| `auth_required` | — | Reserved for v3.0 SSPI |
-| `auth_invalid` | — | Reserved for v3.0 SSPI |
+| `auth_required` | — | Reserved for v0.4 SSPI (Protocol 4.0) |
+| `auth_invalid` | — | Reserved for v0.4 SSPI (Protocol 4.0) |
 
 ### 5.2 Domain-specific codes
 
@@ -527,7 +538,7 @@ The agent MUST enforce tier requirements at the verb-dispatch layer. A verb whos
 
 The agent MAY enable Win32 privileges (e.g. `SeShutdownPrivilege`) only when needed for the current tier. An observe-tier connection SHOULD see those privileges disabled in the agent's effective token.
 
-This is OS-enforced confinement layered on top of protocol-level tier checks. v2.0 agents are single-process; full process isolation is the v2.0+ privsep dispatcher milestone.
+This is OS-enforced confinement layered on top of protocol-level tier checks. Protocol 2.0 agents are single-process; full process isolation is the v0.3 privsep dispatcher milestone (Protocol 3.0).
 
 ---
 
@@ -759,7 +770,7 @@ Verbs not implemented on a particular target MUST be omitted from `system.capabi
 
 ## Appendix A: Verb summary
 
-A flat list of all v2.0 verbs for quick reference. **O/D/P** denotes the required tier; **—** denotes lifecycle (any tier).
+A flat list of all Protocol 2.0 verbs for quick reference. **O/D/P** denotes the required tier; **—** denotes lifecycle (any tier).
 
 ```
 connection.hello             (—)
@@ -814,6 +825,7 @@ element.set_text             (D)
 
 file.read                    (O)
 file.write                   (D)
+file.write_at                (D)
 file.list                    (O)
 file.stat                    (O)
 file.delete                  (P)

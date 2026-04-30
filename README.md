@@ -11,7 +11,7 @@
 
 A small TCP agent that gives AI coding agents remote hands on Windows machines — mouse, keyboard, screenshots, process control, file I/O, UI Automation, window management — over a single line-oriented socket.
 
-Built for [Claude Code](https://docs.claude.com/en/docs/claude-code) and other MCP-aware LLM clients to drive virtual or physical Windows machines. Multi-target by design: the modern build (Windows 10 / 11) ships today; a planned legacy build (Windows NT through Server 2003) will share the same wire protocol so the same controller speaks to both.
+Built for [Claude Code](https://docs.claude.com/en/docs/claude-code) and other MCP-aware LLM clients to drive virtual or physical Windows machines. Multi-target by design: the modern build (Windows 10 / 11) is in **v0.2.0 release-candidate** today (Protocol 2.0); a planned legacy build (Windows NT through Server 2003) will share the same wire protocol so the same controller speaks to both.
 
 ## Why
 
@@ -21,6 +21,10 @@ When an LLM needs to install software, configure a system, or verify a deliverab
 - **PowerShell over WinRM** (no GUI awareness, blind to dialogs and modals, lands you in non-interactive Session 0)
 
 Agent Remote Hands sits between those: a native agent on the target exposes a wire protocol that Claude — or any MCP client — can drive directly, with **rich introspection** (UI Automation tree, window list, process table, registry, screenshots) and **low-latency control** (synthetic keyboard/mouse, foreground focus, sub-100 ms screenshots) over plain TCP.
+
+The verbs are also **opinionated guard rails** rather than thin wrappers around `user32!SendInput` and friends. The agent and a hand-rolled PowerShell client are calling the same Win32 syscalls, but `input.click x y` packs the cursor move and the button events into a single atomic `SendInput` batch with absolute virtual-desktop coordinates — the form Win32 input *should* take but rarely does in practice, because the seductive shorter form (`SetCursorPos` + uncoupled `mouse_event`) drifts. `screen.capture` composites the OS cursor onto the captured bitmap rather than handing back the bare desktop the way BitBlt and PrintWindow leave it. The wire surface bakes in the right Win32 idioms so callers can't accidentally write the drifty short forms.
+
+> **If you're an LLM** about to use this agent — or writing code that calls it — start with [`LLM-OPERATORS.md`](LLM-OPERATORS.md). It's the operator's-eye view: which docs to read, what to assume, common footguns, and a worked-example session. Ships in the release zip alongside the binary too.
 
 ## Quick start
 
@@ -68,7 +72,7 @@ The script adds a Microsoft Defender exclusion for `%ProgramFiles%\AgentRemoteHa
 
 ### Why the Defender exclusion?
 
-Microsoft Defender's machine-learning heuristic flags any unsigned remote-control tool of this shape (synthetic input + screen capture + arbitrary file I/O + process kill + TCP listener) as `Program:Win32/Contebrew.A!ml` — regardless of the binary's specific build, install behaviour, or strings present. The detection is structural. Without a code-signing certificate, the only mitigation is to deploy into a path Defender doesn't scan. Code signing is tracked as the v1.0 GA blocker.
+Microsoft Defender's machine-learning heuristic flags any unsigned remote-control tool of this shape (synthetic input + screen capture + arbitrary file I/O + process kill + TCP listener) as `Program:Win32/Contebrew.A!ml` — regardless of the binary's specific build, install behaviour, or strings present. The detection is structural. Without a code-signing certificate, the only mitigation is to deploy into a path Defender doesn't scan. Code signing is tracked as the agent 1.0 stable-release blocker.
 
 Sanity-check from another machine using the conformance suite:
 
@@ -130,7 +134,7 @@ Connections are per-thread, capped at the agent's advertised `max_connections` (
 
 When started with `REMOTE_HANDS_DISCOVERABLE=1` (or `--discoverable`), the agent advertises itself on the LAN via mDNS / DNS-SD as `_remote-hands._tcp.local.`. Any DNS-SD browser will see it; a dedicated Python scanner is planned (see Roadmap).
 
-**The protocol has no built-in authentication today**, so discovery is opt-in per deployment — advertising on an untrusted network is a footgun. v3.0 of the agent (see Roadmap) introduces SSPI authentication; until then, advertise only on trusted networks and consider firewalling 8765 to known clients.
+**The protocol has no built-in authentication today**, so discovery is opt-in per deployment — advertising on an untrusted network is a footgun. The v0.4 milestone (Protocol 4.0 — see Roadmap) introduces SSPI authentication; until then, advertise only on trusted networks and consider firewalling 8765 to known clients.
 
 ## Conformance suite
 
@@ -146,11 +150,11 @@ The suite is the executable contract: anything passing it speaks the wire protoc
 
 Three architectural increments tracked as GitHub milestones:
 
-| Milestone | Theme | Notes |
-|---|---|---|
-| **v1.0** | Stable protocol + per-connection tier system + agent-feedback fixes | Most issues live here. Adds `observe` / `drive` / `power` tiers gated by `connection.tier_raise`, file-token auth, and a backlog of observability + ergonomics improvements surfaced by real LLM driving sessions. Single-process. |
-| **v2.0** | Privsep dispatcher | Privileged dispatcher process + tier-restricted worker processes. OS-enforced separation: the kernel refuses out-of-tier operations regardless of agent code paths. Compromise containment. |
-| **v3.0** | SSPI auth + caller impersonation | Per-connection workers spawned under the authenticated caller's Windows identity. Filesystem and registry ACLs match the caller's permissions, not the agent's. Full WinRM-style auth model. |
+| Milestone | Protocol | Theme | Notes |
+|---|---|---|---|
+| **v0.2** | 2.0 | Stable protocol + per-connection tier system + agent-feedback fixes | Most issues live here. Adds `observe` / `drive` / `power` tiers gated by `connection.tier_raise`, file-token auth, and a backlog of observability + ergonomics improvements surfaced by real LLM driving sessions. Single-process. |
+| **v0.3** | 3.0 | Privsep dispatcher | Privileged dispatcher process + tier-restricted worker processes. OS-enforced separation: the kernel refuses out-of-tier operations regardless of agent code paths. Compromise containment. |
+| **v0.4** | 4.0 | SSPI auth + caller impersonation | Per-connection workers spawned under the authenticated caller's Windows identity. Filesystem and registry ACLs match the caller's permissions, not the agent's. Full WinRM-style auth model. |
 
 [Open issues by milestone →](https://github.com/WilliamIsted/agent-remote-hands/milestones)
 

@@ -36,7 +36,7 @@ body:
       label: Suggested milestone
       description: Maintainers may reassign during triage.
       options:
-        - "v1.0 (protocol + tier system + agent-feedback)"
-        - "v2.0 (privsep dispatcher)"
-        - "v3.0 (SSPI auth + caller impersonation)"
+        - "v0.2 (Protocol 2.0 — tier system + agent-feedback)"
+        - "v0.3 (Protocol 3.0 — privsep dispatcher)"
+        - "v0.4 (Protocol 4.0 — SSPI auth + caller impersonation)"
         - "Unsure"

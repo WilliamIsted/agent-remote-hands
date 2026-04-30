@@ -53,7 +53,7 @@ from mcp.server.stdio import stdio_server  # noqa: E402
 
 
 SERVER_NAME = "agent-remote-hands"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 
 
 def _build_agent_client() -> AgentClient:
