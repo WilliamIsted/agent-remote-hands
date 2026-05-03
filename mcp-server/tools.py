@@ -14,20 +14,24 @@
 
 """MCP tool surface for the Agent Remote Hands wire protocol.
 
-Tools are tagged with the wire-protocol tier they require. The server consults
-that tag when answering `tools/list` so an `observe`-tier session sees only
-the read tools; the LLM raises tier explicitly via `request_drive_access`
-or `request_power_access`, which the server treats as an elevation request
-and (on success) emits a `tools/list_changed` notification so the client
-re-queries and sees the broader surface.
+Tools are tagged with the wire-protocol tier they require (the v2.1 CRUDX
+ladder: read < create < update < delete < extra_risky). The server consults
+that tag when answering `tools/list` so a `read`-tier session sees only the
+read tools; the LLM raises tier explicitly via the `request_*_access` family,
+which the server treats as an elevation request and (on success) emits a
+`tools/list_changed` notification so the client re-queries and sees the
+broader surface.
 
 Tool naming: semantic over wire-mechanical (e.g. `click_element`, not
 `element_invoke_at_xy`) per the agent CLAUDE.md guidance — the LLM reads
 the tool description and decides intent from it.
 
-This is a starter set covering the most common automation flows. Add tools
-here as new agent verbs ship; the dispatch table at the bottom is the only
-place that changes.
+Schema source-of-truth: tools whose wire verb has a corresponding entry under
+the protocol-repo's `spec/verbs/<verb>.json` load their `input_schema` from
+the spec file via `ToolDef.from_spec(...)`. Tools without a spec equivalent
+(composite dispatchers, watch-based wait tools, bridge-internal helpers) keep
+their inline `input_schema=...` definitions. Set `PROTOCOL_SPEC_DIR` to point
+the loader at a non-default spec/ location.
 """
 
 from __future__ import annotations
@@ -41,16 +45,45 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from agent_client import AgentClient, ErrResponse, OkResponse, WireError, read_token_file
+from spec_loader import (
+    crudx_to_hints,
+    crudx_to_tier,
+    load_specs,
+    strip_x_extensions,
+)
+
+
+# ---------------------------------------------------------------------------
+# Spec-of-truth load
+#
+# The 15-verb spec lives in the protocol repo at `Repos/Protocol/spec/`.
+# Loaded once at module import; lifted ToolDefs read from this dict.
+
+SPECS: dict[str, dict] = load_specs()
 
 
 # ---------------------------------------------------------------------------
 # Tool registry types
 
+# The valid tier values, ordered as a strict ladder. Matches the agent's
+# Tier enum (PROTOCOL.md §7). `always` is bridge-internal — used for tools
+# that should appear regardless of the connection's current tier (e.g. the
+# `system.info` and tier-elevation tools).
+_TIER_ORDER = {
+    "always":      -1,
+    "read":         0,
+    "create":       1,
+    "update":       2,
+    "delete":       3,
+    "extra_risky":  4,
+}
+
+
 @dataclass
 class ToolDef:
     name: str
     description: str
-    tier: str  # "observe" | "drive" | "power" | "always"
+    tier: str  # "read" | "create" | "update" | "delete" | "extra_risky" | "always"
     input_schema: dict
     handler: Callable[[dict, AgentClient], str]
     # MCP standard annotations — the client uses these for safety prompting.
@@ -59,6 +92,10 @@ class ToolDef:
     idempotent_hint: bool = False
     open_world_hint: bool = False
     annotations: dict = field(default_factory=dict)
+    # Optional: the wire verb this MCP tool dispatches to. For diagnostics —
+    # handlers still call `client.request("<verb>", ...)` explicitly. Set
+    # automatically when constructed via `ToolDef.from_spec`.
+    wire_verb: Optional[str] = None
 
     def to_mcp_tool(self) -> dict:
         """Serialise into the MCP `Tool` schema. The tier field is internal
@@ -77,6 +114,49 @@ class ToolDef:
             "inputSchema": self.input_schema,
             "annotations": ann,
         }
+
+    @classmethod
+    def from_spec(cls,
+                  spec_verb_name: str,
+                  mcp_name: str,
+                  handler: Callable[[dict, AgentClient], str],
+                  *,
+                  description: Optional[str] = None,
+                  tier: Optional[str] = None,
+                  wire_verb: Optional[str] = None,
+                  extra_annotations: Optional[dict] = None) -> "ToolDef":
+        """Build a ToolDef from a spec verb file. The lifted MCP tool's
+        `input_schema` is the spec's `input_schema` with `x-*` extensions
+        stripped; `tier` defaults to the CRUDX-derived value; the standard
+        MCP annotation hints are derived from the CRUDX letter and `x-errors`.
+
+        - `description`: an MCP-side override (preferred when richer than
+          the spec's terse description). Falls back to spec `description`.
+        - `tier`: explicit override, e.g. `"always"` for `system.info`.
+        - `wire_verb`: the wire verb to dispatch to, when it differs from
+          the spec name. Stored as documentation; handlers still call
+          `client.request(...)` with the wire name explicitly.
+        - `extra_annotations`: merged into the MCP annotations dict.
+        """
+        try:
+            spec = SPECS[spec_verb_name]
+        except KeyError:
+            raise RuntimeError(
+                f"ToolDef.from_spec: no spec for {spec_verb_name!r}; "
+                f"loaded specs: {sorted(SPECS)}")
+        hints = crudx_to_hints(spec)
+        return cls(
+            name=mcp_name,
+            description=description or spec.get("description", ""),
+            tier=tier or crudx_to_tier(spec["x-crudx"]),
+            input_schema=strip_x_extensions(spec["input_schema"]),
+            handler=handler,
+            read_only_hint=hints["read_only_hint"],
+            destructive_hint=hints["destructive_hint"],
+            idempotent_hint=hints["idempotent_hint"],
+            annotations=extra_annotations or {},
+            wire_verb=wire_verb or spec_verb_name,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -115,76 +195,95 @@ def _h_agent_info(args: dict, client: AgentClient) -> str:
     return json.dumps(info, indent=2)
 
 
-def _h_request_drive_access(args: dict, client: AgentClient) -> str:
-    reason = args.get("reason", "").strip()
-    if not reason:
-        raise ValueError("reason is required — explain why drive tier is needed")
+def _elevate(client: AgentClient, target_tier: str, reason: str) -> str:
+    """Common machinery for the per-tier `request_*_access` handlers.
 
-    if client.can_satisfy("drive"):
-        return f"Already at {client.current_tier} tier; drive-tier tools are available."
+    Reads the agent's elevation token (if not already set on the client),
+    then issues `connection.tier_raise <target_tier>`. Returns a message
+    describing the new tier, or raises if the tier_raise fails."""
+    if not reason.strip():
+        raise ValueError(
+            f"reason is required — explain why {target_tier} tier is needed")
 
-    token = client._token or read_token_file(os.environ.get("REMOTE_HANDS_TOKEN_PATH"))
+    if client.can_satisfy(target_tier):
+        return (f"Already at {client.current_tier} tier; "
+                f"{target_tier}-tier tools are available.")
+
+    token = client._token or read_token_file(
+        os.environ.get("REMOTE_HANDS_TOKEN_PATH"))
     if token is None:
         raise RuntimeError(
-            "no token available — set REMOTE_HANDS_TOKEN_PATH to point at the "
-            "agent's token file (default %ProgramData%\\AgentRemoteHands\\token)")
+            "no token available — set REMOTE_HANDS_TOKEN_PATH to point at "
+            "the agent's token file (default "
+            "%ProgramData%\\AgentRemoteHands\\token)")
     client.set_token(token)
 
-    r = client.tier_raise("drive")
+    r = client.tier_raise(target_tier)
     if isinstance(r, ErrResponse):
-        raise RuntimeError(f"tier_raise drive failed: {r.code} {json.dumps(r.detail)}")
-    return f"Elevated to drive tier (reason: {reason}). Drive-tier tools will appear on the next tools/list query."
+        raise RuntimeError(
+            f"tier_raise {target_tier} failed: {r.code} {json.dumps(r.detail)}")
+    return (f"Elevated to {target_tier} tier (reason: {reason}). "
+            f"{target_tier}-tier tools will appear on the next tools/list query.")
 
 
-def _h_request_power_access(args: dict, client: AgentClient) -> str:
-    reason = args.get("reason", "").strip()
-    if not reason:
-        raise ValueError("reason is required — explain why power tier is needed (destructive operations)")
+def _h_request_create_access(args: dict, client: AgentClient) -> str:
+    return _elevate(client, "create", args.get("reason", ""))
 
-    if client.can_satisfy("power"):
-        return f"Already at {client.current_tier} tier; power-tier tools are available."
 
-    token = client._token or read_token_file(os.environ.get("REMOTE_HANDS_TOKEN_PATH"))
-    if token is None:
-        raise RuntimeError("no token available — see request_drive_access for setup")
-    client.set_token(token)
+def _h_request_update_access(args: dict, client: AgentClient) -> str:
+    return _elevate(client, "update", args.get("reason", ""))
 
-    # Power requires drive first.
-    if not client.can_satisfy("drive"):
-        r = client.tier_raise("drive")
-        if isinstance(r, ErrResponse):
-            raise RuntimeError(f"tier_raise drive failed: {r.code} {json.dumps(r.detail)}")
 
-    r = client.tier_raise("power")
-    if isinstance(r, ErrResponse):
-        raise RuntimeError(f"tier_raise power failed: {r.code} {json.dumps(r.detail)}")
-    return f"Elevated to power tier (reason: {reason}). Power-tier tools will appear on the next tools/list query."
+def _h_request_delete_access(args: dict, client: AgentClient) -> str:
+    return _elevate(client, "delete", args.get("reason", ""))
+
+
+def _h_request_extra_risky_access(args: dict, client: AgentClient) -> str:
+    return _elevate(client, "extra_risky", args.get("reason", ""))
 
 
 # --- Observe -----------------------------------------------------------------
 
 def _h_take_screenshot(args: dict, client: AgentClient) -> str:
+    """Screen capture. Spec input shape: `region` is `{x, y, w, h}` object,
+    `monitor` is integer index, `window` is handle string. Mutually exclusive.
+    Handler serialises the spec shape into the wire's CLI-style tokens."""
     fmt = args.get("format", "png")
     region = args.get("region")
     window = args.get("window")
+    monitor = args.get("monitor")
     call_args = ["--format", fmt]
-    if region:
-        call_args += ["--region", region]
-    if window:
-        call_args += ["--window", window]
+    if region is not None:
+        if isinstance(region, dict):
+            x = int(region["x"]); y = int(region["y"])
+            w = int(region["w"]); h = int(region["h"])
+            call_args += ["--region", f"{x},{y},{w},{h}"]
+        else:
+            # Tolerate legacy string form for back-compat with manual callers.
+            call_args += ["--region", str(region)]
+    if window is not None:
+        call_args += ["--window", str(window)]
+    if monitor is not None:
+        call_args += ["--monitor", str(int(monitor))]
     r = _ok_or_raise(client.request("screen.capture", *call_args), "screen.capture")
     # Don't dump the bytes inline — return a compact marker the LLM understands.
     return (f"Captured {len(r.payload)} bytes ({fmt}). To view, save the payload "
-            f"to a file or pipe through an image-viewer. Use --region or --window "
+            f"to a file or pipe through an image-viewer. Use region/window/monitor "
             f"to crop and shrink the response.")
 
 
 def _h_list_windows(args: dict, client: AgentClient) -> str:
+    """List visible top-level windows. Spec input fields: `visible_only`
+    (default true) and `pid` (optional). The wire CLI form takes `--all` to
+    invert visible_only and `--filter <pattern>` for title; the bridge maps
+    the spec fields onto the wire flags."""
     extra = []
-    if args.get("title_prefix"):
-        extra += ["--filter", args["title_prefix"]]
-    if args.get("include_all"):
+    # `visible_only=false` → wire `--all` (include hidden).
+    if args.get("visible_only") is False:
         extra += ["--all"]
+    pid = args.get("pid")
+    if pid is not None:
+        extra += ["--pid", str(int(pid))]
     return _format_ok(_ok_or_raise(client.request("window.list", *extra), "window.list"))
 
 
@@ -201,9 +300,25 @@ def _h_list_elements(args: dict, client: AgentClient) -> str:
 
 
 def _h_find_element(args: dict, client: AgentClient) -> str:
-    role = args["role"]
-    name_pattern = args["name_pattern"]
-    return _format_ok(_ok_or_raise(client.request("element.find", role, name_pattern), "element.find"))
+    """Find a UIA element. Spec input fields: `role`, `name`, `automation_id`,
+    `root` (window handle), `timeout_ms`. The wire CLI form takes
+    `<role> <name-pattern>` positionally; the bridge maps the spec fields
+    onto the wire form."""
+    role = args.get("role", "")
+    name = args.get("name") or args.get("name_pattern", "")
+    if not role or not name:
+        raise ValueError(
+            "find_element requires both `role` and `name` "
+            "(spec input_schema fields)")
+    extra = []
+    if args.get("root"):
+        extra += ["--root", str(args["root"])]
+    if args.get("automation_id"):
+        extra += ["--automation-id", str(args["automation_id"])]
+    if args.get("timeout_ms") is not None:
+        extra += ["--timeout-ms", str(int(args["timeout_ms"]))]
+    return _format_ok(_ok_or_raise(
+        client.request("element.find", role, name, *extra), "element.find"))
 
 
 def _h_wait_for_element(args: dict, client: AgentClient) -> str:
@@ -232,7 +347,7 @@ def _h_read_file(args: dict, client: AgentClient) -> str:
 
 def _h_list_directory(args: dict, client: AgentClient) -> str:
     path = args["path"]
-    return _format_ok(_ok_or_raise(client.request("file.list", path), "file.list"))
+    return _format_ok(_ok_or_raise(client.request("directory.list", path), "directory.list"))
 
 
 def _h_list_processes(args: dict, client: AgentClient) -> str:
@@ -243,7 +358,7 @@ def _h_list_processes(args: dict, client: AgentClient) -> str:
 
 
 def _h_get_clipboard(args: dict, client: AgentClient) -> str:
-    r = _ok_or_raise(client.request("clipboard.read"), "clipboard.read")
+    r = _ok_or_raise(client.request("clipboard.get"), "clipboard.get")
     try:
         return r.payload.decode("utf-8")
     except UnicodeDecodeError:
@@ -310,11 +425,21 @@ def _h_press_keys(args: dict, client: AgentClient) -> str:
 
 
 def _h_click_at(args: dict, client: AgentClient) -> str:
+    """Click at an absolute screen coordinate. Spec input adds `double` and
+    `modifiers` (array of enum strings)."""
     x = str(int(args["x"]))
     y = str(int(args["y"]))
     extra = []
     if args.get("button"):
         extra += ["--button", args["button"]]
+    if args.get("double"):
+        extra += ["--double"]
+    modifiers = args.get("modifiers")
+    if modifiers:
+        # Accept either list (per spec) or comma-separated string (legacy).
+        if isinstance(modifiers, list):
+            modifiers = ",".join(str(m) for m in modifiers)
+        extra += ["--modifiers", str(modifiers)]
     return _format_ok(_ok_or_raise(client.request("input.click", x, y, *extra), "input.click"))
 
 
@@ -501,7 +626,11 @@ def _h_kill_process(args: dict, client: AgentClient) -> str:
 
 
 def _h_delete_file(args: dict, client: AgentClient) -> str:
-    return _format_ok(_ok_or_raise(client.request("file.delete", args["path"]), "file.delete"))
+    extra = []
+    if args.get("recursive"):
+        extra += ["--recursive"]
+    return _format_ok(_ok_or_raise(
+        client.request("file.delete", args["path"], *extra), "file.delete"))
 
 
 def _h_cancel_pending_shutdown(args: dict, client: AgentClient) -> str:
@@ -808,16 +937,19 @@ def _dispatch_inner_tool(name: str, arguments: dict, client: AgentClient) -> str
     if not _can_satisfy_tier(tool.tier, client.current_tier):
         raise ValueError(
             f"tool {name!r} requires tier '{tool.tier}', current is "
-            f"'{client.current_tier}'. Raise tier first via "
-            f"request_drive_access / request_power_access.")
+            f"'{client.current_tier}'. Raise tier first via the appropriate "
+            f"request_*_access tool (request_create_access / "
+            f"request_update_access / request_delete_access / "
+            f"request_extra_risky_access).")
     return tool.handler(arguments, client)
 
 
 def _can_satisfy_tier(required: str, current: str) -> bool:
     """True if a connection at `current` tier can call a tool requiring
-    `required` tier."""
-    order = {"always": 0, "observe": 1, "drive": 2, "power": 3}
-    return order.get(current, -1) >= order.get(required, 99)
+    `required` tier. Uses the CRUDX ladder defined in `_TIER_ORDER`."""
+    if required == "always":
+        return True
+    return _TIER_ORDER.get(current, -1) >= _TIER_ORDER.get(required, 99)
 
 
 # ---------------------------------------------------------------------------
@@ -826,10 +958,19 @@ def _can_satisfy_tier(required: str, current: str) -> bool:
 # Order is significant only as documentation; the server filters by `tier` at
 # `tools/list` time.
 
+# Shared input schema for the per-tier `request_*_access` elevation tools.
+_ELEVATION_INPUT_SCHEMA = {
+    "type": "object",
+    "properties": {"reason": {"type": "string", "minLength": 1}},
+    "required": ["reason"],
+    "additionalProperties": False,
+}
+
+
 TOOLS: list[ToolDef] = [
     # ----- Always available --------------------------------------------------
-    ToolDef(
-        name="agent_info",
+    ToolDef.from_spec(
+        "system.info", "system.info", _h_agent_info,
         description=(
             "Get the agent's identity, current tier, advertised capabilities, "
             "and integrity level. Always call this first when you need to "
@@ -837,45 +978,59 @@ TOOLS: list[ToolDef] = [
             "(check `integrity` and `uiaccess`)."
         ),
         tier="always",
-        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-        handler=_h_agent_info,
-        read_only_hint=True,
-        idempotent_hint=True,
     ),
     ToolDef(
-        name="request_drive_access",
+        name="request_create_access",
         description=(
-            "Elevate the connection to the `drive` tier so write / input / "
-            "process-launch tools become callable. Provide a one-sentence "
-            "`reason` so the audit log captures intent. After this returns "
-            "OK, the tool list refreshes and additional tools become "
-            "available; call `agent_info` if you want to confirm."
+            "Elevate the connection to the `create` tier so 'bring something "
+            "new into existence' tools (directory.create, process.start) become "
+            "callable. Provide a one-sentence `reason` so the audit log "
+            "captures intent. After this returns OK, the tool list refreshes "
+            "and additional tools become available."
         ),
         tier="always",
-        input_schema={
-            "type": "object",
-            "properties": {"reason": {"type": "string", "minLength": 1}},
-            "required": ["reason"],
-            "additionalProperties": False,
-        },
-        handler=_h_request_drive_access,
+        input_schema=_ELEVATION_INPUT_SCHEMA,
+        handler=_h_request_create_access,
     ),
     ToolDef(
-        name="request_power_access",
+        name="request_update_access",
         description=(
-            "Elevate the connection to the `power` tier so destructive tools "
-            "(file delete, process kill, shutdown) become callable. Implies "
-            "drive tier as a stepping stone. Use this sparingly and only "
-            "with a specific destructive operation in mind."
+            "Elevate the connection to the `update` tier so 'modify existing' "
+            "tools (synthetic input, file write, focus changes, click) become "
+            "callable. Subsumes `create` per the ladder, so a single raise "
+            "to update covers most non-destructive automation. Provide a "
+            "one-sentence `reason`."
         ),
         tier="always",
-        input_schema={
-            "type": "object",
-            "properties": {"reason": {"type": "string", "minLength": 1}},
-            "required": ["reason"],
-            "additionalProperties": False,
-        },
-        handler=_h_request_power_access,
+        input_schema=_ELEVATION_INPUT_SCHEMA,
+        handler=_h_request_update_access,
+    ),
+    ToolDef(
+        name="request_delete_access",
+        description=(
+            "Elevate the connection to the `delete` tier so 'make existing "
+            "things cease to be' tools (file.delete, process.kill, "
+            "registry.delete) become callable. Subsumes update + create per "
+            "the ladder. Use sparingly and only with a specific destructive "
+            "operation in mind. Provide a one-sentence `reason`."
+        ),
+        tier="always",
+        input_schema=_ELEVATION_INPUT_SCHEMA,
+        handler=_h_request_delete_access,
+    ),
+    ToolDef(
+        name="request_extra_risky_access",
+        description=(
+            "Elevate the connection to the top `extra_risky` tier so "
+            "system-state-affecting tools (shutdown, reboot, logoff, "
+            "hibernate, sleep, system.power.cancel) become callable. "
+            "Subsumes everything below per the ladder. Highest privilege; "
+            "only request with a specific power-state operation in mind. "
+            "Provide a one-sentence `reason`."
+        ),
+        tier="always",
+        input_schema=_ELEVATION_INPUT_SCHEMA,
+        handler=_h_request_extra_risky_access,
     ),
     ToolDef(
         name="evaluate_with_variants",
@@ -929,47 +1084,28 @@ TOOLS: list[ToolDef] = [
         handler=_h_evaluate_with_variants,
     ),
 
-    # ----- Observe -----------------------------------------------------------
-    ToolDef(
-        name="take_screenshot",
+    # ----- Read --------------------------------------------------------------
+    ToolDef.from_spec(
+        "screen.capture", "screen.capture", _h_take_screenshot,
         description=(
-            "Capture the desktop, a region, or a specific window. Returns the "
-            "byte count and format (the bytes themselves are too large for "
-            "inline viewing — save to file or use a smaller region)."
+            "Capture the desktop, a region, a specific window, or a specific "
+            "monitor. Returns the byte count and format (the bytes themselves "
+            "are too large for inline viewing — save to file or use a smaller "
+            "region). Provide at most one of `region` / `window` / `monitor`."
         ),
-        tier="observe",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "format": {"type": "string", "enum": ["png", "webp", "bmp"], "default": "png"},
-                "region": {"type": "string", "description": "x,y,w,h"},
-                "window": {"type": "string", "description": "win:0xHEX hwnd"},
-            },
-            "additionalProperties": False,
-        },
-        handler=_h_take_screenshot,
-        read_only_hint=True,
+    ),
+    ToolDef.from_spec(
+        "window.list", "window.list", _h_list_windows,
+        description=(
+            "List top-level windows. By default returns only visible windows; "
+            "pass `visible_only=false` to include hidden ones. Optionally "
+            "filter by `pid`."
+        ),
     ),
     ToolDef(
-        name="list_windows",
-        description="List visible top-level windows. Phantom (off-screen, zero-area, NOACTIVATE) windows are filtered by default; pass `include_all=true` to keep them.",
-        tier="observe",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "title_prefix": {"type": "string"},
-                "include_all": {"type": "boolean", "default": False},
-            },
-            "additionalProperties": False,
-        },
-        handler=_h_list_windows,
-        read_only_hint=True,
-        idempotent_hint=True,
-    ),
-    ToolDef(
-        name="find_window",
+        name="window.find",
         description="Find the first visible window whose title starts with the given pattern (case-insensitive). Returns the window's hwnd / pid / bounds, or `not_found`.",
-        tier="observe",
+        tier="read",
         input_schema={
             "type": "object",
             "properties": {"title_pattern": {"type": "string", "minLength": 1}},
@@ -980,9 +1116,9 @@ TOOLS: list[ToolDef] = [
         read_only_hint=True,
     ),
     ToolDef(
-        name="list_elements",
+        name="element.list",
         description="Enumerate visible UI Automation elements. Restrict to a region to keep the response manageable.",
-        tier="observe",
+        tier="read",
         input_schema={
             "type": "object",
             "properties": {"region": {"type": "string", "description": "x,y,w,h"}},
@@ -991,36 +1127,24 @@ TOOLS: list[ToolDef] = [
         handler=_h_list_elements,
         read_only_hint=True,
     ),
-    ToolDef(
-        name="find_element",
+    ToolDef.from_spec(
+        "element.find", "element.find", _h_find_element,
         description=(
-            "Find a UI Automation element by role + name substring. Returns "
-            "the element id (`elt:N`) which is valid for `click_element` and "
-            "`set_element_text` on the same MCP session. ERR `uia_blind` "
-            "means the element may exist but UIA can't see across an "
-            "integrity barrier — see PROTOCOL.md §8."
+            "Find a UI Automation element by role / name / automation_id, "
+            "optionally rooted at a window handle. Returns the element's "
+            "accessible properties and bounds. ERR `uia_blind` means the "
+            "element may exist but UIA can't see across an integrity "
+            "barrier — see PROTOCOL.md §8."
         ),
-        tier="observe",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "role": {"type": "string", "description": "e.g. button, edit, listitem"},
-                "name_pattern": {"type": "string", "description": "case-insensitive substring of the Name property"},
-            },
-            "required": ["role", "name_pattern"],
-            "additionalProperties": False,
-        },
-        handler=_h_find_element,
-        read_only_hint=True,
     ),
     ToolDef(
-        name="wait_for_element",
+        name="element.wait",
         description=(
             "Block until a UIA element matching role + name appears, or the "
             "timeout expires. Replaces screenshot-poll loops for waiting on "
             "a wizard's next button to render."
         ),
-        tier="observe",
+        tier="read",
         input_schema={
             "type": "object",
             "properties": {
@@ -1035,9 +1159,9 @@ TOOLS: list[ToolDef] = [
         read_only_hint=True,
     ),
     ToolDef(
-        name="wait_for_file",
+        name="file.wait",
         description="Block until a file matching the path or glob appears, or timeout. Most reliable signal for `did the download / installer output land?` flows.",
-        tier="observe",
+        tier="read",
         input_schema={
             "type": "object",
             "properties": {
@@ -1050,23 +1174,18 @@ TOOLS: list[ToolDef] = [
         handler=_h_wait_for_file,
         read_only_hint=True,
     ),
-    ToolDef(
-        name="read_file",
-        description="Read a UTF-8 text file. Binary content is returned base64-encoded with a clear marker.",
-        tier="observe",
-        input_schema={
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"],
-            "additionalProperties": False,
-        },
-        handler=_h_read_file,
-        read_only_hint=True,
+    ToolDef.from_spec(
+        "file.read", "file.read", _h_read_file,
+        description=(
+            "Read a UTF-8 text file. Binary content is returned base64-encoded "
+            "with a clear marker. Optional `offset` / `length` for partial "
+            "reads."
+        ),
     ),
     ToolDef(
-        name="list_directory",
+        name="directory.list",
         description="List the entries in a directory. Returns name / type / size / mtime per entry as JSON.",
-        tier="observe",
+        tier="read",
         input_schema={
             "type": "object",
             "properties": {"path": {"type": "string"}},
@@ -1077,9 +1196,9 @@ TOOLS: list[ToolDef] = [
         read_only_hint=True,
     ),
     ToolDef(
-        name="list_processes",
+        name="process.list",
         description="List running processes. Optionally filter by image-name substring.",
-        tier="observe",
+        tier="read",
         input_schema={
             "type": "object",
             "properties": {"name_filter": {"type": "string"}},
@@ -1088,13 +1207,9 @@ TOOLS: list[ToolDef] = [
         handler=_h_list_processes,
         read_only_hint=True,
     ),
-    ToolDef(
-        name="get_clipboard",
-        description="Read the clipboard's text content.",
-        tier="observe",
-        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-        handler=_h_get_clipboard,
-        read_only_hint=True,
+    ToolDef.from_spec(
+        "clipboard.get", "clipboard.get", _h_get_clipboard,
+        description="Read the clipboard's text content. Empty if nothing is on the clipboard.",
     ),
     ToolDef(
         name="wait_for_visual_change",
@@ -1108,7 +1223,7 @@ TOOLS: list[ToolDef] = [
             "elements, prefer `wait_for_element` (cheaper, semantically "
             "richer)."
         ),
-        tier="observe",
+        tier="read",
         input_schema={
             "type": "object",
             "properties": {
@@ -1143,7 +1258,7 @@ TOOLS: list[ToolDef] = [
             "canvas overlays — those aren't Win32 windows; use "
             "`wait_for_visual_change` or `wait_for_element` instead."
         ),
-        tier="observe",
+        tier="read",
         input_schema={
             "type": "object",
             "properties": {
@@ -1170,7 +1285,7 @@ TOOLS: list[ToolDef] = [
             "long-running-command workflows: `launch` returns the PID, then "
             "`wait_for_process_exit` lets you proceed when it's done."
         ),
-        tier="observe",
+        tier="read",
         input_schema={
             "type": "object",
             "properties": {
@@ -1195,7 +1310,7 @@ TOOLS: list[ToolDef] = [
             "path to *exist*; this fires on any change including delete "
             "or modification of an existing file."
         ),
-        tier="observe",
+        tier="read",
         input_schema={
             "type": "object",
             "properties": {
@@ -1214,23 +1329,23 @@ TOOLS: list[ToolDef] = [
         read_only_hint=True,
     ),
 
-    # ----- Drive -------------------------------------------------------------
+    # ----- Update ------------------------------------------------------------
     ToolDef(
-        name="focus_window",
+        name="window.focus",
         description="Bring a window to the foreground. ERR `lock_held` means Windows refused — usually because no foreground process granted us permission. See `docs/windows-automation-notes.md`.",
-        tier="drive",
+        tier="update",
         input_schema={
             "type": "object",
-            "properties": {"hwnd": {"type": "string", "description": "win:0xHEX from list_windows / find_window"}},
+            "properties": {"hwnd": {"type": "string", "description": "win:0xHEX from window.list / window.find"}},
             "required": ["hwnd"],
             "additionalProperties": False,
         },
         handler=_h_focus_window,
     ),
     ToolDef(
-        name="close_window",
+        name="window.close",
         description="Send WM_CLOSE to a window (graceful — the app may decline, e.g. unsaved-document prompt).",
-        tier="drive",
+        tier="update",
         input_schema={
             "type": "object",
             "properties": {"hwnd": {"type": "string"}},
@@ -1239,17 +1354,22 @@ TOOLS: list[ToolDef] = [
         },
         handler=_h_close_window,
     ),
+    # Composite: dispatches to one of element.invoke / element.find_invoke /
+    # element.at_invoke depending on which fields are populated. Kept under a
+    # semantic name (with the `element.` prefix) because no single wire verb
+    # captures the whole tool.
     ToolDef(
-        name="click_element",
+        name="element.click",
         description=(
             "Click a UIA element. Provide ONE of: `element_id` from a prior "
-            "`find_element`/`list_elements`; `role`+`name_pattern` to find "
-            "and click in one round-trip; or `x`+`y` to invoke the element "
-            "at a screen coordinate. ERR `uipi_blocked` means the target "
-            "window is at higher integrity than the agent — see "
-            "`request_drive_access` / PROTOCOL.md §8."
+            "`element.find` / `element.list`; `role`+`name_pattern` to find "
+            "and click in one round-trip (dispatches to the wire's "
+            "`element.find_invoke`); or `x`+`y` to invoke the element at a "
+            "screen coordinate (dispatches to `element.at_invoke`). ERR "
+            "`uipi_blocked` means the target window is at higher integrity "
+            "than the agent — see `request_update_access` / PROTOCOL.md §8."
         ),
-        tier="drive",
+        tier="update",
         input_schema={
             "type": "object",
             "properties": {
@@ -1264,9 +1384,9 @@ TOOLS: list[ToolDef] = [
         handler=_h_click_element,
     ),
     ToolDef(
-        name="set_element_text",
-        description="Replace the text in a UIA edit / text element via ValuePattern. Pair with find_element to locate the field first.",
-        tier="drive",
+        name="element.set_text",
+        description="Replace the text in a UIA edit / text element via ValuePattern. Pair with `element.find` to locate the field first.",
+        tier="update",
         input_schema={
             "type": "object",
             "properties": {
@@ -1279,9 +1399,9 @@ TOOLS: list[ToolDef] = [
         handler=_h_set_element_text,
     ),
     ToolDef(
-        name="type_text",
+        name="input.type",
         description="Type literal Unicode text into the focused window via SendInput. Handles characters that would be hazardous to send as keystrokes.",
-        tier="drive",
+        tier="update",
         input_schema={
             "type": "object",
             "properties": {"text": {"type": "string", "minLength": 1}},
@@ -1291,9 +1411,9 @@ TOOLS: list[ToolDef] = [
         handler=_h_type_text,
     ),
     ToolDef(
-        name="press_keys",
+        name="input.key",
         description="Press a named key (`enter`, `tab`, `F4`, `a`, …) with optional modifiers (`ctrl,shift`).",
-        tier="drive",
+        tier="update",
         input_schema={
             "type": "object",
             "properties": {
@@ -1305,31 +1425,24 @@ TOOLS: list[ToolDef] = [
         },
         handler=_h_press_keys,
     ),
-    ToolDef(
-        name="click",
-        description="Click at an absolute screen coordinate. Prefer `click_element` for UI buttons — coordinates drift across DPI / window-position changes.",
-        tier="drive",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "x": {"type": "integer"},
-                "y": {"type": "integer"},
-                "button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"},
-            },
-            "required": ["x", "y"],
-            "additionalProperties": False,
-        },
-        handler=_h_click_at,
+    ToolDef.from_spec(
+        "input.click", "input.click", _h_click_at,
+        description=(
+            "Click at an absolute screen coordinate. Prefer `element.click` "
+            "for UI buttons — coordinates drift across DPI / window-position "
+            "changes. Optional `double` for double-click; `modifiers` is an "
+            "array of `ctrl`/`shift`/`alt`/`meta`."
+        ),
     ),
     ToolDef(
-        name="write_file",
+        name="file.write",
         description=(
             "Write UTF-8 text to a file on the target (overwrites). For "
-            "binary content the LLM has in hand, use `write_file_b64`. For "
+            "binary content the LLM has in hand, use `file.write_b64`. For "
             "binary content from a path on the controller (zip, exe, DLLs, "
-            "archives), use `upload_file` — bytes don't pass through MCP."
+            "archives), use `file.upload` — bytes don't pass through MCP."
         ),
-        tier="drive",
+        tier="update",
         input_schema={
             "type": "object",
             "properties": {
@@ -1342,15 +1455,15 @@ TOOLS: list[ToolDef] = [
         handler=_h_write_file,
     ),
     ToolDef(
-        name="write_file_b64",
+        name="file.write_b64",
         description=(
             "Write base64-encoded binary content to a file on the target "
             "(overwrites). Use when the LLM has the bytes in hand as a "
             "base64 string — typically generated content or small fixtures. "
             "For binary content from a path on the controller, prefer "
-            "`upload_file` so the bytes never pass through the LLM context."
+            "`file.upload` so the bytes never pass through the LLM context."
         ),
-        tier="drive",
+        tier="update",
         input_schema={
             "type": "object",
             "properties": {
@@ -1364,7 +1477,7 @@ TOOLS: list[ToolDef] = [
         handler=_h_write_file_b64,
     ),
     ToolDef(
-        name="upload_file",
+        name="file.upload",
         description=(
             "Read a file from the controller (where this MCP bridge runs) "
             "and write it to a path on the target (where the agent runs). "
@@ -1377,9 +1490,9 @@ TOOLS: list[ToolDef] = [
             "backoff, then halves the chunk size and retries from the same "
             "offset if a size keeps timing out. Bottoms out at 256 KB "
             "before reporting failure with progress detail. For text "
-            "content already in the LLM's context, use `write_file`."
+            "content already in the LLM's context, use `file.write`."
         ),
-        tier="drive",
+        tier="update",
         input_schema={
             "type": "object",
             "properties": {
@@ -1400,9 +1513,9 @@ TOOLS: list[ToolDef] = [
         handler=_h_upload_file,
     ),
     ToolDef(
-        name="launch",
-        description="CreateProcess on a command line. Returns the spawned PID. For paths with spaces / unicode prefer `shell_open`.",
-        tier="drive",
+        name="process.start",
+        description="CreateProcess on a command line. Returns the spawned PID. For paths with spaces / unicode prefer `process.shell`.",
+        tier="create",
         input_schema={
             "type": "object",
             "properties": {"command_line": {"type": "string", "minLength": 1}},
@@ -1412,14 +1525,14 @@ TOOLS: list[ToolDef] = [
         handler=_h_launch,
     ),
     ToolDef(
-        name="shell_open",
+        name="process.shell",
         description=(
             "ShellExecuteEx — opens a path/URL with the default-associated app. "
             "Use for `start http://...` or `start file.pdf` semantics. Pass "
             "`verb='runas'` to elevate (triggers UAC). Returns spawned PID "
             "(may be 0 for verbs that don't spawn a new process)."
         ),
-        tier="drive",
+        tier="create",
         input_schema={
             "type": "object",
             "properties": {
@@ -1433,11 +1546,11 @@ TOOLS: list[ToolDef] = [
         handler=_h_shell_open,
     ),
 
-    # ----- Power -------------------------------------------------------------
+    # ----- Delete ------------------------------------------------------------
     ToolDef(
-        name="kill_process",
-        description="TerminateProcess — abrupt, no save. For graceful shutdown try `close_window` first.",
-        tier="power",
+        name="process.kill",
+        description="TerminateProcess — abrupt, no save. For graceful shutdown try `window.close` first.",
+        tier="delete",
         input_schema={
             "type": "object",
             "properties": {"pid": {"type": "integer", "minimum": 1}},
@@ -1447,23 +1560,24 @@ TOOLS: list[ToolDef] = [
         handler=_h_kill_process,
         destructive_hint=True,
     ),
-    ToolDef(
-        name="delete_file",
-        description="Delete a file. Irreversible — no Recycle Bin.",
-        tier="power",
-        input_schema={
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"],
-            "additionalProperties": False,
-        },
-        handler=_h_delete_file,
-        destructive_hint=True,
+    ToolDef.from_spec(
+        "file.delete", "file.delete", _h_delete_file,
+        description=(
+            "Delete a file or empty directory. Hard delete — bypasses Recycle "
+            "Bin / Trash. For non-empty directories use `directory.remove` with "
+            "`recursive=true`."
+        ),
     ),
+
+    # ----- Extra risky -------------------------------------------------------
     ToolDef(
-        name="cancel_pending_shutdown",
-        description="Abort a pending --delay shutdown / reboot / logoff scheduled via system.power. Returns ERR not_found if no shutdown is pending.",
-        tier="power",
+        name="system.power.cancel",
+        description=(
+            "Abort a pending --delay shutdown / reboot / logoff scheduled via "
+            "system.power. Returns ERR not_found if no shutdown is pending. "
+            "Tier `extra_risky` matches the action being cancelled."
+        ),
+        tier="extra_risky",
         input_schema={"type": "object", "properties": {}, "additionalProperties": False},
         handler=_h_cancel_pending_shutdown,
     ),
@@ -1475,12 +1589,12 @@ TOOLS: list[ToolDef] = [
 
 def tools_by_tier(current_tier: str) -> list[ToolDef]:
     """Return tools the LLM should see at `current_tier`. `always` tools are
-    always included; tiered tools are included if `current_tier` reaches them."""
-    order = {"observe": 0, "drive": 1, "power": 2, "always": -1}
-    cur = order.get(current_tier, 0)
+    always included; tiered tools are included if `current_tier` reaches them
+    on the CRUDX ladder (read < create < update < delete < extra_risky)."""
+    cur = _TIER_ORDER.get(current_tier, _TIER_ORDER["read"])
     out: list[ToolDef] = []
     for t in TOOLS:
-        if t.tier == "always" or order.get(t.tier, 99) <= cur:
+        if t.tier == "always" or _TIER_ORDER.get(t.tier, 99) <= cur:
             out.append(t)
     return out
 

@@ -17,10 +17,12 @@
 
 Exposes the wire-protocol verbs as named MCP tools to LLM clients (Claude
 Code, Claude Desktop, etc.). The exposed tool surface is filtered by the
-current connection tier — fresh sessions see only `observe`-tier tools
-plus the always-available `agent_info` / `request_drive_access` /
-`request_power_access`. After a successful elevation, a `tools/list_changed`
-notification fires so the client refetches the tool list.
+current connection tier on the v2.1 CRUDX ladder
+(read < create < update < delete < extra_risky) — fresh sessions see only
+`read`-tier tools plus the always-available `system.info` and the four
+`request_*_access` elevation tools. After a successful elevation, a
+`tools/list_changed` notification fires so the client refetches the tool
+list.
 
 Run as:
     python /abs/path/to/mcp-server/server.py
@@ -30,6 +32,10 @@ Configured via env vars:
     REMOTE_HANDS_PORT           agent TCP port (default 8765)
     REMOTE_HANDS_TOKEN_PATH     path to the agent's elevation token file
                                 (default %ProgramData%\\AgentRemoteHands\\token)
+    PROTOCOL_SPEC_DIR           path to the protocol-repo `spec/` directory.
+                                If unset, the loader walks up from the bridge
+                                module looking for `Protocol/spec/` or
+                                `spec/` siblings.
 """
 
 from __future__ import annotations
@@ -139,7 +145,7 @@ async def main() -> None:
         if tool is None:
             return [types.TextContent(
                 type="text",
-                text=f"Unknown tool: {name!r}. Call `agent_info` to see what's available."
+                text=f"Unknown tool: {name!r}. Call `system.info` to see what's available."
             )]
         if tool.tier != "always" and not client.can_satisfy(tool.tier):
             return [types.TextContent(
@@ -147,8 +153,8 @@ async def main() -> None:
                 text=(
                     f"Tool `{name}` requires the `{tool.tier}` tier; the "
                     f"connection is at `{client.current_tier}`. Call "
-                    f"`request_{'drive' if tool.tier == 'drive' else 'power'}_access` "
-                    f"with a one-line reason first."
+                    f"`request_{tool.tier}_access` with a one-line reason "
+                    f"first."
                 ),
             )]
 
@@ -161,7 +167,7 @@ async def main() -> None:
 
         # If the tier changed (an elevation tool just succeeded), tell the
         # client to refetch the tool list — that's how the LLM "sees" the
-        # newly-available drive / power tools.
+        # newly-available higher-tier tools.
         if client.current_tier != prior_tier:
             try:
                 await server.request_context.session.send_tool_list_changed()

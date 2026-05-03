@@ -56,7 +56,7 @@ class FamilyEntry:
 
 # Hand-curated registry. Keep entries small and focused on cases where
 # multiple tools plausibly compete for the same task. Pure singletons
-# (kill_process, cancel_pending_shutdown, etc.) are intentionally omitted
+# (process.kill, system.power.cancel, etc.) are intentionally omitted
 # — there's nothing for the LLM to consider as an alternative.
 
 VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
@@ -64,32 +64,32 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
     # -----------------------------------------------------------------
     # Click — coordinate click vs UIA-element-id click
     # -----------------------------------------------------------------
-    "click": FamilyEntry(
-        family=["click_element"],
+    "input.click": FamilyEntry(
+        family=["element.click"],
         self_caveats=(
             "coordinate click — fast and works on any visible target, but "
             "fragile if the layout shifts between find and click."
         ),
         alternatives={
-            "click_element": (
+            "element.click": (
                 "click via UIA element id — more robust to layout changes "
                 "since the element identity is preserved across renders. "
                 "Prefer when the target is UIA-visible and you have an "
-                "element id from find_element / element.at."
+                "element id from element.find / element.at."
             ),
         },
     ),
-    "click_element": FamilyEntry(
-        family=["click"],
+    "element.click": FamilyEntry(
+        family=["input.click"],
         self_caveats=(
             "click via UIA element id — robust but depends on UIA visibility "
             "of the target."
         ),
         alternatives={
-            "click": (
+            "input.click": (
                 "coordinate click — required when the target isn't "
                 "UIA-visible (canvas-rendered UI, some Unity / DirectComposition "
-                "overlays). Use after take_screenshot to identify coordinates."
+                "overlays). Use after screen.capture to identify coordinates."
             ),
         },
     ),
@@ -102,8 +102,8 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
     # window, visual region, file, process exit). Pick based on what's
     # most diagnostic of the awaited event.
 
-    "wait_for_element": FamilyEntry(
-        family=["wait_for_window", "wait_for_visual_change", "find_element"],
+    "element.wait": FamilyEntry(
+        family=["wait_for_window", "wait_for_visual_change", "element.find"],
         self_caveats=(
             "polling UIA find with timeout. Right when the awaited thing "
             "is a UIA-visible element. Won't fire for overlays UIA can't "
@@ -120,21 +120,21 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
                 "non-UIA-visible content; fires on animation as well as "
                 "real changes."
             ),
-            "find_element": (
+            "element.find": (
                 "single-shot version. Use when the element should already "
-                "be present; faster than wait_for_element."
+                "be present; faster than element.wait."
             ),
         },
     ),
     "wait_for_window": FamilyEntry(
-        family=["wait_for_element", "wait_for_visual_change", "find_window"],
+        family=["element.wait", "wait_for_visual_change", "window.find"],
         self_caveats=(
             "watches Win32 top-level windows. Won't fire for Unity / web "
             "/ canvas overlays painted inside an existing window — use "
-            "wait_for_visual_change or wait_for_element for those."
+            "wait_for_visual_change or element.wait for those."
         ),
         alternatives={
-            "wait_for_element": (
+            "element.wait": (
                 "wait for a UIA element by role + name pattern. Use when "
                 "the awaited thing is inside an existing window."
             ),
@@ -142,21 +142,21 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
                 "wait for any pixel change in a region. Use for visual-only "
                 "changes that aren't structurally surfaced."
             ),
-            "find_window": (
+            "window.find": (
                 "single-shot window search. Use when you expect the window "
                 "to already exist."
             ),
         },
     ),
     "wait_for_visual_change": FamilyEntry(
-        family=["wait_for_element", "wait_for_window"],
+        family=["element.wait", "wait_for_window"],
         self_caveats=(
             "fires on any pixel change including animation; expensive in "
             "bandwidth (returns a PNG per fire). Prefer structural waits "
             "when the target is UIA-visible."
         ),
         alternatives={
-            "wait_for_element": (
+            "element.wait": (
                 "structural form. Cheaper and more semantically meaningful "
                 "when the target is UIA-visible."
             ),
@@ -180,14 +180,14 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
         },
     ),
     "wait_for_file_change": FamilyEntry(
-        family=["wait_for_file", "wait_for_process_exit"],
+        family=["file.wait", "wait_for_process_exit"],
         self_caveats=(
             "fires on any modification to files matching the pattern "
             "(create / delete / modify / rename). Use for 'something "
             "wrote to this' rather than 'this exists'."
         ),
         alternatives={
-            "wait_for_file": (
+            "file.wait": (
                 "use when waiting for a path to *exist* (download / build "
                 "artifact appears). Different from any-modification."
             ),
@@ -201,61 +201,61 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
     # -----------------------------------------------------------------
     # Find / locate UI — element vs window vs wait
     # -----------------------------------------------------------------
-    "find_element": FamilyEntry(
-        family=["find_window", "wait_for_element", "list_elements"],
+    "element.find": FamilyEntry(
+        family=["window.find", "element.wait", "element.list"],
         self_caveats=(
             "single-shot UIA element find — returns immediately. If the "
-            "element isn't present yet, prefer wait_for_element."
+            "element isn't present yet, prefer element.wait."
         ),
         alternatives={
-            "find_window": (
+            "window.find": (
                 "find a top-level Win32 window by title prefix. Wider scope; "
                 "use when looking for a separate dialog window rather than "
                 "an element within the current window."
             ),
-            "wait_for_element": (
-                "polling form of find_element with a timeout. Use when the "
+            "element.wait": (
+                "polling form of element.find with a timeout. Use when the "
                 "element may not have rendered yet (e.g., right after "
                 "clicking a button that opens a dialog)."
             ),
-            "list_elements": (
+            "element.list": (
                 "enumerate all visible elements in a region. Use when you "
                 "don't know the exact role/name of the target and want to "
                 "see what's available."
             ),
         },
     ),
-    "find_window": FamilyEntry(
-        family=["find_element", "list_windows"],
+    "window.find": FamilyEntry(
+        family=["element.find", "window.list"],
         self_caveats=(
             "finds a top-level Win32 window by title prefix. Doesn't see "
-            "in-window UI elements; use find_element for those."
+            "in-window UI elements; use element.find for those."
         ),
         alternatives={
-            "find_element": (
+            "element.find": (
                 "find a UIA element within the current foreground window. "
                 "Use for buttons, text fields, and other in-window controls."
             ),
-            "list_windows": (
+            "window.list": (
                 "enumerate all top-level windows. Use when you don't know "
                 "the exact title prefix or want to see what's open."
             ),
         },
     ),
-    "wait_for_element": FamilyEntry(
-        family=["find_element", "wait_for_file"],
+    "element.wait": FamilyEntry(
+        family=["element.find", "file.wait"],
         self_caveats=(
-            "polling form of find_element; periodic UIA tree probe with a "
+            "polling form of element.find; periodic UIA tree probe with a "
             "timeout. Use when the element will appear soon but isn't "
             "there yet."
         ),
         alternatives={
-            "find_element": (
+            "element.find": (
                 "single-shot version. Use when you expect the element to "
-                "be present already; faster than wait_for_element for the "
+                "be present already; faster than element.wait for the "
                 "common case."
             ),
-            "wait_for_file": (
+            "file.wait": (
                 "wait for a filesystem path to appear. Use when the LLM is "
                 "waiting for a build artifact or download rather than a UI "
                 "element."
@@ -266,34 +266,34 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
     # -----------------------------------------------------------------
     # Text input — typing vs UIA-direct-set vs key-by-key
     # -----------------------------------------------------------------
-    "type_text": FamilyEntry(
-        family=["set_element_text", "press_keys"],
+    "input.type": FamilyEntry(
+        family=["element.set_text", "input.key"],
         self_caveats=(
             "synthesises Unicode keystrokes via SendInput at the foreground "
             "window. Subject to focus stealing; some games / DirectInput "
             "targets ignore SendInput keystrokes (see PROTOCOL.md §4.4)."
         ),
         alternatives={
-            "set_element_text": (
+            "element.set_text": (
                 "directly set a UIA element's text value via ValuePattern. "
-                "More reliable than type_text for text fields with "
+                "More reliable than input.type for text fields with "
                 "validation or auto-complete; bypasses focus issues."
             ),
-            "press_keys": (
+            "input.key": (
                 "press named keys with optional modifiers. Use for "
                 "single-key actions (Enter, Tab, F4) or shortcuts "
                 "(Ctrl+S). Not for entering free-form text."
             ),
         },
     ),
-    "set_element_text": FamilyEntry(
-        family=["type_text"],
+    "element.set_text": FamilyEntry(
+        family=["input.type"],
         self_caveats=(
             "directly sets a UIA element's text via ValuePattern. Requires "
             "the element to be UIA-visible and support ValuePattern."
         ),
         alternatives={
-            "type_text": (
+            "input.type": (
                 "synthesise keystrokes — use for non-UIA-visible text "
                 "fields (canvas-rendered, some game UI), or when the "
                 "element rejects programmatic value-set but accepts "
@@ -305,18 +305,18 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
     # -----------------------------------------------------------------
     # File write — text vs base64 vs upload from controller
     # -----------------------------------------------------------------
-    "write_file": FamilyEntry(
-        family=["write_file_b64", "upload_file"],
+    "file.write": FamilyEntry(
+        family=["file.write_b64", "file.upload"],
         self_caveats=(
             "UTF-8 text write only. Will mojibake any non-text content."
         ),
         alternatives={
-            "write_file_b64": (
+            "file.write_b64": (
                 "binary content the LLM has in hand as base64. Use for "
                 "small generated binary fixtures or when the content was "
                 "produced by another tool that returned base64."
             ),
-            "upload_file": (
+            "file.upload": (
                 "read from a path on the controller and push to the target. "
                 "Use for any binary content that exists as a file on the "
                 "controller (zip, exe, DLL, asset). Bytes don't pass "
@@ -324,35 +324,35 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
             ),
         },
     ),
-    "write_file_b64": FamilyEntry(
-        family=["write_file", "upload_file"],
+    "file.write_b64": FamilyEntry(
+        family=["file.write", "file.upload"],
         self_caveats=(
             "base64-encoded binary. Burns LLM tokens proportional to file "
             "size; impractical for large files."
         ),
         alternatives={
-            "write_file": (
+            "file.write": (
                 "use for UTF-8 text content the LLM is generating in-context."
             ),
-            "upload_file": (
+            "file.upload": (
                 "use for binary content larger than a few KB or that already "
                 "exists as a file on the controller. Bytes don't pass "
                 "through MCP."
             ),
         },
     ),
-    "upload_file": FamilyEntry(
-        family=["write_file", "write_file_b64"],
+    "file.upload": FamilyEntry(
+        family=["file.write", "file.write_b64"],
         self_caveats=(
             "reads from controller filesystem; pushes to target. Source path "
             "must exist on the controller (where the bridge runs)."
         ),
         alternatives={
-            "write_file": (
+            "file.write": (
                 "use for UTF-8 text content the LLM is generating in-context "
                 "(no source file on the controller)."
             ),
-            "write_file_b64": (
+            "file.write_b64": (
                 "use for small binary content the LLM has in hand as base64 "
                 "(no source file on the controller)."
             ),
@@ -362,8 +362,8 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
     # -----------------------------------------------------------------
     # Process start — CreateProcess vs ShellExecute
     # -----------------------------------------------------------------
-    "launch": FamilyEntry(
-        family=["shell_open"],
+    "process.start": FamilyEntry(
+        family=["process.shell"],
         self_caveats=(
             "CreateProcess with the given command line. The first token is "
             "the executable; subsequent tokens are args. Doesn't go through "
@@ -371,7 +371,7 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
             "associations."
         ),
         alternatives={
-            "shell_open": (
+            "process.shell": (
                 "ShellExecuteEx with the default verb. Use for opening "
                 "files / URLs in their associated app (e.g., 'open file.pdf' "
                 "in Acrobat, 'start http://...' in browser). Also use for "
@@ -379,14 +379,14 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
             ),
         },
     ),
-    "shell_open": FamilyEntry(
-        family=["launch"],
+    "process.shell": FamilyEntry(
+        family=["process.start"],
         self_caveats=(
             "ShellExecuteEx — opens via shell associations. Returns "
             "synchronously but the spawned process may detach (PID 0)."
         ),
         alternatives={
-            "launch": (
+            "process.start": (
                 "CreateProcess — use when you need the spawned PID and "
                 "want direct control over the command line. Doesn't apply "
                 "shell verb associations."

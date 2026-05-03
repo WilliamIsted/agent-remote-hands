@@ -5,9 +5,10 @@ Python MCP bridge that exposes the [Agent Remote Hands wire protocol](../PROTOCO
 ## What it does
 
 - Holds **one TCP connection** to a running agent
-- Exposes **tier-filtered MCP tools**: a fresh session sees only `observe`-tier tools (read-only) plus three always-available tools (`agent_info`, `request_drive_access`, `request_power_access`)
-- The LLM elevates explicitly: it calls `request_drive_access(reason="...")`, the bridge raises tier on the agent connection, and the next `tools/list` query exposes write / input tools
-- `request_power_access` similarly unlocks destructive tools (file delete, process kill, shutdown)
+- Exposes **tier-filtered MCP tools** on the v2.1 CRUDX ladder (`read` < `create` < `update` < `delete` < `extra_risky`): a fresh session sees only `read`-tier tools plus the always-available `system.info`, `evaluate_with_variants`, and four elevation tools (`request_create_access`, `request_update_access`, `request_delete_access`, `request_extra_risky_access`)
+- The LLM elevates explicitly: it calls e.g. `request_update_access(reason="...")`, the bridge raises tier on the agent connection, and the next `tools/list` query exposes the broader surface
+- Higher rungs subsume lower rungs per the ladder: raising to `update` covers `create`+`read`; raising to `delete` covers `update`+`create`+`read`; etc.
+- **Schemas are spec-driven.** Tools whose wire verb has a `Repos/Protocol/spec/verbs/<verb>.json` entry load their `input_schema` from that file (set `PROTOCOL_SPEC_DIR` to override the search path).
 
 The intent: the LLM **decides** when to take the safety brakes off, with a logged `reason`. The bridge can't autonomously do anything destructive without that step.
 
@@ -39,38 +40,44 @@ Drop a `.mcp.json` in your project root:
 }
 ```
 
-The bridge auto-reads the token file when the LLM calls `request_drive_access` / `request_power_access`. The token must be readable to whatever user the bridge runs as — for cross-machine deployments, copy the file out-of-band.
+The bridge auto-reads the token file when the LLM calls any `request_*_access` tool. The token must be readable to whatever user the bridge runs as — for cross-machine deployments, copy the file out-of-band.
 
 | Env var | Default | Purpose |
 |---|---|---|
 | `REMOTE_HANDS_HOST` | `127.0.0.1` | Agent TCP host |
 | `REMOTE_HANDS_PORT` | `8765` | Agent TCP port |
 | `REMOTE_HANDS_TOKEN_PATH` | `%ProgramData%\AgentRemoteHands\token` | Path to the agent's elevation token file |
+| `PROTOCOL_SPEC_DIR` | `<bridge>/../../Protocol/spec` | Path to the protocol-repo `spec/` directory used for schema lifts |
 
 ## The tier model
 
+The wire-protocol tiers are a CRUDX ladder: `read` < `create` < `update` < `delete` < `extra_risky`. Holding a higher tier subsumes everything below.
+
 | Tier | Tools the LLM sees | Examples |
 |---|---|---|
-| `always` | 3 | `agent_info`, `request_drive_access`, `request_power_access` |
-| `observe` (default) | + 15 | `take_screenshot`, `find_window`, `find_element`, `wait_for_element`, `wait_for_file`, `wait_for_visual_change`, `wait_for_window`, `wait_for_process_exit`, `wait_for_file_change`, `read_file`, `list_directory`, `list_windows`, `list_elements`, `list_processes`, `get_clipboard` |
-| `always` (extended) | + 1 | `evaluate_with_variants` — TEST MODE meta-tool (see below) |
-| `drive` (after `request_drive_access`) | + 12 | `click_element`, `type_text`, `press_keys`, `click`, `set_element_text`, `write_file`, `write_file_b64`, `upload_file`, `launch`, `shell_open`, `focus_window`, `close_window` |
-| `power` (after `request_power_access`) | + 3 | `kill_process`, `delete_file`, `cancel_pending_shutdown` |
+| `always` | 6 | `system.info`, `evaluate_with_variants`, `request_create_access`, `request_update_access`, `request_delete_access`, `request_extra_risky_access` |
+| `read` (default) | + 15 | `screen.capture`, `window.find`, `element.find`, `element.wait`, `file.wait`, `wait_for_visual_change`, `wait_for_window`, `wait_for_process_exit`, `wait_for_file_change`, `file.read`, `directory.list`, `window.list`, `element.list`, `process.list`, `clipboard.get` |
+| `create` (after `request_create_access`) | + 4 | `directory.create`, `directory.rename`, `process.start`, `process.shell` |
+| `update` (after `request_update_access`) | + 11 | `element.click`, `input.type`, `input.key`, `input.click`, `element.set_text`, `file.write`, `file.write_b64`, `file.upload`, `clipboard.set`, `window.focus`, `window.close` |
+| `delete` (after `request_delete_access`) | + 3 | `process.kill`, `file.delete`, `directory.remove` |
+| `extra_risky` (after `request_extra_risky_access`) | + 1 | `system.power.cancel` |
 
-Detailed tool descriptions are visible in any MCP client's tool inspector — call `agent_info` first to see what the connected agent advertises.
+`request_create_access` exists for callers that only need to create things (`directory.create`, `process.start`). For most automation flows raising directly to `update` is the simpler choice — `update` subsumes `create` per the ladder.
+
+Detailed tool descriptions are visible in any MCP client's tool inspector — call `system.info` first to see what the connected agent advertises.
 
 ## A typical session
 
 The LLM driving an installer:
 
-1. `agent_info` → confirms `integrity=medium`, `uiaccess=false`, `current_tier=observe`
-2. `wait_for_file("C:\\Users\\…\\Downloads\\Firefox*.exe", 60000)` → installer download lands
-3. `launch("Firefox Installer.exe")` → fails: requires `drive` tier
-4. `request_drive_access(reason="run downloaded Firefox installer")` → OK
-5. *(client refetches tools — drive surface now visible)*
-6. `launch("Firefox Installer.exe")` → OK, returns PID
-7. `wait_for_element(role="button", name_pattern="Install", timeout_ms=30000)` → element appears
-8. `click_element(role="button", name_pattern="Install")` → wizard advances
+1. `system.info` → confirms `integrity=medium`, `uiaccess=false`, `current_tier=read`
+2. `file.wait(pattern="C:\\Users\\…\\Downloads\\Firefox*.exe", timeout_ms=60000)` → installer download lands
+3. `process.start(command_line="Firefox Installer.exe")` → fails: requires `create` tier
+4. `request_update_access(reason="run downloaded Firefox installer")` → OK (raises to `update`, which subsumes `create`)
+5. *(client refetches tools — update surface now visible)*
+6. `process.start(command_line="Firefox Installer.exe")` → OK, returns PID
+7. `element.wait(role="button", name="Install", timeout_ms=30000)` → element appears
+8. `element.click(role="button", name_pattern="Install")` → wizard advances
 
 If the wizard auto-elevates to High IL, step 8 returns `ERR uipi_blocked` instead — see [`PROTOCOL.md` §8](../PROTOCOL.md#8-elevation-and-integrity-levels) for workarounds.
 
@@ -92,7 +99,7 @@ Four `wait_for_*` tools translate the agent's `watch.*` subscription verbs into 
 | `wait_for_process_exit` | `watch.process` | Wait for a PID to exit; returns the exit code. Critical for installer / build flows after `launch`. |
 | `wait_for_file_change` | `watch.file` | Wait for any file modification matching a path or glob. Different from `wait_for_file` (path-existence). |
 
-All four are observe-tier and read-only-hinted. The flow is: subscribe via the underlying `watch.*` verb, block on the bridge's connection waiting for the first matching EVENT (or timeout), cancel the subscription, return a structured tool result. Continuous-subscription scenarios (LLM wants every change) aren't yet supported — open an issue if you have a real use case.
+All four are read-tier and read-only-hinted. The flow is: subscribe via the underlying `watch.*` verb, block on the bridge's connection waiting for the first matching EVENT (or timeout), cancel the subscription, return a structured tool result. Continuous-subscription scenarios (LLM wants every change) aren't yet supported — open an issue if you have a real use case.
 
 The variant-family registry knows these tools as the "wait for X to happen" family — picking between them is a useful test-mode signal. Decision rule:
 
@@ -126,7 +133,7 @@ Hand-curated map of MCP tool name → related tools that should be considered as
 - **Always**, when running in test-mode benchmarks. The whole point is to push the LLM toward variants it would otherwise rule out without thinking.
 - **Never** for routine production use — the meta-tool adds round-trip overhead and is only useful for evaluation.
 
-The tool is in the `always` tier so it's available without raising. Variants run at whatever tier they require — if a variant needs `drive` and the connection is at `observe`, the variant is reported as not-triggered with a tier-required reason; the LLM should `request_drive_access` and retry.
+The tool is in the `always` tier so it's available without raising. Variants run at whatever tier they require — if a variant needs `update` and the connection is at `read`, the variant is reported as not-triggered with a tier-required reason; the LLM should `request_update_access` and retry.
 
 ### Worked example
 
@@ -155,7 +162,7 @@ LLM driving a benchmark, considering `find_element` to locate a button:
 }
 ```
 
-Bridge runs `find_element` and `wait_for_element` (both at observe tier), returns:
+Bridge runs `find_element` and `wait_for_element` (both at read tier), returns:
 
 ```json
 {
@@ -206,4 +213,4 @@ For end-to-end verification against a real agent:
 1. Run an agent on a Windows host: `remote-hands.exe --discoverable`
 2. Set `REMOTE_HANDS_HOST` to that host
 3. Wire up `.mcp.json` and start an LLM session — the bridge starts on demand
-4. Ask the LLM to call `agent_info` — you should see the agent's `system.info` JSON
+4. Ask the LLM to call `system.info` — you should see the agent's `system.info` JSON

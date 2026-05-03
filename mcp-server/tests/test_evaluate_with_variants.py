@@ -69,10 +69,10 @@ def test_lookup_unknown_tool_returns_empty_entry() -> None:
 
 
 def test_has_family_true_when_alternatives_exist() -> None:
-    # write_file has registered alternatives.
-    assert has_family("write_file")
-    # cancel_pending_shutdown is intentionally a singleton.
-    assert not has_family("cancel_pending_shutdown")
+    # file.write has registered alternatives.
+    assert has_family("file.write")
+    # system.power.cancel is intentionally a singleton.
+    assert not has_family("system.power.cancel")
 
 
 # ---------------------------------------------------------------------------
@@ -94,10 +94,10 @@ def test_evaluate_with_variants_runs_preferred(mock_agent) -> None:
     try:
         tool = find_tool("evaluate_with_variants")
         out = tool.handler({
-            "preferred": {"tool": "agent_info", "arguments": {}},
+            "preferred": {"tool": "system.info", "arguments": {}},
         }, c)
         body = json.loads(out)
-        assert body["preferred"]["tool"] == "agent_info"
+        assert body["preferred"]["tool"] == "system.info"
         assert body["preferred"]["triggered"] is True
         assert body["preferred"]["result"]  # non-empty
     finally:
@@ -111,16 +111,16 @@ def test_evaluate_with_variants_handles_ruled_out(mock_agent) -> None:
     try:
         tool = find_tool("evaluate_with_variants")
         out = tool.handler({
-            "preferred": {"tool": "agent_info", "arguments": {}},
+            "preferred": {"tool": "system.info", "arguments": {}},
             "variants": [
-                {"tool": "request_drive_access",
+                {"tool": "request_update_access",
                  "ruled_out_reason": "no destructive ops planned"},
             ],
         }, c)
         body = json.loads(out)
         assert len(body["variants"]) == 1
         v = body["variants"][0]
-        assert v["tool"] == "request_drive_access"
+        assert v["tool"] == "request_update_access"
         assert v["ruled_out"] is True
         assert v["reason"] == "no destructive ops planned"
     finally:
@@ -134,11 +134,11 @@ def test_evaluate_with_variants_coverage_gap_for_known_family(mock_agent) -> Non
     c.connect()
     try:
         tool = find_tool("evaluate_with_variants")
-        # write_file's family includes write_file_b64 and upload_file.
+        # file.write's family includes file.write_b64 and file.upload.
         # Submit only the preferred; both should appear in coverage_gap.
         out = tool.handler({
             "preferred": {
-                "tool": "write_file",
+                "tool": "file.write",
                 "arguments": {"path": "C:\\fake", "content": "test"},
             },
             "variants": [],
@@ -146,7 +146,7 @@ def test_evaluate_with_variants_coverage_gap_for_known_family(mock_agent) -> Non
         body = json.loads(out)
         assert "coverage_gap" in body
         missing = {m["tool"] for m in body["coverage_gap"]["missing"]}
-        assert missing == {"write_file_b64", "upload_file"}
+        assert missing == {"file.write_b64", "file.upload"}
         # Each missing entry has hint text from the registry.
         for m in body["coverage_gap"]["missing"]:
             assert m["hint"]  # non-empty
@@ -163,13 +163,13 @@ def test_evaluate_with_variants_no_coverage_gap_when_addressed(mock_agent) -> No
         tool = find_tool("evaluate_with_variants")
         out = tool.handler({
             "preferred": {
-                "tool": "write_file",
+                "tool": "file.write",
                 "arguments": {"path": "C:\\fake", "content": "test"},
             },
             "variants": [
-                {"tool": "write_file_b64",
+                {"tool": "file.write_b64",
                  "ruled_out_reason": "no binary content in hand"},
-                {"tool": "upload_file",
+                {"tool": "file.upload",
                  "ruled_out_reason": "no source file on controller"},
             ],
         }, c)
@@ -187,7 +187,7 @@ def test_evaluate_with_variants_no_coverage_gap_for_singleton(mock_agent) -> Non
     try:
         tool = find_tool("evaluate_with_variants")
         out = tool.handler({
-            "preferred": {"tool": "agent_info", "arguments": {}},
+            "preferred": {"tool": "system.info", "arguments": {}},
         }, c)
         body = json.loads(out)
         assert "coverage_gap" not in body
@@ -223,7 +223,7 @@ def test_evaluate_with_variants_includes_feedback_hint(mock_agent) -> None:
     try:
         tool = find_tool("evaluate_with_variants")
         out = tool.handler({
-            "preferred": {"tool": "agent_info", "arguments": {}},
+            "preferred": {"tool": "system.info", "arguments": {}},
         }, c)
         body = json.loads(out)
         assert "feedback_hint" in body
@@ -237,4 +237,4 @@ def test_evaluate_with_variants_includes_feedback_hint(mock_agent) -> None:
 
 class _DummyClient:
     """Stand-in client for tests that should fail before any wire call."""
-    current_tier = "observe"
+    current_tier = "read"

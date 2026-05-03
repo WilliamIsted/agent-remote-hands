@@ -22,11 +22,11 @@ from __future__ import annotations
 from agent_client import AgentClient, ErrResponse, OkResponse
 
 
-def test_connect_succeeds_and_starts_at_observe(mock_agent) -> None:
+def test_connect_succeeds_and_starts_at_read(mock_agent) -> None:
     c = AgentClient("127.0.0.1", mock_agent.port)
     c.connect()
     try:
-        assert c.current_tier == "observe"
+        assert c.current_tier == "read"
     finally:
         c.close()
 
@@ -36,9 +36,10 @@ def test_info_returns_stub_json(mock_agent) -> None:
     c.connect()
     try:
         info = c.info()
-        assert info["protocol"] == "2.0"
-        assert info["current_tier"] == "observe"
-        assert "drive" in info["tiers"]
+        assert info["protocol"] == "2.1"
+        assert info["current_tier"] == "read"
+        assert "update" in info["tiers"]
+        assert "extra_risky" in info["tiers"]
     finally:
         c.close()
 
@@ -48,10 +49,10 @@ def test_tier_raise_with_bad_token_returns_auth_invalid(mock_agent) -> None:
     c.connect()
     c.set_token("wrong-token")
     try:
-        r = c.tier_raise("drive")
+        r = c.tier_raise("update")
         assert isinstance(r, ErrResponse)
         assert r.code == "auth_invalid"
-        assert c.current_tier == "observe"
+        assert c.current_tier == "read"
     finally:
         c.close()
 
@@ -61,45 +62,51 @@ def test_tier_raise_with_correct_token_advances(mock_agent) -> None:
     c.connect()
     c.set_token(mock_agent.token)
     try:
-        r = c.tier_raise("drive")
+        r = c.tier_raise("update")
         assert isinstance(r, OkResponse)
-        assert c.current_tier == "drive"
-        # Power requires a second raise from drive.
-        r2 = c.tier_raise("power")
+        assert c.current_tier == "update"
+        # extra_risky requires a further raise from update via the ladder.
+        r2 = c.tier_raise("extra_risky")
         assert isinstance(r2, OkResponse)
-        assert c.current_tier == "power"
+        assert c.current_tier == "extra_risky"
     finally:
         c.close()
 
 
-def test_tier_drop_returns_to_observe(mock_agent) -> None:
+def test_tier_drop_returns_to_read(mock_agent) -> None:
     c = AgentClient("127.0.0.1", mock_agent.port)
     c.connect()
     c.set_token(mock_agent.token)
     try:
-        c.tier_raise("drive")
-        assert c.current_tier == "drive"
-        r = c.tier_drop("observe")
+        c.tier_raise("update")
+        assert c.current_tier == "update"
+        r = c.tier_drop("read")
         assert isinstance(r, OkResponse)
-        assert c.current_tier == "observe"
+        assert c.current_tier == "read"
     finally:
         c.close()
 
 
-def test_can_satisfy_respects_tier_order() -> None:
+def test_can_satisfy_respects_ladder_order() -> None:
     c = AgentClient("127.0.0.1", 0)  # not connected — tier check is local
-    assert c.current_tier == "observe"
-    assert c.can_satisfy("observe")
-    assert not c.can_satisfy("drive")
-    assert not c.can_satisfy("power")
-    c._current_tier = "drive"
-    assert c.can_satisfy("observe")
-    assert c.can_satisfy("drive")
-    assert not c.can_satisfy("power")
-    c._current_tier = "power"
-    assert c.can_satisfy("observe")
-    assert c.can_satisfy("drive")
-    assert c.can_satisfy("power")
+    assert c.current_tier == "read"
+    assert c.can_satisfy("read")
+    assert not c.can_satisfy("create")
+    assert not c.can_satisfy("update")
+    assert not c.can_satisfy("delete")
+    assert not c.can_satisfy("extra_risky")
+    c._current_tier = "update"
+    assert c.can_satisfy("read")
+    assert c.can_satisfy("create")
+    assert c.can_satisfy("update")
+    assert not c.can_satisfy("delete")
+    assert not c.can_satisfy("extra_risky")
+    c._current_tier = "extra_risky"
+    assert c.can_satisfy("read")
+    assert c.can_satisfy("create")
+    assert c.can_satisfy("update")
+    assert c.can_satisfy("delete")
+    assert c.can_satisfy("extra_risky")
 
 
 def test_unknown_verb_surfaces_err_not_supported(mock_agent) -> None:

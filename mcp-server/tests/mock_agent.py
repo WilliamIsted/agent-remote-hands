@@ -105,7 +105,7 @@ class MockAgent:
 
     def _serve_client(self, sock: socket.socket) -> None:
         conn_id = id(sock)
-        self._tier_per_conn[conn_id] = "observe"
+        self._tier_per_conn[conn_id] = "read"
         buf = bytearray()
         try:
             while True:
@@ -149,16 +149,21 @@ class MockAgent:
             if token != self.token:
                 self._send_err(sock, "auth_invalid", {"message": "token mismatch"})
                 return
-            order = {"observe": 0, "drive": 1, "power": 2}
-            cur = self._tier_per_conn.get(conn_id, "observe")
-            if order.get(target, 99) <= order.get(cur, 0):
+            # v2.1 CRUDX ladder.
+            order = {"read": 0, "create": 1, "update": 2, "delete": 3, "extra_risky": 4}
+            cur = self._tier_per_conn.get(conn_id, "read")
+            if target not in order:
+                self._send_err(sock, "invalid_args",
+                               {"message": f"unknown tier {target!r}"})
+                return
+            if order[target] <= order.get(cur, 0):
                 self._send_err(sock, "invalid_args", {"message": "use tier_drop"})
                 return
             self._tier_per_conn[conn_id] = target
             self._send_ok(sock, {"new_tier": target})
             return
         if verb == "connection.tier_drop":
-            target = args[0] if args else "observe"
+            target = args[0] if args else "read"
             self._tier_per_conn[conn_id] = target
             self._send_ok(sock, {"new_tier": target})
             return
@@ -177,7 +182,7 @@ class MockAgent:
             self._send_ok(sock, {
                 "name": "mock-agent",
                 "version": "0.0.0",
-                "protocol": "2.0",
+                "protocol": "2.1",
                 "os": "windows-modern",
                 "arch": "x64",
                 "hostname": "mock",
@@ -186,8 +191,8 @@ class MockAgent:
                 "uiaccess": False,
                 "monitors": 1,
                 "privileges": [],
-                "tiers": ["observe", "drive", "power"],
-                "current_tier": self._tier_per_conn.get(conn_id, "observe"),
+                "tiers": ["read", "create", "update", "delete", "extra_risky"],
+                "current_tier": self._tier_per_conn.get(conn_id, "read"),
                 "auth": ["token"],
                 "max_connections": 4,
                 "namespaces": ["system", "connection"],

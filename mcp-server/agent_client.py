@@ -169,7 +169,7 @@ class AgentClient:
         self._buf: bytearray = bytearray()
         self._lock = threading.Lock()  # serialises requests across threads
 
-        self._current_tier: str = "observe"
+        self._current_tier: str = "read"
         self._token: Optional[str] = None  # cached after first read
 
     # ------------------------------------------------------------------
@@ -189,9 +189,9 @@ class AgentClient:
         # Track the actual tier reported by the agent rather than our default.
         try:
             info = self.info()
-            self._current_tier = info.get("current_tier", "observe")
+            self._current_tier = info.get("current_tier", "read")
         except Exception:
-            pass  # If info fails for any reason, observe is a safe default.
+            pass  # If info fails for any reason, read is a safe default.
 
     def close(self) -> None:
         with self._lock:
@@ -218,8 +218,9 @@ class AgentClient:
         return self._current_tier
 
     def can_satisfy(self, required: str) -> bool:
-        """True if `required` is at or below the current tier."""
-        order = {"observe": 0, "drive": 1, "power": 2}
+        """True if `required` is at or below the current tier on the v2.1
+        CRUDX ladder (read < create < update < delete < extra_risky)."""
+        order = {"read": 0, "create": 1, "update": 2, "delete": 3, "extra_risky": 4}
         return order.get(self._current_tier, 0) >= order.get(required, 99)
 
     def set_token(self, token: str) -> None:
@@ -243,7 +244,7 @@ class AgentClient:
                 self._current_tier = target
         return r
 
-    def tier_drop(self, target: str = "observe") -> Response:
+    def tier_drop(self, target: str = "read") -> Response:
         r = self.request("connection.tier_drop", target)
         if isinstance(r, OkResponse):
             try:
