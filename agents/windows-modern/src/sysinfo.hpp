@@ -27,7 +27,7 @@ namespace remote_hands::sysinfo {
 inline constexpr const char* kOsName = "windows-modern";
 
 // Build version surfaced in `system.info.version`.
-inline constexpr const char* kAgentVersion = "2.0.0";
+inline constexpr const char* kAgentVersion = "0.3.0";
 
 // CPU architecture identifier.
 std::string arch();

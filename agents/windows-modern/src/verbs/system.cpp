@@ -15,16 +15,16 @@
 // `system.*` namespace verb handlers.
 //
 // Implements the verbs in PROTOCOL.md §4.1:
-//   system.info                  (observe)
-//   system.capabilities          (observe)
-//   system.health                (observe)
-//   system.shutdown_blockers     (observe)
-//   system.lock                  (observe)
-//   system.reboot                (power)
-//   system.shutdown              (power)
-//   system.logoff                (power)
-//   system.hibernate             (power)
-//   system.sleep                 (power)
+//   system.info                  (read)
+//   system.capabilities          (read)
+//   system.health                (read)
+//   system.shutdown_blockers     (read)
+//   system.lock                  (read)
+//   system.reboot                (extra_risky)
+//   system.shutdown              (extra_risky)
+//   system.logoff                (extra_risky)
+//   system.hibernate             (extra_risky)
+//   system.sleep                 (extra_risky)
 
 #include "../capabilities.hpp"
 #include "../connection.hpp"
@@ -78,7 +78,7 @@ void info(Connection& conn, const wire::Request&) {
     json::append_string_array(j, "privileges", sysinfo::enabled_privileges()); j += ',';
 
     json::append_string(j, "tiers");
-    j += ":[\"observe\",\"drive\",\"power\"],";
+    j += ":[\"read\",\"create\",\"update\",\"delete\",\"extra_risky\"],";
 
     json::append_kv_string(j, "current_tier", to_wire(conn.tier()));         j += ',';
 

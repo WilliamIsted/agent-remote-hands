@@ -20,37 +20,66 @@
 using namespace remote_hands;
 
 TEST_CASE("Tier serialises to wire string") {
-    CHECK(to_wire(Tier::Observe) == "observe");
-    CHECK(to_wire(Tier::Drive)   == "drive");
-    CHECK(to_wire(Tier::Power)   == "power");
+    CHECK(to_wire(Tier::Read)       == "read");
+    CHECK(to_wire(Tier::Create)     == "create");
+    CHECK(to_wire(Tier::Update)     == "update");
+    CHECK(to_wire(Tier::Delete)     == "delete");
+    CHECK(to_wire(Tier::ExtraRisky) == "extra_risky");
 }
 
 TEST_CASE("tier_from_wire round-trips known names") {
-    CHECK(tier_from_wire("observe") == Tier::Observe);
-    CHECK(tier_from_wire("drive")   == Tier::Drive);
-    CHECK(tier_from_wire("power")   == Tier::Power);
+    CHECK(tier_from_wire("read")        == Tier::Read);
+    CHECK(tier_from_wire("create")      == Tier::Create);
+    CHECK(tier_from_wire("update")      == Tier::Update);
+    CHECK(tier_from_wire("delete")      == Tier::Delete);
+    CHECK(tier_from_wire("extra_risky") == Tier::ExtraRisky);
 }
 
 TEST_CASE("tier_from_wire rejects unknown / empty names") {
     CHECK_FALSE(tier_from_wire("").has_value());
-    CHECK_FALSE(tier_from_wire("Observe").has_value());      // case-sensitive
+    CHECK_FALSE(tier_from_wire("Read").has_value());           // case-sensitive
     CHECK_FALSE(tier_from_wire("super_user").has_value());
+    // v2.0 vocabulary explicitly rejected (no alias period — see PROTOCOL.md §12.5).
+    CHECK_FALSE(tier_from_wire("observe").has_value());
+    CHECK_FALSE(tier_from_wire("drive").has_value());
+    CHECK_FALSE(tier_from_wire("power").has_value());
 }
 
-TEST_CASE("tier_satisfies enforces the order observe < drive < power") {
-    // A connection at observe can run observe-only verbs.
-    CHECK(tier_satisfies(Tier::Observe, Tier::Observe));
-    // A connection at observe cannot run drive or power verbs.
-    CHECK_FALSE(tier_satisfies(Tier::Drive,  Tier::Observe));
-    CHECK_FALSE(tier_satisfies(Tier::Power,  Tier::Observe));
+TEST_CASE("tier_satisfies enforces ladder order: read < create < update < delete < extra_risky") {
+    // A connection at read can run read-only verbs but nothing higher.
+    CHECK(tier_satisfies(Tier::Read, Tier::Read));
+    CHECK_FALSE(tier_satisfies(Tier::Create,     Tier::Read));
+    CHECK_FALSE(tier_satisfies(Tier::Update,     Tier::Read));
+    CHECK_FALSE(tier_satisfies(Tier::Delete,     Tier::Read));
+    CHECK_FALSE(tier_satisfies(Tier::ExtraRisky, Tier::Read));
 }
 
 TEST_CASE("tier_satisfies allows higher tier to run lower-tier verbs") {
-    CHECK(tier_satisfies(Tier::Observe, Tier::Drive));
-    CHECK(tier_satisfies(Tier::Drive,   Tier::Drive));
-    CHECK_FALSE(tier_satisfies(Tier::Power, Tier::Drive));
+    // create subsumes read.
+    CHECK(tier_satisfies(Tier::Read,   Tier::Create));
+    CHECK(tier_satisfies(Tier::Create, Tier::Create));
+    CHECK_FALSE(tier_satisfies(Tier::Update,     Tier::Create));
+    CHECK_FALSE(tier_satisfies(Tier::Delete,     Tier::Create));
+    CHECK_FALSE(tier_satisfies(Tier::ExtraRisky, Tier::Create));
 
-    CHECK(tier_satisfies(Tier::Observe, Tier::Power));
-    CHECK(tier_satisfies(Tier::Drive,   Tier::Power));
-    CHECK(tier_satisfies(Tier::Power,   Tier::Power));
+    // update subsumes create + read.
+    CHECK(tier_satisfies(Tier::Read,   Tier::Update));
+    CHECK(tier_satisfies(Tier::Create, Tier::Update));
+    CHECK(tier_satisfies(Tier::Update, Tier::Update));
+    CHECK_FALSE(tier_satisfies(Tier::Delete,     Tier::Update));
+    CHECK_FALSE(tier_satisfies(Tier::ExtraRisky, Tier::Update));
+
+    // delete subsumes update + create + read.
+    CHECK(tier_satisfies(Tier::Read,   Tier::Delete));
+    CHECK(tier_satisfies(Tier::Create, Tier::Delete));
+    CHECK(tier_satisfies(Tier::Update, Tier::Delete));
+    CHECK(tier_satisfies(Tier::Delete, Tier::Delete));
+    CHECK_FALSE(tier_satisfies(Tier::ExtraRisky, Tier::Delete));
+
+    // extra_risky is the top of the ladder.
+    CHECK(tier_satisfies(Tier::Read,       Tier::ExtraRisky));
+    CHECK(tier_satisfies(Tier::Create,     Tier::ExtraRisky));
+    CHECK(tier_satisfies(Tier::Update,     Tier::ExtraRisky));
+    CHECK(tier_satisfies(Tier::Delete,     Tier::ExtraRisky));
+    CHECK(tier_satisfies(Tier::ExtraRisky, Tier::ExtraRisky));
 }

@@ -40,7 +40,7 @@ namespace remote_hands::crash_check {
 // Returns true if the connection's tracked focus target is still alive and
 // in the foreground. Returns false after writing `ERR target_gone` if not.
 //
-// Called by every drive-tier input verb before injecting.
+// Called by every update-tier input verb before injecting.
 bool check_focus_or_fail(Connection& conn);
 
 }  // namespace remote_hands::crash_check

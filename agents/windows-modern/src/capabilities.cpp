@@ -63,8 +63,8 @@ namespace input_verbs {
 }  // namespace input_verbs
 
 namespace clipboard_verbs {
-    void read(Connection&, const wire::Request&);
-    void write(Connection&, const wire::Request&);
+    void get(Connection&, const wire::Request&);
+    void set(Connection&, const wire::Request&);
 }  // namespace clipboard_verbs
 
 namespace registry_verbs {
@@ -86,13 +86,19 @@ namespace file_verbs {
     void read(Connection&, const wire::Request&);
     void write(Connection&, const wire::Request&);
     void write_at(Connection&, const wire::Request&);
-    void list(Connection&, const wire::Request&);
     void stat(Connection&, const wire::Request&);
     void delete_(Connection&, const wire::Request&);
     void exists(Connection&, const wire::Request&);
     void wait(Connection&, const wire::Request&);
-    void mkdir(Connection&, const wire::Request&);
     void rename(Connection&, const wire::Request&);
+    // Directory-namespace handlers live in verbs/file.cpp (single translation
+    // unit for fs ops). Wire names map onto these symbols.
+    void list(Connection&, const wire::Request&);              // wire: directory.list
+    void mkdir(Connection&, const wire::Request&);             // wire: directory.create
+    void directory_stat(Connection&, const wire::Request&);    // wire: directory.stat
+    void directory_exists(Connection&, const wire::Request&);  // wire: directory.exists
+    void directory_rename(Connection&, const wire::Request&);  // wire: directory.rename
+    void directory_remove(Connection&, const wire::Request&);  // wire: directory.remove
 }  // namespace file_verbs
 
 namespace element_verbs {
@@ -133,91 +139,97 @@ namespace {
 const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
     static const std::unordered_map<std::string_view, VerbEntry> kVerbs{
         // system.*
-        {"system.info",                {Tier::Observe, &system_verbs::info}},
-        {"system.capabilities",        {Tier::Observe, &system_verbs::capabilities}},
-        {"system.health",              {Tier::Observe, &system_verbs::health}},
-        {"system.lock",                {Tier::Observe, &system_verbs::lock}},
-        {"system.shutdown_blockers",   {Tier::Observe, &system_verbs::shutdown_blockers}},
-        {"system.reboot",              {Tier::Power,   &system_verbs::reboot}},
-        {"system.shutdown",            {Tier::Power,   &system_verbs::shutdown}},
-        {"system.logoff",              {Tier::Power,   &system_verbs::logoff}},
-        {"system.hibernate",           {Tier::Power,   &system_verbs::hibernate}},
-        {"system.sleep",               {Tier::Power,   &system_verbs::sleep}},
-        {"system.power.cancel",        {Tier::Power,   &system_verbs::power_cancel}},
+        {"system.info",                {Tier::Read,       &system_verbs::info}},
+        {"system.capabilities",        {Tier::Read,       &system_verbs::capabilities}},
+        {"system.health",              {Tier::Read,       &system_verbs::health}},
+        {"system.lock",                {Tier::Read,       &system_verbs::lock}},
+        {"system.shutdown_blockers",   {Tier::Read,       &system_verbs::shutdown_blockers}},
+        {"system.reboot",              {Tier::ExtraRisky, &system_verbs::reboot}},
+        {"system.shutdown",            {Tier::ExtraRisky, &system_verbs::shutdown}},
+        {"system.logoff",              {Tier::ExtraRisky, &system_verbs::logoff}},
+        {"system.hibernate",           {Tier::ExtraRisky, &system_verbs::hibernate}},
+        {"system.sleep",               {Tier::ExtraRisky, &system_verbs::sleep}},
+        {"system.power.cancel",        {Tier::ExtraRisky, &system_verbs::power_cancel}},
 
         // window.*
-        {"window.list",                {Tier::Observe, &window_verbs::list}},
-        {"window.find",                {Tier::Observe, &window_verbs::find}},
-        {"window.focus",               {Tier::Drive,   &window_verbs::focus}},
-        {"window.close",               {Tier::Drive,   &window_verbs::close}},
-        {"window.move",                {Tier::Drive,   &window_verbs::move}},
-        {"window.state",               {Tier::Observe, &window_verbs::state}},
+        {"window.list",                {Tier::Read,       &window_verbs::list}},
+        {"window.find",                {Tier::Read,       &window_verbs::find}},
+        {"window.focus",               {Tier::Update,     &window_verbs::focus}},
+        {"window.close",               {Tier::Update,     &window_verbs::close}},
+        {"window.move",                {Tier::Update,     &window_verbs::move}},
+        {"window.state",               {Tier::Read,       &window_verbs::state}},
 
         // input.*
-        {"input.click",                {Tier::Drive,   &input_verbs::click}},
-        {"input.move",                 {Tier::Drive,   &input_verbs::move}},
-        {"input.scroll",               {Tier::Drive,   &input_verbs::scroll}},
-        {"input.key",                  {Tier::Drive,   &input_verbs::key}},
-        {"input.type",                 {Tier::Drive,   &input_verbs::type}},
-        {"input.send_message",         {Tier::Drive,   &input_verbs::send_message}},
-        {"input.post_message",         {Tier::Drive,   &input_verbs::post_message}},
+        {"input.click",                {Tier::Update,     &input_verbs::click}},
+        {"input.move",                 {Tier::Update,     &input_verbs::move}},
+        {"input.scroll",               {Tier::Update,     &input_verbs::scroll}},
+        {"input.key",                  {Tier::Update,     &input_verbs::key}},
+        {"input.type",                 {Tier::Update,     &input_verbs::type}},
+        {"input.send_message",         {Tier::Update,     &input_verbs::send_message}},
+        {"input.post_message",         {Tier::Update,     &input_verbs::post_message}},
 
         // clipboard.*
-        {"clipboard.read",             {Tier::Observe, &clipboard_verbs::read}},
-        {"clipboard.write",            {Tier::Drive,   &clipboard_verbs::write}},
+        {"clipboard.get",              {Tier::Read,       &clipboard_verbs::get}},
+        {"clipboard.set",              {Tier::Update,     &clipboard_verbs::set}},
 
         // registry.*
-        {"registry.read",              {Tier::Observe, &registry_verbs::read}},
-        {"registry.write",             {Tier::Drive,   &registry_verbs::write}},
-        {"registry.delete",            {Tier::Power,   &registry_verbs::delete_}},
-        {"registry.wait",              {Tier::Observe, &registry_verbs::wait}},
+        {"registry.read",              {Tier::Read,       &registry_verbs::read}},
+        {"registry.write",             {Tier::Update,     &registry_verbs::write}},
+        {"registry.delete",            {Tier::Delete,     &registry_verbs::delete_}},
+        {"registry.wait",              {Tier::Read,       &registry_verbs::wait}},
 
         // process.*
-        {"process.list",               {Tier::Observe, &process_verbs::list}},
-        {"process.start",              {Tier::Drive,   &process_verbs::start}},
-        {"process.shell",              {Tier::Drive,   &process_verbs::shell}},
-        {"process.kill",               {Tier::Power,   &process_verbs::kill}},
-        {"process.wait",               {Tier::Observe, &process_verbs::wait}},
+        {"process.list",               {Tier::Read,       &process_verbs::list}},
+        {"process.start",              {Tier::Create,     &process_verbs::start}},
+        {"process.shell",              {Tier::Create,     &process_verbs::shell}},
+        {"process.kill",               {Tier::Delete,     &process_verbs::kill}},
+        {"process.wait",               {Tier::Read,       &process_verbs::wait}},
 
         // file.*
-        {"file.read",                  {Tier::Observe, &file_verbs::read}},
-        {"file.write",                 {Tier::Drive,   &file_verbs::write}},
-        {"file.write_at",              {Tier::Drive,   &file_verbs::write_at}},
-        {"file.list",                  {Tier::Observe, &file_verbs::list}},
-        {"file.stat",                  {Tier::Observe, &file_verbs::stat}},
-        {"file.delete",                {Tier::Power,   &file_verbs::delete_}},
-        {"file.exists",                {Tier::Observe, &file_verbs::exists}},
-        {"file.wait",                  {Tier::Observe, &file_verbs::wait}},
-        {"file.mkdir",                 {Tier::Drive,   &file_verbs::mkdir}},
-        {"file.rename",                {Tier::Drive,   &file_verbs::rename}},
+        {"file.read",                  {Tier::Read,       &file_verbs::read}},
+        {"file.write",                 {Tier::Update,     &file_verbs::write}},
+        {"file.write_at",              {Tier::Update,     &file_verbs::write_at}},
+        {"file.stat",                  {Tier::Read,       &file_verbs::stat}},
+        {"file.delete",                {Tier::Delete,     &file_verbs::delete_}},
+        {"file.exists",                {Tier::Read,       &file_verbs::exists}},
+        {"file.wait",                  {Tier::Read,       &file_verbs::wait}},
+        {"file.rename",                {Tier::Update,     &file_verbs::rename}},
+
+        // directory.* (split out of file.* in v2.1; new primitives added)
+        {"directory.list",             {Tier::Read,       &file_verbs::list}},
+        {"directory.stat",             {Tier::Read,       &file_verbs::directory_stat}},
+        {"directory.exists",           {Tier::Read,       &file_verbs::directory_exists}},
+        {"directory.create",           {Tier::Create,     &file_verbs::mkdir}},
+        {"directory.rename",           {Tier::Update,     &file_verbs::directory_rename}},
+        {"directory.remove",           {Tier::Delete,     &file_verbs::directory_remove}},
 
         // element.*
-        {"element.list",               {Tier::Observe, &element_verbs::list}},
-        {"element.tree",               {Tier::Observe, &element_verbs::tree}},
-        {"element.at",                 {Tier::Observe, &element_verbs::at}},
-        {"element.find",               {Tier::Observe, &element_verbs::find}},
-        {"element.wait",               {Tier::Observe, &element_verbs::wait}},
-        {"element.find_invoke",        {Tier::Drive,   &element_verbs::find_invoke}},
-        {"element.at_invoke",          {Tier::Drive,   &element_verbs::at_invoke}},
-        {"element.invoke",             {Tier::Drive,   &element_verbs::invoke}},
-        {"element.toggle",             {Tier::Drive,   &element_verbs::toggle}},
-        {"element.expand",             {Tier::Drive,   &element_verbs::expand}},
-        {"element.collapse",           {Tier::Drive,   &element_verbs::collapse}},
-        {"element.focus",              {Tier::Drive,   &element_verbs::focus}},
-        {"element.text",               {Tier::Observe, &element_verbs::text}},
-        {"element.set_text",           {Tier::Drive,   &element_verbs::set_text}},
+        {"element.list",               {Tier::Read,       &element_verbs::list}},
+        {"element.tree",               {Tier::Read,       &element_verbs::tree}},
+        {"element.at",                 {Tier::Read,       &element_verbs::at}},
+        {"element.find",               {Tier::Read,       &element_verbs::find}},
+        {"element.wait",               {Tier::Read,       &element_verbs::wait}},
+        {"element.find_invoke",        {Tier::Update,     &element_verbs::find_invoke}},
+        {"element.at_invoke",          {Tier::Update,     &element_verbs::at_invoke}},
+        {"element.invoke",             {Tier::Update,     &element_verbs::invoke}},
+        {"element.toggle",             {Tier::Update,     &element_verbs::toggle}},
+        {"element.expand",             {Tier::Update,     &element_verbs::expand}},
+        {"element.collapse",           {Tier::Update,     &element_verbs::collapse}},
+        {"element.focus",              {Tier::Update,     &element_verbs::focus}},
+        {"element.text",               {Tier::Read,       &element_verbs::text}},
+        {"element.set_text",           {Tier::Update,     &element_verbs::set_text}},
 
         // screen.*
-        {"screen.capture",             {Tier::Observe, &screen_verbs::capture}},
+        {"screen.capture",             {Tier::Read,       &screen_verbs::capture}},
 
         // watch.*
-        {"watch.region",               {Tier::Observe, &watch_verbs::region}},
-        {"watch.process",              {Tier::Observe, &watch_verbs::process}},
-        {"watch.window",               {Tier::Observe, &watch_verbs::window}},
-        {"watch.element",              {Tier::Observe, &watch_verbs::element}},
-        {"watch.file",                 {Tier::Observe, &watch_verbs::file}},
-        {"watch.registry",             {Tier::Observe, &watch_verbs::registry}},
-        {"watch.cancel",               {Tier::Observe, &watch_verbs::cancel}},
+        {"watch.region",               {Tier::Read,       &watch_verbs::region}},
+        {"watch.process",              {Tier::Read,       &watch_verbs::process}},
+        {"watch.window",               {Tier::Read,       &watch_verbs::window}},
+        {"watch.element",              {Tier::Read,       &watch_verbs::element}},
+        {"watch.file",                 {Tier::Read,       &watch_verbs::file}},
+        {"watch.registry",             {Tier::Read,       &watch_verbs::registry}},
+        {"watch.cancel",               {Tier::Read,       &watch_verbs::cancel}},
     };
     return kVerbs;
 }

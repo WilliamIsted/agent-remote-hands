@@ -15,12 +15,12 @@
 // `window.*` namespace verb handlers.
 //
 // Implements the verbs in PROTOCOL.md §4.3:
-//   window.list                  (observe)
-//   window.find                  (observe)
-//   window.focus                 (drive)
-//   window.close                 (drive)
-//   window.move                  (drive)
-//   window.state                 (observe)
+//   window.list                  (read)
+//   window.find                  (read)
+//   window.focus                 (update)
+//   window.close                 (update)
+//   window.move                  (update)
+//   window.state                 (read)
 //
 // Window handles are advertised on the wire as `win:0x<hex>`. Helpers in the
 // anonymous namespace below convert between HWND and the wire form. When

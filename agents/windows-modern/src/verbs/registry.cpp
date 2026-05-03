@@ -15,10 +15,10 @@
 // `registry.*` namespace verb handlers.
 //
 // Implements PROTOCOL.md §4.8:
-//   registry.read    (observe)
-//   registry.write   (drive)
-//   registry.delete  (power)
-//   registry.wait    (observe)
+//   registry.read    (read)
+//   registry.write   (update)
+//   registry.delete  (delete)
+//   registry.wait    (read)
 //
 // Paths use the standard `HKLM\Software\...` form. Roots accepted:
 // HKLM, HKCU, HKCR, HKU, HKCC (or their long-form equivalents).

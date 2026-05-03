@@ -15,12 +15,12 @@
 // `input.*` namespace verb handlers.
 //
 // Implements the verbs in PROTOCOL.md §4.4:
-//   input.click          (drive)
-//   input.move           (drive)
-//   input.scroll         (drive)
-//   input.key            (drive)
-//   input.type           (drive)  -- length-prefixed UTF-8 payload
-//   input.send_message   (drive)
+//   input.click          (update)
+//   input.move           (update)
+//   input.scroll         (update)
+//   input.key            (update)
+//   input.type           (update)  -- length-prefixed UTF-8 payload
+//   input.send_message   (update)
 //
 // Every verb (except input.move and input.send_message which target a known
 // hwnd or no hwnd at all) checks the foreground window's integrity level

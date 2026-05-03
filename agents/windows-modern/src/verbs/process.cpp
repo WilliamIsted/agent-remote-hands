@@ -15,11 +15,11 @@
 // `process.*` namespace verb handlers.
 //
 // Implements PROTOCOL.md §4.7:
-//   process.list   (observe)
-//   process.start  (drive)   -- CreateProcess, optional --stdin payload
-//   process.shell  (drive)   -- ShellExecuteEx for paths with spaces / unicode
-//   process.kill   (power)
-//   process.wait   (observe)
+//   process.list   (read)
+//   process.start  (create)  -- CreateProcess, optional --stdin payload
+//   process.shell  (create)  -- ShellExecuteEx for paths with spaces / unicode
+//   process.kill   (delete)
+//   process.wait   (read)
 
 #include "../connection.hpp"
 #include "../errors.hpp"

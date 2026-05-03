@@ -15,8 +15,8 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(remote-hands-modern
-    VERSION 0.2.0
-    DESCRIPTION "Agent Remote Hands - windows-modern agent (Protocol 2.0)"
+    VERSION 0.3.0
+    DESCRIPTION "Agent Remote Hands - windows-modern agent (Protocol 2.1)"
     HOMEPAGE_URL "https://github.com/WilliamIsted/agent-remote-hands"
     LANGUAGES CXX)
 

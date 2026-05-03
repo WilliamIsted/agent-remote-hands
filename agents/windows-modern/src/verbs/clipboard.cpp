@@ -15,8 +15,8 @@
 // `clipboard.*` namespace verb handlers.
 //
 // Implements PROTOCOL.md §4.9:
-//   clipboard.read   (observe)
-//   clipboard.write  (drive)  -- length-prefixed UTF-8 payload
+//   clipboard.get   (read)    -- empty payload if clipboard has no text
+//   clipboard.set   (update)  -- length-prefixed UTF-8 payload
 //
 // Plain-text only via CF_UNICODETEXT; richer formats (HTML, image, files)
 // are not part of v2.
@@ -60,9 +60,9 @@ private:
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// clipboard.read
+// clipboard.get
 
-void read(Connection& conn, const wire::Request&) {
+void get(Connection& conn, const wire::Request&) {
     ClipboardLock lock;
     if (!lock) {
         conn.writer().write_err(ErrorCode::LockHeld,
@@ -97,13 +97,13 @@ void read(Connection& conn, const wire::Request&) {
 }
 
 // ---------------------------------------------------------------------------
-// clipboard.write
+// clipboard.set
 
-void write(Connection& conn, const wire::Request& req) {
+void set(Connection& conn, const wire::Request& req) {
     if (req.args.size() != 1) {
         conn.writer().write_err(
             ErrorCode::InvalidArgs,
-            "{\"message\":\"clipboard.write requires <length>\"}");
+            "{\"message\":\"clipboard.set requires <length>\"}");
         return;
     }
 

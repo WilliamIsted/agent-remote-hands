@@ -99,7 +99,7 @@ private:
     wire::Writer    writer_;
 
     State           state_  = State::PreHello;
-    Tier            tier_   = Tier::Observe;
+    Tier            tier_   = Tier::Read;
 
     std::unique_ptr<ElementTable>          element_table_;
     std::unique_ptr<SubscriptionRegistry>  subscriptions_;

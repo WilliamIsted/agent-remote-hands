@@ -165,7 +165,7 @@ std::vector<std::uint8_t> build_response(const std::string& host,
         const std::string fields[] = {
             "protocol=2",
             "os=" + os_tag,
-            "tiers=observe,drive,power",
+            "tiers=read,create,update,delete,extra_risky",
             "auth=token",
         };
         for (const auto& f : fields) {

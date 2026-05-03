@@ -12,19 +12,26 @@
 //   See the License for the specific language governing permissions and
 //   limitations under the License.
 
-// `file.*` namespace verb handlers.
+// `file.*` and `directory.*` namespace verb handlers.
 //
-// Implements PROTOCOL.md §4.6:
-//   file.read    (observe)
-//   file.write   (drive)
-//   file.write_at (drive)  — random-access; chunked-upload primitive
-//   file.list    (observe)
-//   file.stat    (observe)
-//   file.delete  (power)
-//   file.exists  (observe)
-//   file.wait    (observe)
-//   file.mkdir   (drive)
-//   file.rename  (drive)
+// Implements PROTOCOL.md §4.6 and §4.7:
+//   file.read           (read)
+//   file.write          (update)
+//   file.write_at       (update)  — random-access; chunked-upload primitive
+//   file.stat           (read)
+//   file.delete         (delete)
+//   file.exists         (read)
+//   file.wait           (read)
+//   file.rename         (update)
+//   directory.list      (read)    — handler is `file_verbs::list`
+//   directory.stat      (read)    — handler is `file_verbs::directory_stat`
+//   directory.exists    (read)    — handler is `file_verbs::directory_exists`
+//   directory.create    (create)  — handler is `file_verbs::mkdir`
+//   directory.rename    (update)  — handler is `file_verbs::directory_rename`
+//   directory.remove    (delete)  — handler is `file_verbs::directory_remove`
+//
+// Directory verbs share this translation unit because they call the same
+// filesystem primitives. The wire-namespace split is in capabilities.cpp.
 //
 // Paths are UTF-8 on the wire; converted to wide-char internally.
 // FILETIME values are converted to Unix epoch seconds for the JSON `mtime_unix`.
@@ -315,13 +322,14 @@ void write_at(Connection& conn, const wire::Request& req) {
 }
 
 // ---------------------------------------------------------------------------
-// file.list
+// directory.list (registered under the file_verbs:: namespace, see file.cpp
+// header — the wire-namespace split is in capabilities.cpp).
 
 void list(Connection& conn, const wire::Request& req) {
     if (req.args.size() != 1) {
         conn.writer().write_err(
             ErrorCode::InvalidArgs,
-            "{\"message\":\"file.list requires <path>\"}");
+            "{\"message\":\"directory.list requires <path>\"}");
         return;
     }
 
@@ -527,13 +535,14 @@ void wait(Connection& conn, const wire::Request& req) {
 }
 
 // ---------------------------------------------------------------------------
-// file.mkdir
+// directory.create (registered under the file_verbs:: namespace, see file.cpp
+// header — the wire-namespace split is in capabilities.cpp).
 
 void mkdir(Connection& conn, const wire::Request& req) {
     if (req.args.size() != 1) {
         conn.writer().write_err(
             ErrorCode::InvalidArgs,
-            "{\"message\":\"file.mkdir requires <path>\"}");
+            "{\"message\":\"directory.create requires <path>\"}");
         return;
     }
 
@@ -571,6 +580,304 @@ void rename(Connection& conn, const wire::Request& req) {
         return;
     }
     conn.writer().write_ok();
+}
+
+// ---------------------------------------------------------------------------
+// directory.stat — entry count + mtime for a directory.
+//
+// Iterates with FindFirstFileW / FindNextFileW to count entries (excluding
+// the . and .. pseudo-entries). mtime comes from GetFileAttributesExW on the
+// directory itself.
+
+void directory_stat(Connection& conn, const wire::Request& req) {
+    if (req.args.size() != 1) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"directory.stat requires <path>\"}");
+        return;
+    }
+    const std::wstring wpath = text::utf8_to_wide(req.args[0]);
+
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExW(wpath.c_str(), GetFileExInfoStandard, &fad)) {
+        char detail[64];
+        std::snprintf(detail, sizeof(detail),
+                      "{\"win32_error\":%lu}", GetLastError());
+        conn.writer().write_err(ErrorCode::NotFound, detail);
+        return;
+    }
+    if ((fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"path is a file, not a directory\"}");
+        return;
+    }
+
+    std::wstring pattern = wpath;
+    if (!pattern.empty() && pattern.back() != L'\\' && pattern.back() != L'/') {
+        pattern += L'\\';
+    }
+    pattern += L'*';
+
+    std::uint64_t entry_count = 0;
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            const std::wstring name(fd.cFileName);
+            if (name == L"." || name == L"..") continue;
+            ++entry_count;
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+
+    // FILETIME → Unix epoch seconds.
+    ULARGE_INTEGER ft;
+    ft.LowPart = fad.ftLastWriteTime.dwLowDateTime;
+    ft.HighPart = fad.ftLastWriteTime.dwHighDateTime;
+    constexpr std::uint64_t kEpochOffsetTicks = 116444736000000000ULL;  // 1601→1970 in 100ns
+    const std::int64_t mtime_unix = (ft.QuadPart >= kEpochOffsetTicks)
+        ? static_cast<std::int64_t>((ft.QuadPart - kEpochOffsetTicks) / 10000000ULL)
+        : 0;
+
+    char body[128];
+    std::snprintf(body, sizeof(body),
+        "{\"type\":\"dir\",\"entry_count\":%llu,\"mtime_unix\":%lld}",
+        static_cast<unsigned long long>(entry_count),
+        static_cast<long long>(mtime_unix));
+    conn.writer().write_ok(body);
+}
+
+// ---------------------------------------------------------------------------
+// directory.exists — true iff the path exists and is a directory.
+
+void directory_exists(Connection& conn, const wire::Request& req) {
+    if (req.args.size() != 1) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"directory.exists requires <path>\"}");
+        return;
+    }
+    const std::wstring wpath = text::utf8_to_wide(req.args[0]);
+
+    const DWORD attrs = GetFileAttributesW(wpath.c_str());
+    const bool exists = (attrs != INVALID_FILE_ATTRIBUTES)
+                     && ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
+    conn.writer().write_ok(exists ? "{\"exists\":true}" : "{\"exists\":false}");
+}
+
+// ---------------------------------------------------------------------------
+// directory.rename — rename or move a directory. Atomic on the same volume;
+// requires the explicit --cross-fs flag for cross-volume moves (engages
+// MOVEFILE_COPY_ALLOWED, which falls back to copy+delete).
+//
+// MoveFileExW is always called with MOVEFILE_WRITE_THROUGH to ensure the move
+// is committed to disk before returning OK.
+
+void directory_rename(Connection& conn, const wire::Request& req) {
+    bool overwrite = false;
+    bool cross_fs = false;
+    std::vector<std::string> positional;
+    for (const auto& a : req.args) {
+        if (a == "--overwrite")      overwrite = true;
+        else if (a == "--cross-fs")  cross_fs  = true;
+        else if (a.rfind("--", 0) == 0) {
+            char detail[128];
+            std::snprintf(detail, sizeof(detail),
+                          "{\"unknown_flag\":\"%s\"}", a.c_str());
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
+        } else {
+            positional.push_back(a);
+        }
+    }
+    if (positional.size() != 2) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"directory.rename requires <src> <dst>\"}");
+        return;
+    }
+
+    const std::wstring src = text::utf8_to_wide(positional[0]);
+    const std::wstring dst = text::utf8_to_wide(positional[1]);
+
+    // Verify src is a directory. Surface a clear ERR before MoveFileEx.
+    const DWORD attrs = GetFileAttributesW(src.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        conn.writer().write_err(ErrorCode::NotFound,
+                                "{\"message\":\"src does not exist\"}");
+        return;
+    }
+    if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"src is a file, not a directory\"}");
+        return;
+    }
+
+    DWORD flags = MOVEFILE_WRITE_THROUGH;
+    if (overwrite) flags |= MOVEFILE_REPLACE_EXISTING;
+    if (cross_fs)  flags |= MOVEFILE_COPY_ALLOWED;
+
+    if (!MoveFileExW(src.c_str(), dst.c_str(), flags)) {
+        const DWORD err = GetLastError();
+        // Map the most useful error codes to spec-defined codes.
+        if (err == ERROR_NOT_SAME_DEVICE) {
+            conn.writer().write_err(
+                ErrorCode::InvalidArgs,
+                "{\"message\":\"src and dst on different filesystems; pass --cross-fs\"}");
+            return;
+        }
+        if (err == ERROR_ALREADY_EXISTS || err == ERROR_FILE_EXISTS) {
+            conn.writer().write_err(
+                ErrorCode::InvalidArgs,
+                "{\"message\":\"dst already exists; pass --overwrite\"}");
+            return;
+        }
+        char detail[64];
+        std::snprintf(detail, sizeof(detail),
+                      "{\"win32_error\":%lu}", err);
+        conn.writer().write_err(ErrorCode::NotSupported, detail);
+        return;
+    }
+
+    char body[64];
+    std::snprintf(body, sizeof(body),
+        "{\"renamed\":true%s}",
+        cross_fs ? ",\"fallback_used\":\"copy_delete\"" : "");
+    conn.writer().write_ok(body);
+}
+
+// ---------------------------------------------------------------------------
+// directory.remove — remove an empty directory; with --recursive remove
+// contents first. Reparse points are not traversed.
+
+namespace {
+
+// Recursive removal of a directory's contents and the directory itself.
+// `removed` is incremented for each file or subdirectory removed (excludes
+// the top-level directory).
+bool remove_recursive(const std::wstring& dir, std::uint64_t& removed) {
+    std::wstring pattern = dir;
+    if (!pattern.empty() && pattern.back() != L'\\' && pattern.back() != L'/') {
+        pattern += L'\\';
+    }
+    pattern += L'*';
+
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        // Empty (or unreadable) — proceed to RemoveDirectoryW below.
+    } else {
+        do {
+            const std::wstring name(fd.cFileName);
+            if (name == L"." || name == L"..") continue;
+            std::wstring child = dir;
+            if (!child.empty() && child.back() != L'\\' && child.back() != L'/') {
+                child += L'\\';
+            }
+            child += name;
+            const bool is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            const bool is_reparse = (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+            if (is_dir && !is_reparse) {
+                if (!remove_recursive(child, removed)) {
+                    FindClose(h);
+                    return false;
+                }
+            } else {
+                // Clear read-only so DeleteFileW can succeed on those entries.
+                if ((fd.dwFileAttributes & FILE_ATTRIBUTE_READONLY) != 0) {
+                    SetFileAttributesW(child.c_str(),
+                        fd.dwFileAttributes & ~FILE_ATTRIBUTE_READONLY);
+                }
+                if (!DeleteFileW(child.c_str())) {
+                    FindClose(h);
+                    return false;
+                }
+                ++removed;
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+
+    if (!RemoveDirectoryW(dir.c_str())) {
+        return false;
+    }
+    ++removed;
+    return true;
+}
+
+}  // namespace
+
+void directory_remove(Connection& conn, const wire::Request& req) {
+    bool recursive = false;
+    std::vector<std::string> positional;
+    for (const auto& a : req.args) {
+        if (a == "--recursive") recursive = true;
+        else if (a.rfind("--", 0) == 0) {
+            char detail[128];
+            std::snprintf(detail, sizeof(detail),
+                          "{\"unknown_flag\":\"%s\"}", a.c_str());
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
+        } else {
+            positional.push_back(a);
+        }
+    }
+    if (positional.size() != 1) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"directory.remove requires <path>\"}");
+        return;
+    }
+    const std::wstring wpath = text::utf8_to_wide(positional[0]);
+
+    const DWORD attrs = GetFileAttributesW(wpath.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        conn.writer().write_err(ErrorCode::NotFound, "{}");
+        return;
+    }
+    if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        conn.writer().write_err(
+            ErrorCode::InvalidArgs,
+            "{\"message\":\"path is a file, not a directory\"}");
+        return;
+    }
+
+    std::uint64_t entries_removed = 0;
+    if (recursive) {
+        if (!remove_recursive(wpath, entries_removed)) {
+            char detail[64];
+            std::snprintf(detail, sizeof(detail),
+                          "{\"win32_error\":%lu}", GetLastError());
+            conn.writer().write_err(ErrorCode::NotSupported, detail);
+            return;
+        }
+        // remove_recursive counts the top-level dir; the wire's
+        // entries_removed reports only the entries INSIDE the target.
+        entries_removed = entries_removed > 0 ? entries_removed - 1 : 0;
+    } else {
+        if (!RemoveDirectoryW(wpath.c_str())) {
+            const DWORD err = GetLastError();
+            if (err == ERROR_DIR_NOT_EMPTY) {
+                conn.writer().write_err(
+                    ErrorCode::InvalidArgs,
+                    "{\"message\":\"directory not empty; pass --recursive\"}");
+                return;
+            }
+            char detail[64];
+            std::snprintf(detail, sizeof(detail),
+                          "{\"win32_error\":%lu}", err);
+            conn.writer().write_err(ErrorCode::NotSupported, detail);
+            return;
+        }
+    }
+
+    char body[64];
+    std::snprintf(body, sizeof(body),
+        "{\"removed\":true,\"entries_removed\":%llu}",
+        static_cast<unsigned long long>(entries_removed));
+    conn.writer().write_ok(body);
 }
 
 }  // namespace remote_hands::file_verbs

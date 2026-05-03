@@ -14,11 +14,15 @@
 
 #pragma once
 
-// Three-tier permission model per PROTOCOL.md §7.
+// Five-tier permission ladder per PROTOCOL.md §7. Letters match CRUDX.
 //
-//   observe  -- read-only operations
-//   drive    -- includes synthetic input, file writes, focus changes
-//   power    -- includes destructive ops: kill, delete, reboot
+//   read         (R)  -- observe state without changing it (default tier)
+//   create       (C)  -- bring something new into existence (mkdir, process.start)
+//   update       (U)  -- overwrite or move existing things (input synthesis, file write, focus)
+//   delete       (D)  -- make existing things cease to be (file.delete, process.kill)
+//   extra_risky  (X)  -- affect connection / system / power state (shutdown, reboot)
+//
+// Strict ladder: holding a higher tier subsumes every lower tier.
 
 #include <optional>
 #include <string_view>
@@ -26,24 +30,30 @@
 namespace remote_hands {
 
 enum class Tier {
-    Observe = 0,
-    Drive   = 1,
-    Power   = 2,
+    Read        = 0,
+    Create      = 1,
+    Update      = 2,
+    Delete      = 3,
+    ExtraRisky  = 4,
 };
 
 constexpr std::string_view to_wire(Tier t) noexcept {
     switch (t) {
-        case Tier::Observe: return "observe";
-        case Tier::Drive:   return "drive";
-        case Tier::Power:   return "power";
+        case Tier::Read:       return "read";
+        case Tier::Create:     return "create";
+        case Tier::Update:     return "update";
+        case Tier::Delete:     return "delete";
+        case Tier::ExtraRisky: return "extra_risky";
     }
     return "unknown";
 }
 
 constexpr std::optional<Tier> tier_from_wire(std::string_view sv) noexcept {
-    if (sv == "observe") return Tier::Observe;
-    if (sv == "drive")   return Tier::Drive;
-    if (sv == "power")   return Tier::Power;
+    if (sv == "read")        return Tier::Read;
+    if (sv == "create")      return Tier::Create;
+    if (sv == "update")      return Tier::Update;
+    if (sv == "delete")      return Tier::Delete;
+    if (sv == "extra_risky") return Tier::ExtraRisky;
     return std::nullopt;
 }
 
