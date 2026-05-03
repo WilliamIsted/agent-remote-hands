@@ -16,10 +16,16 @@
 
 // Wire-format reader / writer per PROTOCOL.md §1.
 //
-// Framing rules (v2.0):
+// Framing rules (v2.1):
 //   Header line:  <directive> <args...>\n          (UTF-8, max 65 535 bytes)
 //   Payload:      exactly <length> bytes following the header (when grammar
 //                 specifies a length argument as the final positional arg).
+//
+// Header tokens are space-separated, with optional double-quote grouping
+// for tokens that contain spaces — see PROTOCOL.md §1.2.5. Quoted tokens
+// have no escape mechanism inside the quotes, so embedded `"` is not
+// representable on the header line; verbs that need raw bytes use the
+// length-prefixed payload form.
 //
 // The Reader/Writer pair are framing-layer primitives. They do not interpret
 // verb semantics; that lives in the connection state machine and the per-verb
@@ -46,13 +52,25 @@ constexpr std::size_t kMaxHeaderLineBytes = 65535;
 
 struct Request {
     std::string                 verb;   // e.g. "system.info"
-    std::vector<std::string>    args;   // whitespace-separated tokens after the verb
+    std::vector<std::string>    args;   // tokens after the verb (quotes already stripped)
+    // If the header could not be tokenised (e.g. unmatched quote), the
+    // dispatcher emits ERR invalid_args with this message instead of
+    // attempting to dispatch.
+    std::string                 parse_error;
 };
 
-// Tokenises a header line (with any trailing \r already stripped) on single
-// spaces into a Request. Empty tokens are skipped (so runs of spaces don't
-// produce empty args). Exposed publicly so unit tests can exercise it
-// without spinning up a socket.
+// Tokenises a header line (with any trailing \r already stripped) per
+// PROTOCOL.md §1.2.5. Tokens are space-separated; tokens enclosed in
+// `"..."` are taken literally (including spaces and backslashes; embedded
+// `"` is not representable). Empty tokens (runs of spaces) are skipped;
+// `""` represents an explicit empty arg.
+//
+// On a malformed header (currently: unmatched opening quote), the returned
+// Request has a non-empty parse_error and an empty verb; the dispatcher is
+// responsible for surfacing this as ERR invalid_args.
+//
+// Exposed publicly so unit tests can exercise it without spinning up a
+// socket.
 Request tokenize_header(std::string_view line);
 
 // Reads framed messages from a connected TCP socket.

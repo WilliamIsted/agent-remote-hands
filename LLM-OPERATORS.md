@@ -36,10 +36,15 @@ These two together let you discover what the agent supports without consulting t
 
 ## Footguns to know about
 
-The wire protocol is tokenised on whitespace and **has no argument-quoting mechanism today**. A path with spaces — registry, file, command-line — gets fragmented into multiple args.
+The wire protocol is tokenised on whitespace, with **double-quote grouping for args that contain spaces** (PROTOCOL.md §1.2.5, added in v2.1). Wrap any path or arg containing spaces in `"..."`:
 
-- `process.start` and `registry.read|delete` mitigate this by re-joining their positional args.
-- `registry.write|wait`, `file.*` paths with spaces, and other multi-positional verbs **don't** mitigate it. They'll silently use the wrong arguments. Avoid paths with spaces or escape them yourself until protocol quoting lands (planned for a future protocol-minor revision).
+- `directory.create "C:\Program Files\demo"` — args=[`C:\Program Files\demo`].
+- `directory.rename "src dir" "dst dir"` — two args, each preserving its space.
+- Backslashes inside the quotes are literal — Windows paths work without escaping.
+- Embedded `"` is not representable on the header line. For raw bytes that contain `"`, use the length-prefixed payload form.
+- An unmatched opening `"` returns `ERR invalid_args {message:"unmatched quote in header"}`.
+
+Pre-v2.1 traffic that didn't use quotes still parses identically — quoting is additive, not a rewrite of the format.
 
 The agent rejects unknown `--flag` tokens with `ERR invalid_args { unknown_flag }`. If you misspell a flag — `--cursor` instead of `--no-cursor`, say — you'll get a hard error rather than a silent default. This is intentional: silent flag acceptance was a documented footgun in earlier builds.
 

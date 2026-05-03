@@ -105,6 +105,14 @@ void Connection::run() {
 }
 
 void Connection::dispatch(const wire::Request& req) {
+    // Header tokenisation failed (e.g. unmatched quote per PROTOCOL.md
+    // §1.2.5). Surface as ERR invalid_args rather than dispatching.
+    if (!req.parse_error.empty()) {
+        writer_.write_err(ErrorCode::InvalidArgs,
+                          json_kv("message", req.parse_error));
+        return;
+    }
+
     // Pre-hello state restricts the verb surface.
     if (state_ == State::PreHello) {
         if (req.verb == "connection.hello") {

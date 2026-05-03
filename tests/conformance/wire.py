@@ -34,6 +34,53 @@ class WireError(Exception):
     inspect the returned tuple."""
 
 
+def _quote(arg: str) -> str:
+    """Wrap `arg` in ASCII double quotes if it contains a space or is empty,
+    per PROTOCOL.md §1.2.5. Args containing a literal `"` raise WireError —
+    the wire grammar has no escape mechanism inside quotes; verbs that need
+    raw bytes containing `"` use the length-prefixed payload form.
+    Backslashes inside the arg are literal (so Windows paths work)."""
+    if '"' in arg:
+        raise WireError(
+            f"arg contains a literal double quote, which the wire format "
+            f"cannot represent on the header line: {arg!r}")
+    if arg == "" or " " in arg:
+        return f'"{arg}"'
+    return arg
+
+
+def _tokenize(line: str) -> list[str]:
+    """Split a header line into tokens per PROTOCOL.md §1.2.5. Used by the
+    conformance suite to validate quoting round-trips. The agent has its own
+    parser; this is the reference implementation."""
+    tokens: list[str] = []
+    i = 0
+    n = len(line)
+    while i < n:
+        # Skip leading spaces
+        while i < n and line[i] == " ":
+            i += 1
+        if i >= n:
+            break
+        if line[i] == '"':
+            # Quoted token. Read until the next ".
+            i += 1
+            start = i
+            while i < n and line[i] != '"':
+                i += 1
+            if i >= n:
+                raise WireError("unmatched quote in header")
+            tokens.append(line[start:i])
+            i += 1  # skip the closing "
+        else:
+            # Unquoted token. Read until the next space.
+            start = i
+            while i < n and line[i] != " ":
+                i += 1
+            tokens.append(line[start:i])
+    return tokens
+
+
 @dataclass
 class OkResponse:
     payload: bytes
@@ -113,10 +160,15 @@ class WireClient:
     def request(self, verb: str, *args: str, payload: bytes = b"") -> Response:
         """Send a verb and return its response.
 
+        Args containing spaces (or empty args) are automatically wrapped in
+        ASCII double quotes per PROTOCOL.md §1.2.5. Args containing a literal
+        double quote `"` are not representable on the header line and raise
+        WireError before sending.
+
         EVENT frames received before the response are silently discarded; tests
         that care about events should call `next_event()` directly on a side
         connection."""
-        header = verb if not args else verb + " " + " ".join(args)
+        header = verb if not args else verb + " " + " ".join(_quote(a) for a in args)
         self._send(header, payload)
         return self._read_response()
 

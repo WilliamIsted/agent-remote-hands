@@ -29,7 +29,7 @@ Every message — request, response, or event — is a single header line follow
 <directive> <args...>\n
 ```
 
-The header is ASCII, terminated by `\n`. A leading `\r` immediately before `\n` is tolerated and ignored. Tokens within the header are separated by single spaces. The header MUST NOT exceed 65 535 bytes.
+The header is ASCII, terminated by `\n`. A leading `\r` immediately before `\n` is tolerated and ignored. Tokens within the header are separated by single spaces; tokens that contain spaces themselves are double-quoted (see §1.2.5). The header MUST NOT exceed 65 535 bytes.
 
 **Payload:**
 
@@ -47,6 +47,31 @@ If the directive's grammar specifies a `<length>` argument (always the final arg
 | `file.write /path/foo.txt 1024\n{...1024 bytes...}` | Verb with payload |
 
 **Response framing is uniform.** Every `OK` and `ERR` response carries a length prefix — `0` for empty bodies, otherwise the byte count of the payload that follows. There is no separate "inline-text" shape: verbs that conceptually return scalars wrap them in JSON (e.g. `process.start` → `{"pid":N}`, not `OK N`). The verb tables in §4 list the JSON shape per OK response in the Notes column. Subscriptions emit `EVENT` frames asynchronously between request/response pairs — see §6.
+
+### 1.2.5 Argument quoting
+
+Tokens are space-separated. A token MAY be enclosed in ASCII double-quote characters (`"`); when it is, all bytes between the opening and closing quote — including spaces, backslashes, and any other byte except `"` itself — are taken literally as the token's value.
+
+Grammar:
+
+- An unquoted token is read until the next space or end-of-line. Backslashes inside an unquoted token are literal (this matters for Windows paths like `C:\Windows\System32`).
+- A quoted token starts with `"` and is read up to the next `"`. The opening and closing `"` are stripped from the value. There is no escape mechanism inside quotes — embedded `"` is not representable on the header line. Verbs that need raw byte content with embedded `"` use the length-prefixed payload, not header args.
+- An unmatched opening `"` (no closing `"` before end-of-line) is a parse error. The agent returns `ERR invalid_args {"message":"unmatched quote in header"}`.
+- Empty args are representable as `""`.
+
+Examples:
+
+| Header bytes | Tokens |
+|---|---|
+| `directory.create C:\Temp\demo` | verb=`directory.create`, args=[`C:\Temp\demo`] |
+| `directory.create "C:\Program Files\demo dir"` | verb=`directory.create`, args=[`C:\Program Files\demo dir`] |
+| `directory.rename "src dir" "dst dir"` | verb=`directory.rename`, args=[`src dir`, `dst dir`] |
+| `directory.rename "src" --overwrite "dst"` | verb=`directory.rename`, args=[`src`, `--overwrite`, `dst`] |
+| `clipboard.set 5` (then 5 bytes of payload) | verb=`clipboard.set`, args=[`5`]; payload is opaque |
+
+Backward compatibility: any token without `"` and without spaces parses identically under the old (v2.0) grammar and the new grammar. Quoting is additive — a v2.1 client that doesn't use spaces in any arg sends bytes byte-for-byte identical to a v2.0 client. The new shape only appears when a caller chooses to quote.
+
+Senders SHOULD quote any arg that contains a space or is empty, and MUST NOT send args containing `"` (no escape mechanism). Receivers MUST accept both quoted and unquoted forms for any arg position.
 
 ### 1.3 Encoding
 
@@ -840,6 +865,7 @@ Verbs not implemented on a particular target MUST be omitted from `system.capabi
 Wire-breaking. No alias period.
 
 - **Tier rename.** The three tiers `observe` / `drive` / `power` become five: `read` < `create` < `update` < `delete` < `extra_risky`, ordered as a strict ladder (holding a higher tier subsumes every lower tier). The new vocabulary mirrors the CRUDX letter on each verb (§7).
+- **Argument quoting (additive).** §1.2.5 defines a double-quote-grouping grammar so args containing spaces (e.g. `"C:\Program Files\App"`) are now representable on the header line. Backward-compatible: any token without spaces or quotes parses identically under v2.0 and v2.1. Embedded `"` is not representable; use the length-prefixed payload form when raw bytes are needed.
 - **Verb rename.** `clipboard.read` → `clipboard.get`, `clipboard.write` → `clipboard.set` (§4.10). Aligns the wire with the source-of-truth spec under [`spec/verbs/`](spec/verbs/).
 - **Directory namespace split.** Directory-only verbs leave the `file.*` namespace and become `directory.*`: `file.list` → `directory.list`, `file.mkdir` → `directory.create` (§4.7). Polymorphic verbs that operate on either files or directories (`file.delete`, `file.stat`, `file.exists`, `file.wait`, `file.rename`) stay in `file.*`.
 - **Per-verb tier annotations.** §4 now uses CRUDX shorthand letters (R / C / U / D / X) instead of the previous O / D / P. Each verb carries the required tier inferred from its CRUDX classification.

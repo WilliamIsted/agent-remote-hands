@@ -32,26 +32,45 @@ constexpr std::size_t kReadChunkBytes = 4096;
 
 Request tokenize_header(std::string_view line) {
     Request req;
-    std::size_t start = 0;
-    while (start < line.size()) {
+    const std::size_t n = line.size();
+    std::size_t i = 0;
+    while (i < n) {
         // Skip leading spaces
-        while (start < line.size() && line[start] == ' ') ++start;
-        if (start >= line.size()) break;
+        while (i < n && line[i] == ' ') ++i;
+        if (i >= n) break;
 
-        const std::size_t end = line.find(' ', start);
-        std::string_view token =
-            (end == std::string_view::npos)
-                ? line.substr(start)
-                : line.substr(start, end - start);
-
-        if (req.verb.empty()) {
-            req.verb.assign(token);
+        std::string token;
+        if (line[i] == '"') {
+            // Quoted token: literal until the next '"'. No escape mechanism.
+            ++i;  // skip opening quote
+            const std::size_t start = i;
+            while (i < n && line[i] != '"') ++i;
+            if (i >= n) {
+                // Unmatched opening quote — surface as a parse error so the
+                // dispatcher can emit ERR invalid_args. We deliberately do
+                // NOT throw here; the framing layer is fine, only the args
+                // are malformed.
+                req.parse_error = "unmatched quote in header";
+                req.verb.clear();
+                req.args.clear();
+                return req;
+            }
+            token.assign(line.substr(start, i - start));
+            ++i;  // skip closing quote
         } else {
-            req.args.emplace_back(token);
+            // Unquoted token: read until the next space.
+            const std::size_t start = i;
+            while (i < n && line[i] != ' ') ++i;
+            token.assign(line.substr(start, i - start));
         }
 
-        if (end == std::string_view::npos) break;
-        start = end + 1;
+        if (req.verb.empty() && req.args.empty()) {
+            // First token is the verb. We disallow a quoted verb (no real
+            // use case; verb names are dotted ASCII identifiers).
+            req.verb = std::move(token);
+        } else {
+            req.args.emplace_back(std::move(token));
+        }
     }
     return req;
 }

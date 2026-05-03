@@ -218,3 +218,55 @@ def test_directory_rename_round_trip(update_client: WireClient,
     r = update_client.request("directory.exists", dst)
     assert isinstance(r, OkResponse)
     assert json.loads(r.payload)["exists"] is True
+
+
+# ---------------------------------------------------------------------------
+# Header-quoting (PROTOCOL.md §1.2.5)
+
+def test_directory_path_with_spaces(delete_client: WireClient,
+                                    capabilities: dict) -> None:
+    """A path containing spaces round-trips end-to-end through the wire's
+    double-quote grouping. The WireClient auto-quotes args containing
+    spaces; the agent's tokeniser strips the quotes and dispatches with the
+    space-bearing path intact."""
+    needs_verb(capabilities, "directory.create")
+    needs_verb(capabilities, "directory.exists")
+    needs_verb(capabilities, "directory.remove")
+
+    path = _scratch_dir() + " with spaces"
+
+    r = delete_client.request("directory.create", path)
+    assert isinstance(r, OkResponse)
+
+    r = delete_client.request("directory.exists", path)
+    assert isinstance(r, OkResponse)
+    assert json.loads(r.payload)["exists"] is True
+
+    r = delete_client.request("directory.remove", path)
+    assert isinstance(r, OkResponse)
+
+
+def test_directory_rename_paths_with_spaces(update_client: WireClient,
+                                            capabilities: dict) -> None:
+    """Two-positional verb (directory.rename) with spaces in both args.
+    Validates that the auto-quoting on the send side and the tokeniser on
+    the agent side together preserve arg boundaries."""
+    needs_verb(capabilities, "directory.create")
+    needs_verb(capabilities, "directory.rename")
+    needs_verb(capabilities, "directory.exists")
+
+    src = _scratch_dir() + " src dir"
+    dst = _scratch_dir() + " dst dir"
+
+    r = update_client.request("directory.create", src)
+    assert isinstance(r, OkResponse)
+
+    r = update_client.request("directory.rename", src, dst)
+    assert isinstance(r, OkResponse)
+
+    r = update_client.request("directory.exists", src)
+    assert isinstance(r, OkResponse)
+    assert json.loads(r.payload)["exists"] is False
+    r = update_client.request("directory.exists", dst)
+    assert isinstance(r, OkResponse)
+    assert json.loads(r.payload)["exists"] is True

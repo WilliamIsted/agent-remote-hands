@@ -63,3 +63,30 @@ def test_tier_raise_unknown_tier_fails(client: WireClient) -> None:
     r = client.request("connection.tier_raise", "superuser", "x")
     assert isinstance(r, ErrResponse)
     assert r.code == "invalid_args"
+
+
+def test_unmatched_quote_returns_invalid_args(host: str, port: int) -> None:
+    """An unmatched opening `"` in the header should surface as
+    ERR invalid_args per PROTOCOL.md §1.2.5. The bridge's high-level
+    `WireClient.request()` won't produce this directly (it auto-quotes), so
+    the test forms the malformed line at the socket level."""
+    import socket as _socket
+    s = _socket.create_connection((host, port), timeout=5.0)
+    try:
+        # Hello first to leave pre-hello state.
+        s.sendall(b'connection.hello conformance 2.1\n')
+        # Read OK 0.
+        buf = b""
+        while b"\n" not in buf:
+            buf += s.recv(64)
+        # Now send a malformed header — unmatched opening quote.
+        s.sendall(b'system.info "argument-with-no-closing-quote\n')
+        buf = b""
+        while b"\n" not in buf:
+            buf += s.recv(256)
+        line = buf.split(b"\n", 1)[0].decode("utf-8")
+        # Expected: 'ERR invalid_args <len>' followed by JSON detail.
+        assert line.startswith("ERR invalid_args"), \
+            f"expected ERR invalid_args, got: {line!r}"
+    finally:
+        s.close()

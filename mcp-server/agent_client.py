@@ -115,6 +115,22 @@ class WireError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# Argument quoting (PROTOCOL.md §1.2.5)
+
+def _quote_arg(arg: str) -> str:
+    """Wrap `arg` in ASCII double quotes if it contains a space or is empty.
+    Args with a literal `"` cannot be represented on the header line and
+    raise WireError. Backslashes are literal — Windows paths work as-is."""
+    if '"' in arg:
+        raise WireError(
+            "arg contains a literal double quote, which the wire format "
+            f"cannot represent on the header line: {arg!r}")
+    if arg == "" or " " in arg:
+        return f'"{arg}"'
+    return arg
+
+
+# ---------------------------------------------------------------------------
 # Token file
 
 def read_token_file(path: Optional[str] = None) -> Optional[str]:
@@ -273,12 +289,17 @@ class AgentClient:
 
     def request(self, verb: str, *args: str, payload: bytes = b"") -> Response:
         """Sends a verb with optional args and length-prefixed payload, then
-        reads exactly one OK / ERR response. Thread-safe."""
+        reads exactly one OK / ERR response. Thread-safe.
+
+        Args containing spaces (or empty args) are wrapped in ASCII double
+        quotes per PROTOCOL.md §1.2.5. Args containing a literal `"` raise
+        WireError — the wire format cannot represent them on the header line."""
         with self._lock:
             if self._sock is None:
                 raise WireError("not connected")
 
-            header = " ".join((verb, *args))
+            quoted = (verb, *(_quote_arg(a) for a in args))
+            header = " ".join(quoted)
             if payload:
                 header = f"{header} {len(payload)}"
             line = header.encode("utf-8") + b"\n"
