@@ -59,7 +59,7 @@ void info(Connection& conn, const wire::Request&) {
 
     json::append_kv_string(j, "name", "agent-remote-hands");                 j += ',';
     json::append_kv_string(j, "version", sysinfo::kAgentVersion);            j += ',';
-    json::append_kv_string(j, "protocol", "2.0");                            j += ',';
+    json::append_kv_string(j, "protocol", "2.1");                            j += ',';
     json::append_kv_string(j, "os", sysinfo::kOsName);                       j += ',';
     json::append_kv_string(j, "arch", sysinfo::arch());                      j += ',';
     json::append_kv_string(j, "hostname", sysinfo::hostname());              j += ',';

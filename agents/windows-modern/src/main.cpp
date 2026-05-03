@@ -100,7 +100,7 @@ public:
 int wmain(int argc, wchar_t* argv[]) try {
     auto config = rh::Config::parse(argc, argv);
 
-    rh::log::info(L"Agent Remote Hands v2.0 starting on TCP port %u", config.port);
+    rh::log::info(L"Agent Remote Hands v2.1 starting on TCP port %u", config.port);
 
     WsaInit wsa;
     ComInit com;
