@@ -1,10 +1,9 @@
 # Agent Remote Hands
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Built for Windows](https://img.shields.io/badge/built%20for-Windows%2010%2B-0078D4?logo=windows&logoColor=white)](agents/windows-modern/COMPATIBILITY.md)
+[![CodeQL](https://github.com/WilliamIsted/agent-remote-hands/actions/workflows/codeql.yml/badge.svg)](https://github.com/WilliamIsted/agent-remote-hands/actions/workflows/codeql.yml)
+[![License](https://img.shields.io/github/license/WilliamIsted/agent-remote-hands?label=License&color=blue)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)](agents/windows-modern/CMakeLists.txt)
 [![Status: pre-release](https://img.shields.io/badge/status-pre--release-orange)](https://github.com/WilliamIsted/agent-remote-hands/milestones)
-[![CodeQL](https://github.com/WilliamIsted/agent-remote-hands/actions/workflows/codeql.yml/badge.svg)](https://github.com/WilliamIsted/agent-remote-hands/actions/workflows/codeql.yml)
 [![Last commit](https://img.shields.io/github/last-commit/WilliamIsted/agent-remote-hands?logo=github)](https://github.com/WilliamIsted/agent-remote-hands/commits/main)
 [![MCP-ready](https://img.shields.io/badge/MCP-ready-7B68EE)](https://modelcontextprotocol.io/)
 [![Built with Claude](https://img.shields.io/badge/built%20with-Claude%20Code-D97757)](https://claude.com/code)
