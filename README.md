@@ -152,7 +152,8 @@ Three architectural increments tracked as GitHub milestones:
 
 | Milestone | Protocol | Theme | Notes |
 |---|---|---|---|
-| **v0.2** | 2.0 | Stable protocol + per-connection tier system + agent-feedback fixes | Most issues live here. Adds `observe` / `drive` / `power` tiers gated by `connection.tier_raise`, file-token auth, and a backlog of observability + ergonomics improvements surfaced by real LLM driving sessions. Single-process. |
+| **v0.2** | 2.0 | Stable protocol + per-connection tier system + agent-feedback fixes | First ratified Protocol 2.0. Three-tier model (`observe` / `drive` / `power`) gated by `connection.tier_raise`, file-token auth, and a backlog of observability + ergonomics improvements surfaced by real LLM driving sessions. Single-process. |
+| **v0.3** | 2.1 | CRUDX tier vocabulary + spec-driven schemas | Renames the wire tiers to a five-rung CRUDX ladder (`read` < `create` < `update` < `delete` < `extra_risky`); renames `clipboard.read`/`write` to `clipboard.get`/`set`; the bridge's `tools/list` schemas are now lifted from `Repos/Protocol/spec/verbs/*.json`. Wire-breaking; clean cut, no aliases. |
 | **v0.3** | 3.0 | Privsep dispatcher | Privileged dispatcher process + tier-restricted worker processes. OS-enforced separation: the kernel refuses out-of-tier operations regardless of agent code paths. Compromise containment. |
 | **v0.4** | 4.0 | SSPI auth + caller impersonation | Per-connection workers spawned under the authenticated caller's Windows identity. Filesystem and registry ACLs match the caller's permissions, not the agent's. Full WinRM-style auth model. |
 
