@@ -1,11 +1,13 @@
 # Wire protocol
 
-**Version:** 2.0
+**Version:** 2.1
 **Status:** Stable.
 
 The Agent Remote Hands wire protocol is a line-oriented, length-prefixed, request/response protocol over plain TCP. Clients send verbs; agents respond with `OK`, `ERR`, or out-of-band `EVENT` frames for active subscriptions.
 
-This document is the canonical contract. Any agent claiming to speak protocol version 2.0 MUST conform to the framing, error model, and verb semantics defined here. The conformance suite under `tests/conformance/` is the executable contract.
+This document is the canonical contract. Any agent claiming to speak protocol version 2.1 MUST conform to the framing, error model, and verb semantics defined here. The conformance suite under `tests/conformance/` is the executable contract.
+
+> **Wire-breaking change in 2.1.** The tier vocabulary moves from `observe`/`drive`/`power` to a five-rung CRUDX ladder (`read` < `create` < `update` < `delete` < `extra_risky`). Two verbs are renamed: `clipboard.read` → `clipboard.get`, `clipboard.write` → `clipboard.set`. **Clean cut, no aliases.** Pin to `v2.0.x` if you need the old vocabulary. See §12.5.
 
 ---
 
@@ -74,14 +76,14 @@ Three directives appear in responses; one in requests.
 ```
 TCP connect  ─►  pre-hello  ─►  connected  ─►  closed
                       │              │
-                      │              ├─ tier transitions: observe ↔ drive ↔ power
+                      │              ├─ tier transitions: read ↔ create ↔ update ↔ delete ↔ extra_risky
                       │              │
                       └──────────────┴────────►  closed (any time, on socket drop)
 ```
 
 A new connection starts in **pre-hello** state. Only `connection.hello` and `connection.close` are accepted. Any other verb returns `ERR invalid_state` with detail `{"required":"hello"}`.
 
-After a successful `connection.hello`, the connection is **connected** at tier `observe`. All verbs are accepted, subject to tier requirements.
+After a successful `connection.hello`, the connection is **connected** at tier `read`. All verbs are accepted, subject to tier requirements.
 
 The connection terminates on `connection.close` (graceful), socket drop, or agent shutdown.
 
@@ -98,7 +100,7 @@ The client identifies itself and asserts a protocol major version. The agent rej
 
 ### 2.3 Tier negotiation
 
-Three tiers, ordered: `observe` < `drive` < `power`. Every connection starts at `observe`.
+Five tiers, ordered as a strict ladder: `read` < `create` < `update` < `delete` < `extra_risky`. Every connection starts at `read`. Holding a higher tier subsumes every lower tier — a connection at `delete` can call any `read`/`create`/`update`/`delete`-tier verb (but not `extra_risky`).
 
 ```
 > connection.tier_raise <tier> <token>
@@ -108,7 +110,7 @@ Three tiers, ordered: `observe` < `drive` < `power`. Every connection starts at 
 
 `<token>` is the contents of the agent's token file (see §2.6). The agent verifies the token matches and the requested tier is reachable, then records the new tier on this connection.
 
-`<tier>` MUST be a tier name advertised in `system.info.tiers`. Requests for unknown tiers return `ERR invalid_args`.
+`<tier>` MUST be a tier name advertised in `system.info.tiers`. Requests for unknown tiers — including the v2.0 names `observe`/`drive`/`power` — return `ERR invalid_args`.
 
 ```
 > connection.tier_drop <tier>
@@ -185,13 +187,13 @@ The negotiation contract. Returns a JSON object describing the agent's identity,
   "uiaccess": false,
   "monitors": 2,
   "privileges": ["SeShutdownPrivilege"],
-  "tiers": ["observe", "drive", "power"],
-  "current_tier": "observe",
+  "tiers": ["read", "create", "update", "delete", "extra_risky"],
+  "current_tier": "read",
   "auth": ["token"],
   "max_connections": 4,
   "namespaces": [
     "system", "screen", "window", "input", "element",
-    "file", "process", "registry", "clipboard", "watch", "connection"
+    "file", "directory", "process", "registry", "clipboard", "watch", "connection"
   ],
   "capabilities": {
     "capture": "wgc",
@@ -217,7 +219,7 @@ Field semantics:
 | `uiaccess` | boolean | `true` if the agent process has the UIAccess flag set (lets it drive higher-IL UI) |
 | `monitors` | int | Number of physical monitors attached. The 0-based index used by `window.list.monitor_index` and `screen.capture --monitor` matches `EnumDisplayMonitors` enumeration order (typically primary first). |
 | `privileges` | array of strings | Win32 privilege names enabled in the agent's token |
-| `tiers` | array of strings | Tiers this agent supports. Always at least `["observe"]`. |
+| `tiers` | array of strings | Tiers this agent supports. Always at least `["read"]`. |
 | `current_tier` | string | Tier of the current connection |
 | `auth` | array of strings | Supported elevation methods. `"token"` today; `"sspi"` in the v0.4 milestone (Protocol 4.0). |
 | `max_connections` | integer | Concurrent connection cap |
@@ -232,10 +234,10 @@ Clients SHOULD check `protocol`, `namespaces`, and `capabilities` before issuing
 > system.capabilities
 < OK <length>\n
 {
-  "system.info": {"tier": "observe"},
-  "system.health": {"tier": "observe"},
-  "system.reboot": {"tier": "power"},
-  "screen.capture": {"tier": "observe"},
+  "system.info": {"tier": "read"},
+  "system.health": {"tier": "read"},
+  "system.reboot": {"tier": "extra_risky"},
+  "screen.capture": {"tier": "read"},
   ...
 }
 ```
@@ -246,7 +248,7 @@ Map of verb name to required tier (and any verb-specific flags). A verb absent f
 
 ## 4. Verbs by namespace
 
-Tier shorthand: **O** = observe, **D** = drive, **P** = power, **—** = lifecycle (any tier).
+Tier shorthand: **R** = read, **C** = create, **U** = update, **D** = delete, **X** = extra_risky, **—** = lifecycle (any tier). The required tier follows the CRUDX letter: a verb tagged `R` requires at least the `read` tier, `C` requires at least `create`, and so on. The ladder (read < create < update < delete < extra_risky) is strict — holding a higher tier subsumes every lower tier.
 
 ### 4.1 `system.*`
 
@@ -254,25 +256,25 @@ System-level identity, health, and lifecycle operations.
 
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
-| `system.info` | O | — | `OK <len>\n<json>` | See §3.1 |
-| `system.capabilities` | O | — | `OK <len>\n<json>` | See §3.2 |
-| `system.health` | O | — | `OK 0` | Liveness check |
-| `system.shutdown_blockers` | O | — | `OK <len>\n<json>` | Lists windows that called `ShutdownBlockReasonCreate`. JSON: `{"blockers":[{"hwnd":"win:0x...","reason":"..."}]}` |
-| `system.lock` | O | — | `OK 0` | `LockWorkStation`. `ERR not_supported` on OS without lock support. |
-| `system.reboot` | P | `[--delay <s>] [--force] [--reason <code>]` | `OK <len>\n<json>` | Returns `{"phase":"requested","grace_ms":<n>,"deadline_unix":<n>}`. Connection drops shortly after. |
-| `system.shutdown` | P | `[--delay <s>] [--force] [--reason <code>]` | as above | |
-| `system.logoff` | P | `[--force]` | as above | |
-| `system.hibernate` | P | — | `OK 0` | |
-| `system.sleep` | P | — | `OK 0` | |
-| `system.power.cancel` | P | — | `OK <len>\n<json>` or `ERR not_found` | Aborts a pending in-process delayed shutdown. JSON: `{"cancelled_until_ms":<n>}`. `ERR not_found {"message":"no pending shutdown"}` if no shutdown is pending. Capability-gated; absent on builds without delayed-shutdown bookkeeping. |
+| `system.info` | R | — | `OK <len>\n<json>` | See §3.1 |
+| `system.capabilities` | R | — | `OK <len>\n<json>` | See §3.2 |
+| `system.health` | R | — | `OK 0` | Liveness check |
+| `system.shutdown_blockers` | R | — | `OK <len>\n<json>` | Lists windows that called `ShutdownBlockReasonCreate`. JSON: `{"blockers":[{"hwnd":"win:0x...","reason":"..."}]}` |
+| `system.lock` | R | — | `OK 0` | `LockWorkStation`. `ERR not_supported` on OS without lock support. |
+| `system.reboot` | X | `[--delay <s>] [--force] [--reason <code>]` | `OK <len>\n<json>` | Returns `{"phase":"requested","grace_ms":<n>,"deadline_unix":<n>}`. Connection drops shortly after. |
+| `system.shutdown` | X | `[--delay <s>] [--force] [--reason <code>]` | as above | |
+| `system.logoff` | X | `[--force]` | as above | |
+| `system.hibernate` | X | — | `OK 0` | |
+| `system.sleep` | X | — | `OK 0` | |
+| `system.power.cancel` | X | — | `OK <len>\n<json>` or `ERR not_found` | Aborts a pending in-process delayed shutdown. JSON: `{"cancelled_until_ms":<n>}`. `ERR not_found {"message":"no pending shutdown"}` if no shutdown is pending. Capability-gated; absent on builds without delayed-shutdown bookkeeping. |
 
-Power verbs MAY return `ERR insufficient_privilege {"missing":"SeShutdownPrivilege"}` if the agent's token lacks the relevant privilege.
+Extra-risky verbs MAY return `ERR insufficient_privilege {"missing":"SeShutdownPrivilege"}` if the agent's token lacks the relevant privilege.
 
 **`--delay` semantics (windows-modern).** The agent honours `--delay` by waiting in an in-process timer and then issuing the OS-level shutdown / reboot / logoff. Four caller-visible consequences follow:
 
 - **Eager `OK`.** The response is sent before the timer fires. `OK` confirms that the request was accepted and the timer was scheduled — not that the OS-level call later succeeded. Failures of the deferred call are written to the agent log but are not surfaced to the wire.
 - **Timer is agent-bound.** If the agent process exits (crash, restart, separate `system.shutdown` without `--delay`, external `taskkill`) before the timer fires, the scheduled action does not happen.
-- **One pending request at a time.** A second `--delay`-bearing power verb while one is already pending returns `ERR conflict {"pending_until_ms":<n>}`. Cancel the existing one (`system.power.cancel`) before scheduling another, or omit `--delay` to fire immediately.
+- **One pending request at a time.** A second `--delay`-bearing extra-risky verb while one is already pending returns `ERR conflict {"pending_until_ms":<n>}`. Cancel the existing one (`system.power.cancel`) before scheduling another, or omit `--delay` to fire immediately.
 - **Cancellable.** Use `system.power.cancel` to abort a pending delayed shutdown; the detached timer thread wakes early and the OS-level call is skipped. The cancel verb is capability-gated — clients should consult `system.capabilities` before calling.
 
 `--delay 0` (the default) bypasses the timer entirely and reports failure synchronously via `ERR not_supported {"win32_error":<n>}`.
@@ -283,7 +285,7 @@ Pixel capture.
 
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
-| `screen.capture` | O | `[--region <x>,<y>,<w>,<h>] [--window <hwnd>] [--monitor <index>] [--format <fmt>]` | `OK <len>\n<bytes>` | `<fmt>` ∈ `png` (default), `webp`, `webp:<quality>`, `bmp`. Format availability is advertised in `system.info.capabilities.image_formats`. `--monitor <N>` captures the Nth physical monitor (0-based, ordering matches `system.info.monitors` count and `window.list.monitor_index`); `ERR not_found` if `N` is out of range. `--region` / `--window` / `--monitor` are mutually exclusive. |
+| `screen.capture` | R | `[--region <x>,<y>,<w>,<h>] [--window <hwnd>] [--monitor <index>] [--format <fmt>]` | `OK <len>\n<bytes>` | `<fmt>` ∈ `png` (default), `webp`, `webp:<quality>`, `bmp`. Format availability is advertised in `system.info.capabilities.image_formats`. `--monitor <N>` captures the Nth physical monitor (0-based, ordering matches `system.info.monitors` count and `window.list.monitor_index`); `ERR not_found` if `N` is out of range. `--region` / `--window` / `--monitor` are mutually exclusive. |
 
 If neither `--region` nor `--window` is supplied, the entire virtual screen is captured.
 
@@ -295,12 +297,12 @@ Top-level window enumeration and control. All `<hwnd>` values use the prefix `wi
 
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
-| `window.list` | O | `[--filter <pattern>] [--all]` | `OK <len>\n<json>` | Visible top-level windows by default; `--all` includes invisible. JSON: `{"windows":[{"hwnd":"win:...","x":N,"y":N,"w":N,"h":N,"title":"...","pid":N,"monitor_index":N}]}`. `monitor_index` is the 0-based monitor the window is anchored on (`-1` if the window is fully off-screen). |
-| `window.find` | O | `<title-pattern>` | `OK <len>\n<json>` or `ERR not_found` | Returns first match |
-| `window.focus` | D | `<hwnd>` | `OK <len>\n<json>` | JSON: `{"prior_hwnd":"win:..."}`. `ERR lock_held` if foreground-lock denied. |
-| `window.close` | D | `<hwnd>` | `OK 0` | `WM_CLOSE`. Window may decline. |
-| `window.move` | D | `<hwnd> <x> <y> <w> <h>` | `OK 0` | |
-| `window.state` | O | `<hwnd>` | `OK <len>\n<json>` | JSON: `{"state":"<state>"}` where state ∈ `minimised`, `maximised`, `normal`, `hidden` |
+| `window.list` | R | `[--filter <pattern>] [--all]` | `OK <len>\n<json>` | Visible top-level windows by default; `--all` includes invisible. JSON: `{"windows":[{"hwnd":"win:...","x":N,"y":N,"w":N,"h":N,"title":"...","pid":N,"monitor_index":N}]}`. `monitor_index` is the 0-based monitor the window is anchored on (`-1` if the window is fully off-screen). |
+| `window.find` | R | `<title-pattern>` | `OK <len>\n<json>` or `ERR not_found` | Returns first match |
+| `window.focus` | U | `<hwnd>` | `OK <len>\n<json>` | JSON: `{"prior_hwnd":"win:..."}`. `ERR lock_held` if foreground-lock denied. |
+| `window.close` | U | `<hwnd>` | `OK 0` | `WM_CLOSE`. Window may decline. |
+| `window.move` | U | `<hwnd> <x> <y> <w> <h>` | `OK 0` | |
+| `window.state` | R | `<hwnd>` | `OK <len>\n<json>` | JSON: `{"state":"<state>"}` where state ∈ `minimised`, `maximised`, `normal`, `hidden` |
 
 ### 4.4 `input.*`
 
@@ -308,13 +310,13 @@ Synthetic input. All input verbs check the foreground window's integrity level b
 
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
-| `input.click` | D | `<x> <y> [--button left\|right\|middle]` | `OK 0` | Default button: left |
-| `input.move` | D | `<x> <y>` | `OK 0` | Cursor move; no click |
-| `input.scroll` | D | `<x> <y> <delta>` | `OK 0` | Delta in wheel notches (positive = up) |
-| `input.key` | D | `<vk> [--modifiers <list>]` | `OK 0` | `<vk>` is a key name (`enter`, `F4`, `a`, …); modifiers comma-separated (`ctrl,shift`) |
-| `input.type` | D | `<length>` | `OK 0` | UTF-8 text payload follows the header. Handles Unicode and quote-escape hazards. |
-| `input.send_message` | D | `<hwnd> <msg> <wparam> <lparam>` | `OK 0` | Low-level escape hatch for `SendMessage` (synchronous) |
-| `input.post_message` | D | `<hwnd> <msg> <wparam> <lparam>` | `OK 0` | Non-blocking peer of `input.send_message`; uses `PostMessage`. Use when the target's message pump is unresponsive to a synchronous send. |
+| `input.click` | U | `<x> <y> [--button left\|right\|middle]` | `OK 0` | Default button: left |
+| `input.move` | U | `<x> <y>` | `OK 0` | Cursor move; no click |
+| `input.scroll` | U | `<x> <y> <delta>` | `OK 0` | Delta in wheel notches (positive = up) |
+| `input.key` | U | `<vk> [--modifiers <list>]` | `OK 0` | `<vk>` is a key name (`enter`, `F4`, `a`, …); modifiers comma-separated (`ctrl,shift`) |
+| `input.type` | U | `<length>` | `OK 0` | UTF-8 text payload follows the header. Handles Unicode and quote-escape hazards. |
+| `input.send_message` | U | `<hwnd> <msg> <wparam> <lparam>` | `OK 0` | Low-level escape hatch for `SendMessage` (synchronous) |
+| `input.post_message` | U | `<hwnd> <msg> <wparam> <lparam>` | `OK 0` | Non-blocking peer of `input.send_message`; uses `PostMessage`. Use when the target's message pump is unresponsive to a synchronous send. |
 
 #### Known limitation: keyboard input does not reach RawInput / DirectInput targets
 
@@ -332,85 +334,96 @@ UI Automation. Element identifiers use the prefix `elt:` followed by a connectio
 
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
-| `element.list` | O | `[--region <x>,<y>,<w>,<h>]` | `OK <len>\n<json>` | Filtered enumeration of interactable / named elements |
-| `element.tree` | O | `<elt-id>` | `OK <len>\n<json>` | TreeWalker recursive descent. JSON: `{"elements":[{"depth":N,"id":"elt:N","role":"...","name":"...","bounds":[x,y,w,h],"flags":[...]}]}` |
-| `element.at` | O | `<x> <y>` | `OK <len>\n<json>` or `ERR not_found` | Hit test |
-| `element.find` | O | `<role> <name-pattern>` | `OK <len>\n<json>` or `ERR not_found` or `ERR uia_blind` | `not_found` = nothing matched. `uia_blind` = UIA cannot see across the integrity barrier (caller may need to elevate). |
-| `element.wait` | O | `<role> <name-pattern> <timeout-ms>` | `OK <len>\n<json>` or `ERR timeout` | Polling form of `element.find` (re-walks the visible-element subtree every 250 ms until match or deadline). Returned id is valid for `element.invoke` on the same connection. Capability-gated. |
-| `element.find_invoke` | D | `<role> <name-pattern>` | `OK 0` or `ERR not_found` / `ERR uia_blind` / `ERR not_supported_by_target` / `ERR target_gone` | Compound verb: `element.find` + `element.invoke` in one round-trip. Same matching rules as `element.find`. |
-| `element.at_invoke` | D | `<x> <y>` | `OK 0` or `ERR not_found` / `ERR not_supported_by_target` / `ERR target_gone` | Compound verb: `element.at` + `element.invoke` in one round-trip. |
-| `element.invoke` | D | `<elt-id>` | `OK 0` or `ERR not_supported_by_target` or `ERR target_gone` | InvokePattern |
-| `element.toggle` | D | `<elt-id>` | `OK <len>\n<json>` | TogglePattern. JSON: `{"new_state":"<state>"}` ∈ `on`, `off`, `indeterminate` |
-| `element.expand` | D | `<elt-id>` | `OK <len>\n<json>` | ExpandCollapsePattern.Expand. JSON: `{"new_state":"<state>"}` |
-| `element.collapse` | D | `<elt-id>` | `OK <len>\n<json>` | ExpandCollapsePattern.Collapse |
-| `element.focus` | D | `<elt-id>` | `OK 0` | Sets keyboard focus |
-| `element.text` | O | `<elt-id>` | `OK <len>\n<bytes>` | TextPattern preferred; ValuePattern fallback. Empty payload (`OK 0`) is valid. |
-| `element.set_text` | D | `<elt-id> <length>` | `OK 0` or `ERR readonly` or `ERR not_supported_by_target` | UTF-8 text payload follows |
+| `element.list` | R | `[--region <x>,<y>,<w>,<h>]` | `OK <len>\n<json>` | Filtered enumeration of interactable / named elements |
+| `element.tree` | R | `<elt-id>` | `OK <len>\n<json>` | TreeWalker recursive descent. JSON: `{"elements":[{"depth":N,"id":"elt:N","role":"...","name":"...","bounds":[x,y,w,h],"flags":[...]}]}` |
+| `element.at` | R | `<x> <y>` | `OK <len>\n<json>` or `ERR not_found` | Hit test |
+| `element.find` | R | `<role> <name-pattern>` | `OK <len>\n<json>` or `ERR not_found` or `ERR uia_blind` | `not_found` = nothing matched. `uia_blind` = UIA cannot see across the integrity barrier (caller may need to elevate). |
+| `element.wait` | R | `<role> <name-pattern> <timeout-ms>` | `OK <len>\n<json>` or `ERR timeout` | Polling form of `element.find` (re-walks the visible-element subtree every 250 ms until match or deadline). Returned id is valid for `element.invoke` on the same connection. Capability-gated. |
+| `element.find_invoke` | U | `<role> <name-pattern>` | `OK 0` or `ERR not_found` / `ERR uia_blind` / `ERR not_supported_by_target` / `ERR target_gone` | Compound verb: `element.find` + `element.invoke` in one round-trip. Same matching rules as `element.find`. |
+| `element.at_invoke` | U | `<x> <y>` | `OK 0` or `ERR not_found` / `ERR not_supported_by_target` / `ERR target_gone` | Compound verb: `element.at` + `element.invoke` in one round-trip. |
+| `element.invoke` | U | `<elt-id>` | `OK 0` or `ERR not_supported_by_target` or `ERR target_gone` | InvokePattern |
+| `element.toggle` | U | `<elt-id>` | `OK <len>\n<json>` | TogglePattern. JSON: `{"new_state":"<state>"}` ∈ `on`, `off`, `indeterminate` |
+| `element.expand` | U | `<elt-id>` | `OK <len>\n<json>` | ExpandCollapsePattern.Expand. JSON: `{"new_state":"<state>"}` |
+| `element.collapse` | U | `<elt-id>` | `OK <len>\n<json>` | ExpandCollapsePattern.Collapse |
+| `element.focus` | U | `<elt-id>` | `OK 0` | Sets keyboard focus |
+| `element.text` | R | `<elt-id>` | `OK <len>\n<bytes>` | TextPattern preferred; ValuePattern fallback. Empty payload (`OK 0`) is valid. |
+| `element.set_text` | U | `<elt-id> <length>` | `OK 0` or `ERR readonly` or `ERR not_supported_by_target` | UTF-8 text payload follows |
 
 Element IDs are allocated by the agent on calls that produce element references (`element.list`, `element.tree`, `element.at`, `element.find`, `element.wait`). IDs remain valid for the connection's lifetime unless the underlying element is invalidated, in which case subsequent verbs return `ERR target_gone`.
 
 ### 4.6 `file.*`
 
-Filesystem operations. Paths are UTF-8.
+File operations. Paths are UTF-8. For directory operations, see §4.7 `directory.*`.
 
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
-| `file.read` | O | `<path>` | `OK <len>\n<bytes>` | Whole-file read |
-| `file.write` | D | `<path> <length>` | `OK 0` | Whole-file write; payload follows. Truncates any existing file. |
-| `file.write_at` | D | `<path> <offset> <length> [--truncate]` | `OK 0` | Random-access write; `<length>` bytes written at byte `<offset>`. `--truncate` (only meaningful at offset 0) clears the file first; otherwise the file is opened with `OPEN_ALWAYS`. The chunked-upload primitive driven by the MCP bridge's `upload_file` for files over its single-shot threshold. |
-| `file.list` | O | `<path>` | `OK <len>\n<json>` | JSON: `{"entries":[{"name":"...","type":"file\|dir\|link","size":N,"mtime_unix":N}]}` |
-| `file.stat` | O | `<path>` | `OK <len>\n<json>` | Single-entry version of `file.list` |
-| `file.delete` | P | `<path>` | `OK 0` | Files and empty directories |
-| `file.exists` | O | `<path>` | `OK <len>\n<json>` | JSON: `{"exists":true,"type":"..."}` or `{"exists":false}` |
-| `file.wait` | O | `<pattern> <timeout-ms>` | `OK <len>\n<json>` or `ERR timeout` | Resolves on path matching glob |
-| `file.mkdir` | D | `<path>` | `OK 0` | Single directory level; parent must exist |
-| `file.rename` | D | `<src> <dst>` | `OK 0` | Move or rename |
+| `file.read` | R | `<path>` | `OK <len>\n<bytes>` | Whole-file read |
+| `file.write` | U | `<path> <length>` | `OK 0` | Whole-file write; payload follows. Truncates any existing file. |
+| `file.write_at` | U | `<path> <offset> <length> [--truncate]` | `OK 0` | Random-access write; `<length>` bytes written at byte `<offset>`. `--truncate` (only meaningful at offset 0) clears the file first; otherwise the file is opened with `OPEN_ALWAYS`. The chunked-upload primitive driven by the MCP bridge's `upload_file` for files over its single-shot threshold. |
+| `file.stat` | R | `<path>` | `OK <len>\n<json>` | Single-entry stat-like response. Tolerates files and directories. |
+| `file.delete` | D | `<path>` | `OK 0` | Files and empty directories. For non-empty directories use `directory.delete --recursive` (§4.7). |
+| `file.exists` | R | `<path>` | `OK <len>\n<json>` | JSON: `{"exists":true,"type":"..."}` or `{"exists":false}`. Tolerates files and directories. |
+| `file.wait` | R | `<pattern> <timeout-ms>` | `OK <len>\n<json>` or `ERR timeout` | Resolves on path matching glob. Tolerates files and directories. |
+| `file.rename` | U | `<src> <dst>` | `OK 0` | Move or rename. Tolerates files and directories. |
 
-### 4.7 `process.*`
+### 4.7 `directory.*`
+
+Directory operations. Paths are UTF-8. **New namespace in v2.1.** Verbs that previously lived under `file.*` and only operate on directories have moved here, plus a basic CRUDX-complete set of new directory primitives.
+
+| Verb | Tier | Args | Response | Notes |
+|---|---|---|---|---|
+| `directory.list` | R | `<path>` | `OK <len>\n<json>` | JSON: `{"entries":[{"name":"...","type":"file\|dir\|link","size":N,"mtime_unix":N}]}`. **Renamed from `file.list` in v2.1.** |
+| `directory.stat` | R | `<path>` | `OK <len>\n<json>` | JSON: `{"type":"dir","entry_count":N,"mtime_unix":N}`. Returns `ERR not_a_directory` if path exists but is a file. |
+| `directory.exists` | R | `<path>` | `OK <len>\n<json>` | JSON: `{"exists":true}` or `{"exists":false}`. False also when the path exists but is a file (use `file.exists` for the polymorphic test). |
+| `directory.create` | C | `<path> [--parents]` | `OK 0` | Creates a directory. `--parents` walks the path, creating each missing component (mkdir -p semantics). **Renamed from `file.mkdir` in v2.1.** |
+| `directory.rename` | U | `<src> <dst> [--overwrite] [--cross-fs]` | `OK <len>\n<json>` | Rename or move (POSIX `rename(2)` / Win32 `MoveFileEx`). `--overwrite` replaces an existing directory at `<dst>`. Cross-filesystem moves require `--cross-fs` (engages a copy+rmtree fallback); without it, returns `ERR cross_device`. JSON: `{"renamed":true,"fallback_used":"copy_delete"?}`. |
+| `directory.remove` | D | `<path> [--recursive]` | `OK <len>\n<json>` | Hard delete. Empty directories require no flag; non-empty needs `--recursive` (analogous to `rm -rf`). Reparse points / symbolic links are not traversed. JSON: `{"removed":true,"entries_removed":N}`. |
+
+### 4.8 `process.*`
 
 Process management.
 
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
-| `process.list` | O | `[--filter <pattern>]` | `OK <len>\n<json>` | JSON: `{"processes":[{"pid":N,"image":"...","ppid":N}]}` |
-| `process.start` | D | `<argv> [--stdin <length>]` | `OK <len>\n<json>` | `CreateProcess`. Returns `{"pid":N}`. Optional length-prefixed stdin payload. |
-| `process.shell` | D | `<path> [--args <s>] [--verb <v>]` | `OK <len>\n<json>` | `ShellExecuteEx`. Handles paths with spaces / unicode without shell-escape hazards. `--args` is the parameter string passed verbatim to the spawned program; `--verb` selects a non-default verb (e.g. `runas` for elevation, `print`, `edit`). Returns `{"pid":N}` (PID may be 0 for verbs that don't spawn a process). |
-| `process.kill` | P | `<pid>` | `OK 0` | `TerminateProcess` |
-| `process.wait` | O | `<pid> <timeout-ms>` | `OK <len>\n<json>` or `ERR timeout` | JSON: `{"exit_code":N}`. Returns successfully even if the process has already exited. |
+| `process.list` | R | `[--filter <pattern>]` | `OK <len>\n<json>` | JSON: `{"processes":[{"pid":N,"image":"...","ppid":N}]}` |
+| `process.start` | C | `<argv> [--stdin <length>]` | `OK <len>\n<json>` | `CreateProcess`. Returns `{"pid":N}`. Optional length-prefixed stdin payload. |
+| `process.shell` | C | `<path> [--args <s>] [--verb <v>]` | `OK <len>\n<json>` | `ShellExecuteEx`. Handles paths with spaces / unicode without shell-escape hazards. `--args` is the parameter string passed verbatim to the spawned program; `--verb` selects a non-default verb (e.g. `runas` for elevation, `print`, `edit`). Returns `{"pid":N}` (PID may be 0 for verbs that don't spawn a process). |
+| `process.kill` | D | `<pid>` | `OK 0` | `TerminateProcess` |
+| `process.wait` | R | `<pid> <timeout-ms>` | `OK <len>\n<json>` or `ERR timeout` | JSON: `{"exit_code":N}`. Returns successfully even if the process has already exited. |
 
-### 4.8 `registry.*`
+### 4.9 `registry.*`
 
 Windows registry. Paths use the standard `HKLM\Software\...` form (or `HKCU`, `HKCR`, `HKU`, `HKCC`).
 
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
-| `registry.read` | O | `<path> [--value <name>]` | `OK <len>\n<json>` | JSON: `{"type":"REG_SZ","data":"..."}` for single value; `{"values":{...},"subkeys":[...]}` for whole key |
-| `registry.write` | D | `<path> <name> <type> <data>` | `OK 0` | `<type>` ∈ standard `REG_*` names |
-| `registry.delete` | P | `<path> [--value <name>]` | `OK 0` | Whole key if `--value` absent |
-| `registry.wait` | O | `<path> <timeout-ms>` | `OK <len>\n<json>` or `ERR timeout` | `RegNotifyChangeKeyValue`-based |
+| `registry.read` | R | `<path> [--value <name>]` | `OK <len>\n<json>` | JSON: `{"type":"REG_SZ","data":"..."}` for single value; `{"values":{...},"subkeys":[...]}` for whole key |
+| `registry.write` | U | `<path> <name> <type> <data>` | `OK 0` | `<type>` ∈ standard `REG_*` names |
+| `registry.delete` | D | `<path> [--value <name>]` | `OK 0` | Whole key if `--value` absent |
+| `registry.wait` | R | `<path> <timeout-ms>` | `OK <len>\n<json>` or `ERR timeout` | `RegNotifyChangeKeyValue`-based |
 
-### 4.9 `clipboard.*`
+### 4.10 `clipboard.*`
 
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
-| `clipboard.read` | O | — | `OK <len>\n<bytes>` | UTF-8 text. Empty payload if clipboard has no text. |
-| `clipboard.write` | D | `<length>` | `OK 0` | UTF-8 text payload |
+| `clipboard.get` | R | — | `OK <len>\n<bytes>` | UTF-8 text. Empty payload if clipboard has no text. **Renamed from `clipboard.read` in v2.1.** |
+| `clipboard.set` | U | `<length>` | `OK 0` | UTF-8 text payload. **Renamed from `clipboard.write` in v2.1.** |
 
-### 4.10 `watch.*`
+### 4.11 `watch.*`
 
 Subscription-based observation. See §6 for the EVENT-frame mechanics.
 
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
-| `watch.region` | O | `<x>,<y>,<w>,<h> [--interval <ms>] [--until-change]` | `OK <len>\n<json>` | JSON: `{"subscription_id":"sub:N"}`. Emits `EVENT sub:N <bytes>` per frame (image bytes, format from `system.info.capabilities.image_formats`). |
-| `watch.process` | O | `<pid>` | as above | Emits one `EVENT sub:N <json>` on process exit, then auto-cancels |
-| `watch.window` | O | `--title-prefix <pattern>` | as above | Emits `EVENT` on window appear / disappear |
-| `watch.element` | O | `<elt-id>` | as above | Emits `EVENT` on element invalidation, then auto-cancels |
-| `watch.file` | O | `<pattern>` | as above | `ReadDirectoryChangesW`-based |
-| `watch.registry` | O | `<path>` | as above | `RegNotifyChangeKeyValue`-based |
-| `watch.cancel` | O | `<sub-id>` | `OK 0` | Ends a subscription. Idempotent on already-cancelled IDs. |
+| `watch.region` | R | `<x>,<y>,<w>,<h> [--interval <ms>] [--until-change]` | `OK <len>\n<json>` | JSON: `{"subscription_id":"sub:N"}`. Emits `EVENT sub:N <bytes>` per frame (image bytes, format from `system.info.capabilities.image_formats`). |
+| `watch.process` | R | `<pid>` | as above | Emits one `EVENT sub:N <json>` on process exit, then auto-cancels |
+| `watch.window` | R | `--title-prefix <pattern>` | as above | Emits `EVENT` on window appear / disappear |
+| `watch.element` | R | `<elt-id>` | as above | Emits `EVENT` on element invalidation, then auto-cancels |
+| `watch.file` | R | `<pattern>` | as above | `ReadDirectoryChangesW`-based |
+| `watch.registry` | R | `<path>` | as above | `RegNotifyChangeKeyValue`-based |
+| `watch.cancel` | R | `<sub-id>` | `OK 0` | Ends a subscription. Idempotent on already-cancelled IDs. |
 
-### 4.11 `connection.*`
+### 4.12 `connection.*`
 
 Lifecycle and tier negotiation. See §2 for state machine details.
 
@@ -456,12 +469,17 @@ Errors take the form:
 |---|---|---|
 | `target_gone` | `{handle, last_known_state?}` | Element / window / process vanished mid-call |
 | `uipi_blocked` | `{agent_il, target_il}` | Integrity barrier blocked input |
-| `not_found` | — | Search returned nothing |
+| `not_found` | — | Search returned nothing, or referenced path / handle does not exist |
 | `uia_blind` | — | UIA cannot see across the IL barrier; distinct from `not_found` |
 | `lock_held` | `{lock_type, holder?}` | Foreground / clipboard / registry lock denied |
 | `readonly` | — | Write to immutable target |
 | `not_supported_by_target` | `{pattern?}` | Target element / object lacks the required UIA pattern |
 | `insufficient_privilege` | `{missing}` | Token lacks the required Win32 privilege |
+| `permission_denied` | `{message?}` | OS-level access denial (filesystem ACL, TCC grant missing, sandbox boundary, etc.). Distinct from `tier_required` (wire-tier gate) and `insufficient_privilege` (Win32 token privilege). |
+| `already_exists` | `{message?}` | Target path / handle already exists and the verb refused to overwrite. `directory.create`, `file.download create_only`, `directory.rename` without `--overwrite`. |
+| `not_empty` | — | Removing a non-empty directory without `--recursive`. `file.delete`, `directory.remove`. |
+| `not_a_directory` | `{message?}` | Path exists but refers to a file when the verb requires a directory (or vice versa). All `directory.*` verbs that resolve an existing path. |
+| `cross_device` | `{message?}` | Operation crosses a filesystem boundary and the verb refuses without explicit opt-in. `directory.rename` without `--cross-fs`. |
 
 ### 5.3 Detail JSON
 
@@ -517,13 +535,19 @@ Within a single subscription, EVENT frames are emitted in the order events occur
 
 ## 7. Tier model
 
+The tier vocabulary follows CRUDX — each verb's required tier matches the side-effect class it belongs to.
+
 ### 7.1 Tier semantics
 
-| Tier | Capability |
-|---|---|
-| `observe` | Read-only operations. Cannot synthesise input, cannot modify files / registry, cannot terminate processes, cannot reboot. |
-| `drive` | All `observe` capabilities plus synthetic input, file writes, registry writes, process start, focus changes. |
-| `power` | All `drive` capabilities plus destructive operations: process kill, file delete, registry delete, system reboot / shutdown / logoff. |
+| Tier | CRUDX letter | Capability |
+|---|---|---|
+| `read` | R | Observe state without changing it. Capture the screen, list windows, read files, query elements, watch for events. The default tier on a fresh connection. |
+| `create` | C | All `read` capabilities plus operations that bring something new into existence: `directory.create`, `process.start`, `process.shell`. |
+| `update` | U | All `create` capabilities plus operations that overwrite or move existing things: synthetic input, file writes, registry writes, focus changes, element invocations, window moves, file rename. |
+| `delete` | D | All `update` capabilities plus operations that make existing things cease to be: `file.delete`, `process.kill`, `registry.delete`. |
+| `extra_risky` | X | All `delete` capabilities plus operations that affect connection / system / power state: `system.shutdown`, `system.reboot`, `system.logoff`, `system.hibernate`, `system.sleep`, `system.power.cancel`. |
+
+The ladder is strict — holding a higher tier subsumes every lower tier. A connection at `delete` can call any `R`/`C`/`U`/`D`-tier verb (but not `X`-tier).
 
 ### 7.2 Tier enforcement
 
@@ -534,11 +558,13 @@ The agent MUST enforce tier requirements at the verb-dispatch layer. A verb whos
 {"required":"<tier>","current":"<tier>"}
 ```
 
+`<tier>` values are exclusively the v2.1 names — `read`, `create`, `update`, `delete`, `extra_risky`. The v2.0 names (`observe`, `drive`, `power`) are not accepted by v2.1 agents.
+
 ### 7.3 Privilege management
 
-The agent MAY enable Win32 privileges (e.g. `SeShutdownPrivilege`) only when needed for the current tier. An observe-tier connection SHOULD see those privileges disabled in the agent's effective token.
+The agent MAY enable Win32 privileges (e.g. `SeShutdownPrivilege`) only when needed for the current tier. A `read`-tier connection SHOULD see those privileges disabled in the agent's effective token.
 
-This is OS-enforced confinement layered on top of protocol-level tier checks. Protocol 2.0 agents are single-process; full process isolation is the v0.3 privsep dispatcher milestone (Protocol 3.0).
+This is OS-enforced confinement layered on top of protocol-level tier checks. Protocol 2.x agents are single-process; full process isolation is the v0.3 privsep dispatcher milestone (Protocol 3.0).
 
 ---
 
@@ -546,7 +572,7 @@ This is OS-enforced confinement layered on top of protocol-level tier checks. Pr
 
 Windows runs each process at one of four mandatory integrity levels — `low`, `medium`, `high`, `system`. User Interface Privilege Isolation (UIPI) silently blocks synthetic input from a lower-IL process to a higher-IL window. This is the agent's most common silent-failure mode and is worth understanding before deploying.
 
-The OS-level integrity model is **separate** from the wire-protocol tier model in §7: tiers gate wire verbs (observe / drive / power) and live entirely in the agent process; integrity levels gate cross-process effects and are enforced by the kernel. A connection at the `power` tier whose agent runs at `medium` IL still cannot drive a `high`-IL installer wizard.
+The OS-level integrity model is **separate** from the wire-protocol tier model in §7: tiers gate wire verbs (read / create / update / delete / extra_risky) and live entirely in the agent process; integrity levels gate cross-process effects and are enforced by the kernel. A connection at the `extra_risky` tier whose agent runs at `medium` IL still cannot drive a `high`-IL installer wizard.
 
 ### 8.1 The Medium-IL agent / High-IL installer trap
 
@@ -602,7 +628,7 @@ TXT record fields:
 |---|---|---|
 | `protocol` | `2` | Wire protocol major version |
 | `os` | `windows-modern` | Target identifier |
-| `tiers` | `observe,drive,power` | Comma-separated tier list |
+| `tiers` | `read,create,update,delete,extra_risky` | Comma-separated tier list |
 | `auth` | `token` | Comma-separated auth methods |
 
 Discovery is opt-in per deployment. The protocol has no transport authentication, so mDNS advertising on an untrusted network is a footgun.
@@ -644,12 +670,12 @@ If a client sends a malformed request (mis-stated payload length, header exceedi
 ### 11.1 Minimal session
 
 ```
-> connection.hello agent-remote-hands 2.0
+> connection.hello agent-remote-hands 2.1
 < OK 0
 > system.info
 < OK 312
-{"name":"win-host-42","protocol":"2.0","os":"windows-modern","integrity":"medium",
- "tiers":["observe","drive","power"],"current_tier":"observe", ...}
+{"name":"win-host-42","protocol":"2.1","os":"windows-modern","integrity":"medium",
+ "tiers":["read","create","update","delete","extra_risky"],"current_tier":"read", ...}
 > system.health
 < OK 0
 > connection.close
@@ -661,15 +687,15 @@ If a client sends a malformed request (mis-stated payload length, header exceedi
 ```
 > input.click 100 200
 < ERR tier_required 38
-{"required":"drive","current":"observe"}
+{"required":"update","current":"read"}
 
 > file.read C:\ProgramData\AgentRemoteHands\token
 < OK 64
 a3f1c8...e9b2
 
-> connection.tier_raise drive a3f1c8...e9b2
-< OK 22
-{"new_tier":"drive"}
+> connection.tier_raise update a3f1c8...e9b2
+< OK 23
+{"new_tier":"update"}
 
 > input.click 100 200
 < OK 0
@@ -710,9 +736,9 @@ hello world
 ### 11.5 Reboot
 
 ```
-> connection.tier_raise power <token>
-< OK 22
-{"new_tier":"power"}
+> connection.tier_raise extra_risky <token>
+< OK 28
+{"new_tier":"extra_risky"}
 
 > system.reboot --delay 5 --reason planned
 < OK 64
@@ -732,6 +758,47 @@ hello world
 > file.write /path/foo.txt 1024
 <sends 1024 bytes correctly>
 < OK 0
+```
+
+### 11.7 Directory namespace round-trip
+
+A short scratch-directory lifecycle exercising the v2.1 `directory.*` namespace and the clipboard rename. Assumes the connection has already raised to `delete` tier (which subsumes `update` + `create` + `read`).
+
+```
+> directory.create C:\Temp\demo-2c8b
+< OK 0
+
+> file.write C:\Temp\demo-2c8b\note.txt 5
+hello
+< OK 0
+
+> clipboard.set 11
+demo content
+< OK 0
+
+> clipboard.get
+< OK 12
+demo content
+
+> directory.list C:\Temp\demo-2c8b
+< OK 96
+{"entries":[{"name":"note.txt","type":"file","size":5,"mtime_unix":1748520000}]}
+
+> directory.stat C:\Temp\demo-2c8b
+< OK 56
+{"type":"dir","entry_count":1,"mtime_unix":1748520000}
+
+> directory.remove C:\Temp\demo-2c8b
+< ERR not_empty 53
+{"message":"directory not empty; pass --recursive"}
+
+> directory.remove C:\Temp\demo-2c8b --recursive
+< OK 33
+{"removed":true,"entries_removed":1}
+
+> directory.exists C:\Temp\demo-2c8b
+< OK 17
+{"exists":false}
 ```
 
 ---
@@ -766,11 +833,28 @@ The conformance suite under `tests/conformance/` is the executable contract.
 
 Verbs not implemented on a particular target MUST be omitted from `system.capabilities`. Clients MUST NOT issue verbs absent from the capabilities map; agents MAY return `ERR not_supported` if they do.
 
+### 12.5 Release notes
+
+#### 2.1.0 — CRUDX tier vocabulary; `clipboard` rename
+
+Wire-breaking. No alias period.
+
+- **Tier rename.** The three tiers `observe` / `drive` / `power` become five: `read` < `create` < `update` < `delete` < `extra_risky`, ordered as a strict ladder (holding a higher tier subsumes every lower tier). The new vocabulary mirrors the CRUDX letter on each verb (§7).
+- **Verb rename.** `clipboard.read` → `clipboard.get`, `clipboard.write` → `clipboard.set` (§4.10). Aligns the wire with the source-of-truth spec under [`spec/verbs/`](spec/verbs/).
+- **Directory namespace split.** Directory-only verbs leave the `file.*` namespace and become `directory.*`: `file.list` → `directory.list`, `file.mkdir` → `directory.create` (§4.7). Polymorphic verbs that operate on either files or directories (`file.delete`, `file.stat`, `file.exists`, `file.wait`, `file.rename`) stay in `file.*`.
+- **Per-verb tier annotations.** §4 now uses CRUDX shorthand letters (R / C / U / D / X) instead of the previous O / D / P. Each verb carries the required tier inferred from its CRUDX classification.
+- **No compatibility shim.** Agents on v2.1 reject the v2.0 tier names and verb names with `ERR invalid_args` (tier names) or `ERR not_supported` (verb names). Clients still on the v2.0 vocabulary should pin to a `v2.0.x` release of the spec/agent.
+- **Migration.** Existing clients raising to `drive` should now raise to `update`. Existing clients raising to `power` should now raise to `extra_risky`. `clipboard.read`/`write` callers update verb names. `file.list` callers move to `directory.list`; `file.mkdir` callers move to `directory.create`.
+
+#### 2.0.0
+
+First ratified release of the 2.0 spec.
+
 ---
 
 ## Appendix A: Verb summary
 
-A flat list of all Protocol 2.0 verbs for quick reference. **O/D/P** denotes the required tier; **—** denotes lifecycle (any tier).
+A flat list of all Protocol 2.1 verbs for quick reference. CRUDX shorthand: **R** = read, **C** = create, **U** = update, **D** = delete, **X** = extra_risky, **—** = lifecycle (any tier).
 
 ```
 connection.hello             (—)
@@ -779,82 +863,87 @@ connection.tier_drop         (—)
 connection.reset             (—)
 connection.close             (—)
 
-system.info                  (O)
-system.capabilities          (O)
-system.health                (O)
-system.shutdown_blockers     (O)
-system.lock                  (O)
-system.reboot                (P)
-system.shutdown              (P)
-system.logoff                (P)
-system.hibernate             (P)
-system.sleep                 (P)
-system.power.cancel          (P)
+system.info                  (R)
+system.capabilities          (R)
+system.health                (R)
+system.shutdown_blockers     (R)
+system.lock                  (R)
+system.reboot                (X)
+system.shutdown              (X)
+system.logoff                (X)
+system.hibernate             (X)
+system.sleep                 (X)
+system.power.cancel          (X)
 
-screen.capture               (O)
+screen.capture               (R)
 
-window.list                  (O)
-window.find                  (O)
-window.focus                 (D)
-window.close                 (D)
-window.move                  (D)
-window.state                 (O)
+window.list                  (R)
+window.find                  (R)
+window.focus                 (U)
+window.close                 (U)
+window.move                  (U)
+window.state                 (R)
 
-input.click                  (D)
-input.move                   (D)
-input.scroll                 (D)
-input.key                    (D)
-input.type                   (D)
-input.send_message           (D)
-input.post_message           (D)
+input.click                  (U)
+input.move                   (U)
+input.scroll                 (U)
+input.key                    (U)
+input.type                   (U)
+input.send_message           (U)
+input.post_message           (U)
 
-element.list                 (O)
-element.tree                 (O)
-element.at                   (O)
-element.find                 (O)
-element.wait                 (O)
-element.find_invoke          (D)
-element.at_invoke            (D)
-element.invoke               (D)
-element.toggle               (D)
-element.expand               (D)
-element.collapse             (D)
-element.focus                (D)
-element.text                 (O)
-element.set_text             (D)
+element.list                 (R)
+element.tree                 (R)
+element.at                   (R)
+element.find                 (R)
+element.wait                 (R)
+element.find_invoke          (U)
+element.at_invoke            (U)
+element.invoke               (U)
+element.toggle               (U)
+element.expand               (U)
+element.collapse             (U)
+element.focus                (U)
+element.text                 (R)
+element.set_text             (U)
 
-file.read                    (O)
-file.write                   (D)
-file.write_at                (D)
-file.list                    (O)
-file.stat                    (O)
-file.delete                  (P)
-file.exists                  (O)
-file.wait                    (O)
-file.mkdir                   (D)
-file.rename                  (D)
+file.read                    (R)
+file.write                   (U)
+file.write_at                (U)
+file.stat                    (R)
+file.delete                  (D)
+file.exists                  (R)
+file.wait                    (R)
+file.rename                  (U)
 
-process.list                 (O)
-process.start                (D)
-process.shell                (D)
-process.kill                 (P)
-process.wait                 (O)
+directory.list               (R)
+directory.stat               (R)
+directory.exists             (R)
+directory.create             (C)
+directory.rename             (U)
+directory.remove             (D)
 
-registry.read                (O)
-registry.write               (D)
-registry.delete              (P)
-registry.wait                (O)
+process.list                 (R)
+process.start                (C)
+process.shell                (C)
+process.kill                 (D)
+process.wait                 (R)
 
-clipboard.read               (O)
-clipboard.write              (D)
+registry.read                (R)
+registry.write               (U)
+registry.delete              (D)
+registry.wait                (R)
 
-watch.region                 (O)
-watch.process                (O)
-watch.window                 (O)
-watch.element                (O)
-watch.file                   (O)
-watch.registry               (O)
-watch.cancel                 (O)
+clipboard.get                (R)
+clipboard.set                (U)
+
+watch.region                 (R)
+watch.process                (R)
+watch.window                 (R)
+watch.element                (R)
+watch.file                   (R)
+watch.registry               (R)
+watch.cancel                 (R)
 ```
 
-55 verbs across 11 namespaces.
+59 verbs across 12 namespaces.

@@ -18,30 +18,30 @@ from conftest import needs_verb
 from wire import ErrResponse, OkResponse, WireClient
 
 
-def test_clipboard_read_at_observe_tier(client: WireClient,
-                                        capabilities: dict) -> None:
-    needs_verb(capabilities, "clipboard.read")
-    r = client.request("clipboard.read")
+def test_clipboard_get_at_read_tier(client: WireClient,
+                                    capabilities: dict) -> None:
+    needs_verb(capabilities, "clipboard.get")
+    r = client.request("clipboard.get")
     assert isinstance(r, OkResponse)
     # Empty clipboard → empty payload; either way, just bytes.
 
 
-def test_clipboard_write_requires_drive_tier(client: WireClient,
-                                             capabilities: dict) -> None:
-    needs_verb(capabilities, "clipboard.write")
-    r = client.request("clipboard.write", "5", payload=b"hello")
+def test_clipboard_set_requires_update_tier(client: WireClient,
+                                            capabilities: dict) -> None:
+    needs_verb(capabilities, "clipboard.set")
+    r = client.request("clipboard.set", "5", payload=b"hello")
     assert isinstance(r, ErrResponse)
     assert r.code == "tier_required"
 
 
-def test_clipboard_round_trip_at_drive_tier(drive_client: WireClient,
-                                            capabilities: dict) -> None:
-    needs_verb(capabilities, "clipboard.read")
-    needs_verb(capabilities, "clipboard.write")
+def test_clipboard_round_trip_at_update_tier(update_client: WireClient,
+                                             capabilities: dict) -> None:
+    needs_verb(capabilities, "clipboard.get")
+    needs_verb(capabilities, "clipboard.set")
     payload = "agent-remote-hands conformance test".encode("utf-8")
-    r = drive_client.request("clipboard.write",
-                             str(len(payload)), payload=payload)
+    r = update_client.request("clipboard.set",
+                              str(len(payload)), payload=payload)
     assert isinstance(r, OkResponse)
-    r = drive_client.request("clipboard.read")
+    r = update_client.request("clipboard.get")
     assert isinstance(r, OkResponse)
     assert r.payload == payload

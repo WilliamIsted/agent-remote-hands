@@ -47,13 +47,13 @@ def test_element_invoke_invalid_id_returns_target_gone(client: WireClient,
                                                        capabilities: dict) -> None:
     needs_verb(capabilities, "element.invoke")
     r = client.request("element.invoke", "elt:99999")
-    # Bogus id is target_gone, but verb is drive-tier so we hit tier_required first.
+    # Bogus id is target_gone, but verb is update-tier so we hit tier_required first.
     assert isinstance(r, ErrResponse)
     assert r.code == "tier_required"
 
 
-def test_element_list_at_observe(client: WireClient,
-                                 capabilities: dict) -> None:
+def test_element_list_at_read(client: WireClient,
+                              capabilities: dict) -> None:
     needs_verb(capabilities, "element.list")
     # Restrict to a small region so the call finishes quickly.
     r = client.request("element.list", "--region", "0,0,200,200")

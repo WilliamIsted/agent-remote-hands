@@ -76,8 +76,8 @@ def test_registry_read_unknown_flag_rejected(client: WireClient,
     assert r.detail.get("unknown_flag") == "--bogus-flag"
 
 
-def test_write_requires_drive_tier(client: WireClient,
-                                   capabilities: dict) -> None:
+def test_write_requires_update_tier(client: WireClient,
+                                    capabilities: dict) -> None:
     needs_verb(capabilities, "registry.write")
     r = client.request(
         "registry.write",
@@ -88,14 +88,14 @@ def test_write_requires_drive_tier(client: WireClient,
     assert r.code == "tier_required"
 
 
-def test_delete_requires_power_tier(drive_client: WireClient,
-                                    capabilities: dict) -> None:
+def test_delete_requires_delete_tier(update_client: WireClient,
+                                     capabilities: dict) -> None:
     needs_verb(capabilities, "registry.delete")
-    r = drive_client.request(
+    r = update_client.request(
         "registry.delete",
         r"HKCU\Software\AgentRemoteHandsConformance",
         "--value", "Nonexistent",
     )
     assert isinstance(r, ErrResponse)
     assert r.code == "tier_required"
-    assert r.detail.get("required") == "power"
+    assert r.detail.get("required") == "delete"

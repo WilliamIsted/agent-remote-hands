@@ -48,13 +48,13 @@ def test_reset_returns_ok(client: WireClient) -> None:
     assert isinstance(r, OkResponse)
 
 
-def test_default_tier_is_observe(client: WireClient) -> None:
+def test_default_tier_is_read(client: WireClient) -> None:
     info = client.info()
-    assert info["current_tier"] == "observe"
+    assert info["current_tier"] == "read"
 
 
 def test_tier_raise_invalid_token_fails(client: WireClient) -> None:
-    r = client.request("connection.tier_raise", "drive", "not-the-token")
+    r = client.request("connection.tier_raise", "update", "not-the-token")
     assert isinstance(r, ErrResponse)
     assert r.code == "auth_invalid"
 

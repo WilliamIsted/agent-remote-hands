@@ -36,11 +36,13 @@ def test_info_protocol_is_v2(client: WireClient) -> None:
     assert info["protocol"].startswith("2"), f"got {info['protocol']!r}"
 
 
-def test_info_advertises_three_tiers(client: WireClient) -> None:
+def test_info_advertises_five_tiers(client: WireClient) -> None:
     info = client.info()
-    assert "observe" in info["tiers"]
-    assert "drive"   in info["tiers"]
-    assert "power"   in info["tiers"]
+    assert "read"        in info["tiers"]
+    assert "create"      in info["tiers"]
+    assert "update"      in info["tiers"]
+    assert "delete"      in info["tiers"]
+    assert "extra_risky" in info["tiers"]
 
 
 def test_info_namespaces_includes_connection(client: WireClient) -> None:
@@ -50,7 +52,7 @@ def test_info_namespaces_includes_connection(client: WireClient) -> None:
 
 def test_capabilities_advertises_system_info(client: WireClient) -> None:
     caps = client.capabilities()
-    assert caps.get("system.info", {}).get("tier") == "observe"
+    assert caps.get("system.info", {}).get("tier") == "read"
 
 
 def test_health_succeeds(client: WireClient) -> None:
@@ -58,13 +60,13 @@ def test_health_succeeds(client: WireClient) -> None:
     assert isinstance(r, OkResponse)
 
 
-def test_reboot_requires_power_tier(client: WireClient,
-                                    capabilities: dict) -> None:
+def test_reboot_requires_extra_risky_tier(client: WireClient,
+                                          capabilities: dict) -> None:
     needs_verb(capabilities, "system.reboot")
     r = client.request("system.reboot")
     assert isinstance(r, ErrResponse)
     assert r.code == "tier_required"
-    assert r.detail.get("required") == "power"
+    assert r.detail.get("required") == "extra_risky"
 
 
 def test_shutdown_blockers_returns_array(client: WireClient,
@@ -78,25 +80,25 @@ def test_shutdown_blockers_returns_array(client: WireClient,
     assert isinstance(body["blockers"], list)
 
 
-def test_power_cancel_requires_power_tier(client: WireClient,
-                                          capabilities: dict) -> None:
+def test_power_cancel_requires_extra_risky_tier(client: WireClient,
+                                                capabilities: dict) -> None:
     needs_verb(capabilities, "system.power.cancel")
     r = client.request("system.power.cancel")
     assert isinstance(r, ErrResponse)
     assert r.code == "tier_required"
-    assert r.detail.get("required") == "power"
+    assert r.detail.get("required") == "extra_risky"
 
 
-def test_power_cancel_no_pending_returns_not_found(power_client: WireClient,
-                                                    capabilities: dict) -> None:
+def test_power_cancel_no_pending_returns_not_found(extra_risky_client: WireClient,
+                                                   capabilities: dict) -> None:
     needs_verb(capabilities, "system.power.cancel")
-    r = power_client.request("system.power.cancel")
+    r = extra_risky_client.request("system.power.cancel")
     assert isinstance(r, ErrResponse)
     assert r.code == "not_found"
 
 
 def test_power_delay_overlap_conflicts_then_cancels(
-        power_client: WireClient, capabilities: dict) -> None:
+        extra_risky_client: WireClient, capabilities: dict) -> None:
     """Schedule a long-delay shutdown, observe pending state via overlap,
     then cancel. Uses --delay 86400 so the machine remains safe even if
     cancellation regresses (24h grace to intervene manually)."""
@@ -104,11 +106,11 @@ def test_power_delay_overlap_conflicts_then_cancels(
     needs_verb(capabilities, "system.shutdown")
 
     # Schedule a 24-hour delayed shutdown.
-    r = power_client.request("system.shutdown", "--delay", "86400")
+    r = extra_risky_client.request("system.shutdown", "--delay", "86400")
     assert isinstance(r, OkResponse), f"got {r!r}"
     try:
         # A second --delay request must be rejected.
-        r2 = power_client.request("system.shutdown", "--delay", "86400")
+        r2 = extra_risky_client.request("system.shutdown", "--delay", "86400")
         assert isinstance(r2, ErrResponse)
         assert r2.code == "conflict"
         assert "pending_until_ms" in r2.detail
@@ -116,10 +118,10 @@ def test_power_delay_overlap_conflicts_then_cancels(
     finally:
         # Always cancel — leaving a pending OS-level shutdown around between
         # tests is unfriendly even with a 24h delay.
-        r3 = power_client.request("system.power.cancel")
+        r3 = extra_risky_client.request("system.power.cancel")
         assert isinstance(r3, OkResponse), f"cancel failed: {r3!r}"
 
     # And a second cancel returns not_found.
-    r4 = power_client.request("system.power.cancel")
+    r4 = extra_risky_client.request("system.power.cancel")
     assert isinstance(r4, ErrResponse)
     assert r4.code == "not_found"

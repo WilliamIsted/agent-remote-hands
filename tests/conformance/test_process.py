@@ -44,41 +44,41 @@ def test_process_list_filter(client: WireClient,
         assert "svchost" in p["image"].lower()
 
 
-def test_process_start_requires_drive_tier(client: WireClient,
-                                           capabilities: dict) -> None:
+def test_process_start_requires_create_tier(client: WireClient,
+                                            capabilities: dict) -> None:
     needs_verb(capabilities, "process.start")
     r = client.request("process.start", "cmd.exe")
     assert isinstance(r, ErrResponse)
     assert r.code == "tier_required"
 
 
-def test_process_kill_requires_power_tier(drive_client: WireClient,
-                                          capabilities: dict) -> None:
+def test_process_kill_requires_delete_tier(update_client: WireClient,
+                                           capabilities: dict) -> None:
     needs_verb(capabilities, "process.kill")
     # PID 0 (System Idle Process) is unkillable; verb should still report
-    # tier-mismatch first since drive < power.
-    r = drive_client.request("process.kill", "0")
+    # tier-mismatch first since update < delete.
+    r = update_client.request("process.kill", "0")
     assert isinstance(r, ErrResponse)
     assert r.code == "tier_required"
 
 
-def test_process_start_and_wait(drive_client: WireClient,
+def test_process_start_and_wait(create_client: WireClient,
                                 capabilities: dict) -> None:
     needs_verb(capabilities, "process.start")
     needs_verb(capabilities, "process.wait")
     # `cmd /c exit 7` exits cleanly with code 7.
-    r = drive_client.request("process.start", "cmd.exe /c exit 7")
+    r = create_client.request("process.start", "cmd.exe /c exit 7")
     assert isinstance(r, OkResponse)
     pid = json.loads(r.payload)["pid"]
 
-    r = drive_client.request("process.wait", str(pid), "5000")
+    r = create_client.request("process.wait", str(pid), "5000")
     assert isinstance(r, OkResponse)
     body = json.loads(r.payload)
     assert body["exit_code"] == 7
 
 
-def test_process_wait_after_exit_returns_cached_code(drive_client: WireClient,
-                                                      capabilities: dict) -> None:
+def test_process_wait_after_exit_returns_cached_code(create_client: WireClient,
+                                                     capabilities: dict) -> None:
     """Regression for #16: the agent must retain the spawned process handle so
     process.wait returns the exit code even after the OS has reaped the
     process. Without the cache this returns ERR target_gone."""
@@ -86,14 +86,14 @@ def test_process_wait_after_exit_returns_cached_code(drive_client: WireClient,
     needs_verb(capabilities, "process.start")
     needs_verb(capabilities, "process.wait")
 
-    r = drive_client.request("process.start", "cmd.exe /c exit 5")
+    r = create_client.request("process.start", "cmd.exe /c exit 5")
     assert isinstance(r, OkResponse)
     pid = json.loads(r.payload)["pid"]
 
     # Let the OS finish reaping the process.
     time.sleep(0.5)
 
-    r = drive_client.request("process.wait", str(pid), "1000")
+    r = create_client.request("process.wait", str(pid), "1000")
     assert isinstance(r, OkResponse), f"got {r!r}"
     body = json.loads(r.payload)
     assert body["exit_code"] == 5

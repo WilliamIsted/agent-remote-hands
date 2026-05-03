@@ -43,8 +43,8 @@ def test_window_list_entries_have_required_fields(client: WireClient,
             assert key in w, f"window entry missing {key}: {w}"
 
 
-def test_window_focus_requires_drive_tier(client: WireClient,
-                                          capabilities: dict) -> None:
+def test_window_focus_requires_update_tier(client: WireClient,
+                                           capabilities: dict) -> None:
     needs_verb(capabilities, "window.focus")
     r = client.request("window.focus", "win:0x1")
     assert isinstance(r, ErrResponse)

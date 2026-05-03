@@ -11,7 +11,7 @@ If you're driving the agent through Claude Code, Claude Desktop, or any MCP-awar
 Read first:
 - [`mcp-server/README.md`](mcp-server/README.md) — bridge architecture, tier-elevation flow, environment variables.
 
-Tier elevation is stateful — call `request_drive_access(reason="…")` before tools like `click_element` or `write_file`; call `request_power_access(reason="…")` before destructive tools like `delete_file` or `kill_process`. The bridge handles the token dance for you.
+Tier elevation is stateful and follows the v2.1 CRUDX ladder (`read` < `create` < `update` < `delete` < `extra_risky`). Call `request_update_access(reason="…")` before tools like `click_element` or `write_file`; call `request_delete_access(reason="…")` before tools like `delete_file` or `kill_process`; call `request_extra_risky_access(reason="…")` before tools like `cancel_pending_shutdown`. (`request_create_access` exists too, for tools that only need create — `directory.create`, `process.start`.) The bridge handles the token dance for you.
 
 ## The 10% path: speaking the wire directly
 
@@ -30,7 +30,7 @@ For idiomatic Win32-side reference (e.g., when you need to compare the agent's b
 Two verbs are designed to be your starting point on a fresh connection:
 
 - **`system.info`** — agent identity, OS, hostname, integrity level, monitor count, available image formats, and capability summary. Call it once after `connection.hello`.
-- **`system.capabilities`** — the verb→required-tier map, exhaustively. If a verb isn't in the response, this build doesn't implement it. If it has `tier: power`, you'll need `connection.tier_raise power <token>` before calling it.
+- **`system.capabilities`** — the verb→required-tier map, exhaustively. If a verb isn't in the response, this build doesn't implement it. Tiers are CRUDX letters mapped to ladder rungs (R→`read`, C→`create`, U→`update`, D→`delete`, X→`extra_risky`); a verb tagged `tier: extra_risky` needs `connection.tier_raise extra_risky <token>` before calling it.
 
 These two together let you discover what the agent supports without consulting the spec. They're not a substitute for reading `PROTOCOL.md` (the *shape* of arguments isn't advertised), but they're enough to gate-check anything you'd want to call.
 
@@ -64,21 +64,22 @@ import json
 from wire import WireClient, OkResponse
 
 with WireClient("127.0.0.1", 8765) as c:
-    c.hello("my-llm-rig", "2.0")
+    c.hello("my-llm-rig", "2.1")
 
     info = c.info()                         # system.info
     caps = c.capabilities()                 # system.capabilities
 
-    # Take a screenshot at observe tier (no token needed).
+    # Take a screenshot at the default `read` tier (no token needed).
     r = c.request("screen.capture", "--format", "png")
     assert isinstance(r, OkResponse)
     with open("shot.png", "wb") as f:
         f.write(r.payload)
 
-    # Elevate to drive tier for input. Token from %ProgramData%/AgentRemoteHands/token.
+    # Elevate to update tier for input synthesis. Token from
+    # %ProgramData%/AgentRemoteHands/token.
     with open(r"C:\ProgramData\AgentRemoteHands\token") as f:
         token = f.read().strip()
-    c.request("connection.tier_raise", "drive", token)
+    c.request("connection.tier_raise", "update", token)
 
     # Now you can drive input.
     c.request("input.click", "100", "100")

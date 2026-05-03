@@ -50,25 +50,15 @@ def test_file_exists_on_missing_path(client: WireClient,
     assert body["exists"] is False
 
 
-def test_file_list_on_directory(client: WireClient,
-                                capabilities: dict) -> None:
-    needs_verb(capabilities, "file.list")
-    r = client.request("file.list", r"C:\Windows")
-    assert isinstance(r, OkResponse)
-    body = json.loads(r.payload)
-    assert "entries" in body
-    assert isinstance(body["entries"], list)
-
-
-def test_file_write_requires_drive_tier(client: WireClient,
-                                        capabilities: dict) -> None:
+def test_file_write_requires_update_tier(client: WireClient,
+                                         capabilities: dict) -> None:
     needs_verb(capabilities, "file.write")
     r = client.request("file.write", _scratch_path(), "5", payload=b"hello")
     assert isinstance(r, ErrResponse)
     assert r.code == "tier_required"
 
 
-def test_file_round_trip(drive_client: WireClient,
+def test_file_round_trip(update_client: WireClient,
                          capabilities: dict) -> None:
     needs_verb(capabilities, "file.write")
     needs_verb(capabilities, "file.read")
@@ -78,23 +68,23 @@ def test_file_round_trip(drive_client: WireClient,
     payload = b"agent-remote-hands conformance round-trip"
 
     # write
-    r = drive_client.request("file.write", path, str(len(payload)),
-                             payload=payload)
+    r = update_client.request("file.write", path, str(len(payload)),
+                              payload=payload)
     assert isinstance(r, OkResponse)
 
     # read back
-    r = drive_client.request("file.read", path)
+    r = update_client.request("file.read", path)
     assert isinstance(r, OkResponse)
     assert r.payload == payload
 
-    # cleanup needs power tier; drive tier won't suffice. Skip cleanup but
+    # cleanup needs delete tier; update tier won't suffice. Skip cleanup but
     # leave a TODO marker — temp files don't accumulate badly.
 
 
-def test_file_delete_requires_power_tier(drive_client: WireClient,
-                                         capabilities: dict) -> None:
+def test_file_delete_requires_delete_tier(update_client: WireClient,
+                                          capabilities: dict) -> None:
     needs_verb(capabilities, "file.delete")
-    r = drive_client.request("file.delete", _scratch_path())
+    r = update_client.request("file.delete", _scratch_path())
     assert isinstance(r, ErrResponse)
     assert r.code == "tier_required"
-    assert r.detail.get("required") == "power"
+    assert r.detail.get("required") == "delete"

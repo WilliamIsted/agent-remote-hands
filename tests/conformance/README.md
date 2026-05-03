@@ -28,7 +28,7 @@ pytest tests/conformance --host 192.168.1.42 --port 8765 -v
 One file per namespace under `tests/conformance/`. Each test file:
 
 - Skips its tests if the agent does not advertise the relevant verbs (per `system.capabilities`).
-- Uses the `client` fixture (observe tier), the `drive_client` fixture (elevated to drive — needs `--token-path`), or the `power_client` fixture (elevated to power) as appropriate.
+- Uses the `client` fixture (read tier — the default on a fresh hello), or one of the elevated-tier fixtures `create_client` / `update_client` / `delete_client` / `extra_risky_client` (all need `--token-path`).
 
 ## Token elevation
 

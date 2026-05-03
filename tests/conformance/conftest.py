@@ -67,7 +67,7 @@ def token(pytestconfig: pytest.Config) -> str:
 
 @pytest.fixture(scope="session")
 def capabilities(host: str, port: int) -> dict:
-    """Map of verb name -> {'tier': '<observe|drive|power>'}."""
+    """Map of verb name -> {'tier': '<read|create|update|delete|extra_risky>'}."""
     with WireClient(host, port) as c:
         c.hello()
         return c.capabilities()
@@ -75,30 +75,45 @@ def capabilities(host: str, port: int) -> dict:
 
 @pytest.fixture
 def client(host: str, port: int) -> Iterator[WireClient]:
-    """Per-test connection at observe tier."""
+    """Per-test connection at read tier (the default on a fresh hello)."""
     with WireClient(host, port) as c:
         c.hello()
         yield c
 
 
 @pytest.fixture
-def drive_client(client: WireClient, token: str) -> WireClient:
-    """Per-test connection elevated to drive tier."""
-    r = client.tier_raise("drive", token)
+def create_client(client: WireClient, token: str) -> WireClient:
+    """Per-test connection elevated to create tier."""
+    r = client.tier_raise("create", token)
     if isinstance(r, ErrResponse):
-        pytest.skip(f"could not elevate to drive: {r.code} {r.detail}")
+        pytest.skip(f"could not elevate to create: {r.code} {r.detail}")
     return client
 
 
 @pytest.fixture
-def power_client(client: WireClient, token: str) -> WireClient:
-    """Per-test connection elevated to power tier."""
-    r = client.tier_raise("drive", token)
+def update_client(client: WireClient, token: str) -> WireClient:
+    """Per-test connection elevated to update tier (subsumes create + read)."""
+    r = client.tier_raise("update", token)
     if isinstance(r, ErrResponse):
-        pytest.skip(f"could not elevate to drive: {r.code}")
-    r = client.tier_raise("power", token)
+        pytest.skip(f"could not elevate to update: {r.code} {r.detail}")
+    return client
+
+
+@pytest.fixture
+def delete_client(client: WireClient, token: str) -> WireClient:
+    """Per-test connection elevated to delete tier (subsumes update + create + read)."""
+    r = client.tier_raise("delete", token)
     if isinstance(r, ErrResponse):
-        pytest.skip(f"could not elevate to power: {r.code}")
+        pytest.skip(f"could not elevate to delete: {r.code} {r.detail}")
+    return client
+
+
+@pytest.fixture
+def extra_risky_client(client: WireClient, token: str) -> WireClient:
+    """Per-test connection elevated to extra_risky tier (top of the ladder)."""
+    r = client.tier_raise("extra_risky", token)
+    if isinstance(r, ErrResponse):
+        pytest.skip(f"could not elevate to extra_risky: {r.code} {r.detail}")
     return client
 
 
