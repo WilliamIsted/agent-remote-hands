@@ -4,33 +4,33 @@ Operational guidance for Claude Code (claude.ai/code) working in this repo. The 
 
 ## What this repo is
 
-A multi-binary Windows control surface for AI agents. Three top-level deliverables:
+A multi-binary Windows control surface for AI agents. This is the **v0.3.0 from-scratch rebuild** (working branch `rebuild/v0.3.0`). Three agent binaries built from one wire contract:
 
-- **`agents/windows-modern/`** — C++17 agent for Windows 10 / 11. IUIAutomation, BitBlt + WIC for screen capture, hand-rolled mDNS responder. Built with CMake. **v0.2.0 release-candidate** (Protocol 2.0) — the wire-protocol surface is feature-complete; the agent 1.0 stable-release blocker is code signing.
-- **`agents/windows-nt/`** *(planned)* — Straight C agent for Windows NT 4 → Server 2003. WinSock, GDI BitBlt, classic input APIs. Built with `build.bat` (cl.exe).
-- **`mcp-server/`** *(beta — 27 of 66 verbs wrapped)* — Python MCP bridge that exposes the wire protocol as named tools to MCP-aware clients. Tier-filtered tool listing + `tools/list_changed` notifications. Adding the rest of the wrappers is `tools.py` work.
+- **`agents/windows-modern/`** — C++17 agent for Windows 10 1809+ (VS2022 v143). IUIAutomation, WGC/BitBlt + WIC capture, hand-rolled mDNS. Built with CMake.
+- **`agents/windows-legacy/`** — C++17 agent for Windows XP SP3 → Windows 10 1803 (VS2017 v141_xp). GDI/GDI+ capture, classic input. Built with CMake.
+- **`agents/windows-classic/`** — C89 agent for Windows NT 4 SP6a / Win95 OSR2 → Windows 2000 (VS6 on an XP SP3 VM). WinSock, GDI BitBlt, classic input. Built with `build.bat`.
+- **`mcp-server/`** — Python MCP bridge; spec-driven (tool defs derived from the Protocol spec, no manual registry), tier-filtered tool listing.
 
-All targets speak the same wire protocol (`PROTOCOL.md`). The conformance suite (`tests/conformance/`) is the contract — anything passing it speaks the protocol correctly.
+All three agents speak one wire protocol. The canonical spec is the **`protocol/` git submodule** (currently pinned at `v2.2.0-rc.1`). The conformance suite (`tests/conformance/`) is the contract — anything passing it speaks the protocol correctly.
 
 ## Build
 
-Windows 10 / 11 agent (from a Developer PowerShell):
+Modern (Win 10 1809+) and legacy (XP SP3+) — from a Developer PowerShell:
 
 ```powershell
 cmake -S agents/windows-modern -B agents/windows-modern/build -A x64
 cmake --build agents/windows-modern/build --config Release
+# legacy: same commands with -S agents/windows-legacy
 ```
 
-Output: `agents/windows-modern/build/Release/remote-hands.exe`.
-
-Legacy NT agent *(planned)* — when the `agents/windows-nt/` target lands, it will build via:
+Classic (NT4 / Win9x / Win2000) — VS6 on a Windows XP SP3 VM:
 
 ```cmd
-cd agents\windows-nt
+cd agents\windows-classic
 build.bat
 ```
 
-Output: `agents/windows-nt/remote-hands-nt.exe` (per the binary naming convention below).
+Binaries follow `rha-win.<family>.<arch>.exe` (e.g. `rha-win.modern.x64.exe`, `rha-win.classic.x86.exe`).
 
 ## Conformance suite
 
@@ -67,7 +67,8 @@ Quick one-shot verb checks via `client/hostctl` are *(planned)* — until that s
 
 ## Branch model
 
-- **`main`** — canonical. Everything ships here.
+- **`rebuild/v0.3.0`** — the current working branch (the from-scratch v0.3.0 rebuild). Work happens here until it lands on `main`.
+- **`main`** — canonical/production line; the v0.3.0 rebuild has **not** merged here yet, so `main` is behind this branch.
 - **`benchmark`** — branch holding tool-benchmarking and comparison rigs (not part of the product). **Do not merge into `main`.** Treat as throwaway.
 
 `benchmarks/` is in `.gitignore` for the same reason — anything written there is fixture, not feature.
@@ -98,12 +99,13 @@ No `medium-priority` — absence of a high/low label means medium.
 | Milestone | Protocol | Theme |
 |---|---|---|
 | `v0.2` | 2.0 | Stable protocol + per-connection tier system + agent-feedback fixes |
-| `v0.3` | 3.0 | Privsep dispatcher (privileged dispatcher + tier-restricted workers) |
-| `v0.4` | 4.0 | SSPI auth + caller impersonation (per-connection workers under the caller's identity) |
+| `v0.3` (this branch) | 2.1 → 2.2-rc | CRUDX tier vocabulary, `clipboard.get/set`, `directory.*` split, spec-driven schemas, three-family rebuild |
+| `v0.3` (later) | 3.0 | Privsep dispatcher (privileged dispatcher + tier-restricted workers) — **future, not in this branch** |
+| `v0.4` | 4.0 | SSPI auth + caller impersonation — **future** |
 
-Each milestone bumps both the agent minor version (pre-1.0 — agent hasn't had a stable release yet) and the wire protocol major version (protocol changes between agent versions are dramatic and abrupt).
+Agent and protocol version lines move **independently** — do not assume they increment in lockstep. This branch is agent `v0.3.0`; the pinned `protocol/` submodule is `v2.2.0-rc.1` (aligned with the rebuild target).
 
-Most agent-surfaced asks live in v0.2. v0.3 and v0.4 are architectural increments that change the security model, not features.
+Most agent-surfaced asks live in v0.2/v0.3. The 3.0 / 4.0 rows are architectural increments that change the security model, not features.
 
 ## Filing issues with `gh`
 
@@ -132,7 +134,7 @@ Two gotchas: use `repos/` without a leading slash (Git Bash on Windows rewrites 
 ### Adding a new wire verb
 
 1. Spec it in `PROTOCOL.md` — verb name, args, success/error shape, tier requirement.
-2. Implement the handler in `agents/windows-modern/src/verbs/<namespace>.cpp` (and the planned NT agent if applicable).
+2. Implement the handler in each family's `src/verbs/<namespace>.cpp` (`windows-modern`, `windows-legacy`, `windows-classic`) as applicable to that family's capability surface.
 3. Register it in `agents/windows-modern/src/capabilities.cpp` so `system.capabilities` advertises it.
 4. Add a test in `tests/conformance/test_<namespace>.py`. Gate it with `needs_verb(capabilities, "<verb>")` so older agents skip rather than fail.
 5. *(When `mcp-server/` lands)* Wrap it as a named MCP tool with appropriate `destructiveHint` / `readOnlyHint` annotations.
@@ -180,20 +182,19 @@ Don't drop large design docs into this repo unprompted. A `docs/` folder, when n
 
 ## Binary naming convention
 
-The **current edge target** ships an unsuffixed binary; **legacy targets** carry a suffix:
+Binaries follow `rha-win.<family>.<arch>.exe`:
 
-- `agents/windows-modern/` (today's edge) → `remote-hands.exe`
-- `agents/windows-nt/` (future legacy build) → `remote-hands-nt.exe`
+- `windows-modern` → `rha-win.modern.x64.exe`, `rha-win.modern.x86.exe`
+- `windows-legacy` → `rha-win.legacy.x64.exe`, `rha-win.legacy.x86.exe`
+- `windows-classic` → `rha-win.classic.x86.exe`
 
-When the current edge is one day superseded by a newer target (e.g. an arm64- or v3-era successor), the new target takes the unsuffixed name and the present modern build is renamed at that handover (e.g. `remote-hands-mic.exe`). One-shot rename, documented in the release notes.
+Short, machine-parseable, unambiguous when multiple families are installed on one machine.
 
-The same rule applies to CMake targets: edge targets are `remote-hands` / `remote-hands-core` / `remote-hands-tests`; legacy targets carry the suffix (`remote-hands-nt`, etc.).
-
-mDNS service type (`_remote-hands._tcp.local.`) is target-agnostic; targets distinguish via the `os=` TXT record field.
+mDNS service type (`_remote-hands._tcp.local.`) is family-agnostic; families distinguish via the `os=` TXT record field.
 
 ## Future structure decisions (don't pre-empt)
 
-- **v0.3 privsep dispatcher (Protocol 3.0)** will need a second binary alongside the agent. Two viable shapes — flat (`agents/windows-modern/dispatcher.cpp` + `worker.cpp` in the same target) or nested (`agents/windows-modern/{dispatcher,worker}/` separate targets). Decide when the work starts; current single-target structure is right for v0.2.
+- **Privsep dispatcher (Protocol 3.0)** is a *future* increment — **not part of the v0.3.0 rebuild**. It will add a dispatcher/worker split (single binary, `--dispatcher` / `--worker` modes). Do not pre-build it; the current per-family single-target structure is correct for v0.3.0.
 - **`mcp-server/tools.py`** holds all named tools today. If it grows past ~50 tools, split into a `mcp-server/tools/` package by category (`capture.py`, `input.py`, `files.py`, etc.). Don't pre-split.
 - **`client/`** holds Python-only references today. If a non-Python client appears (TS, Go), move existing files under `client/python/` and add the new client alongside. Don't pre-create empty language directories.
 

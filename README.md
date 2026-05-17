@@ -10,7 +10,7 @@
 
 A small TCP agent that gives AI coding agents remote hands on Windows machines — mouse, keyboard, screenshots, process control, file I/O, UI Automation, window management — over a single line-oriented socket.
 
-Built for [Claude Code](https://docs.claude.com/en/docs/claude-code) and other MCP-aware LLM clients to drive virtual or physical Windows machines. Multi-target by design: the modern build (Windows 10 / 11) is in **v0.2.0 release-candidate** today (Protocol 2.0); a planned legacy build (Windows NT through Server 2003) will share the same wire protocol so the same controller speaks to both.
+Built for [Claude Code](https://docs.claude.com/en/docs/claude-code) and other MCP-aware LLM clients to drive virtual or physical Windows machines. Multi-target by design: this is the **v0.3.0 rebuild** with three agent builds — `windows-modern` (Win 10 1809+), `windows-legacy` (XP SP3 → Win 10 1803), and `windows-classic` (NT 4 / Win 9x / Win 2000) — all speaking the same wire protocol so one controller drives every Windows era.
 
 ## Why
 
@@ -105,12 +105,13 @@ To wire it into Claude Code (once `mcp-server/` lands — see the Roadmap), drop
 
 | Path | Purpose |
 |---|---|
-| [`PROTOCOL.md`](PROTOCOL.md) | v2 wire-protocol spec — length-prefixed framing, structured errors, three-tier permission model, 66 verbs across 11 namespaces |
+| [`PROTOCOL.md`](PROTOCOL.md) | Human-readable wire-protocol reference. The canonical machine-readable spec is the `protocol/` git submodule; this file is a rendered companion. CRUDX five-tier permission model. |
 | [`docs/windows-automation-notes.md`](docs/windows-automation-notes.md) | Operational gotchas — MSI mutex, Session 0 isolation, foreground lock policy, integrity-level pitfalls |
 | [`agents/windows-modern/`](agents/windows-modern/) | Windows 10 / 11 agent — C++17, IUIAutomation, WIC for PNG, hand-rolled mDNS responder. Built with CMake. |
 | [`tests/conformance/`](tests/conformance/) | Python pytest suite — capability-gated tests across all 11 namespaces; runs against any agent that speaks the protocol |
 | [`agents/windows-modern/tests/unit/`](agents/windows-modern/tests/unit/) | doctest unit tests for the pure-logic modules (framing, JSON, error codes, tier model) |
-| `agents/windows-nt/` | *(planned)* Legacy agent (NT 4 → Server 2003) — straight C, WinSock, GDI BitBlt |
+| [`agents/windows-legacy/`](agents/windows-legacy/) | C++17 agent for Windows XP SP3 → Windows 10 1803 — GDI/GDI+ capture, classic input. Built with CMake (VS2017 v141_xp). |
+| [`agents/windows-classic/`](agents/windows-classic/) | C89 agent for Windows NT 4 SP6a / Win 9x → Windows 2000 — WinSock, GDI BitBlt, `build.bat` (VS6 on an XP SP3 VM) |
 | [`mcp-server/`](mcp-server/) | Python MCP bridge — exposes wire verbs as named tools to MCP-aware clients (Claude Code, Claude Desktop, …) with tier-aware tool filtering |
 | `client/hostctl` | *(planned)* Reference Python CLI |
 | `client/hostctl-discover` | *(planned)* mDNS LAN scanner |
@@ -124,7 +125,7 @@ To wire it into Claude Code (once `mcp-server/` lands — see the Roadmap), drop
 Three layers:
 
 1. **Agent** — a single binary per target OS family. Listens on TCP `8765` (configurable). Runs in the user's interactive desktop session via Task Scheduler logon-task autostart so it can drive the visible UI.
-2. **Wire protocol** — length-prefixed framing over plain TCP. 66 verbs across 11 namespaces (`screen`, `window`, `input`, `element`, `file`, `process`, `registry`, `clipboard`, `system`, `watch`, `connection`). Three-tier permission model (`observe` / `drive` / `power`) with file-token elevation. Subscription-based streaming via `watch.*` verbs and out-of-band `EVENT` frames. Every agent advertises its capability set in `system.info` and `system.capabilities` so clients negotiate features without breaking on older or restricted builds.
+2. **Wire protocol** — defined by the `protocol/` git submodule (the canonical spec). CRUDX five-tier permission model (`read` < `create` < `update` < `delete` < `extra_risky`) with file-token elevation via `connection.tier_raise`. Subscription-based streaming via `watch.*` verbs and out-of-band `EVENT` frames. Every agent advertises its capability set in `system.info` and `system.capabilities` so clients negotiate features without breaking on older or restricted builds.
 3. **MCP server (or any client)** *(planned)* — bridges the wire protocol to a higher-level interface. The Python MCP server will expose named tools to Claude Code, filter them by what the agent advertises, and use description copy + MCP annotations to nudge the model toward semantic actions (`click_element` over `click(x,y)`, `find_element` over OCR).
 
 Connections are per-thread, capped at the agent's advertised `max_connections` (default 4). `watch.*` subscriptions hold one connection for their duration; clients open side connections for interleaved commands.
@@ -151,10 +152,10 @@ Three architectural increments tracked as GitHub milestones:
 
 | Milestone | Protocol | Theme | Notes |
 |---|---|---|---|
-| **v0.2** | 2.0 | Stable protocol + per-connection tier system + agent-feedback fixes | First ratified Protocol 2.0. Three-tier model (`observe` / `drive` / `power`) gated by `connection.tier_raise`, file-token auth, and a backlog of observability + ergonomics improvements surfaced by real LLM driving sessions. Single-process. |
-| **v0.3** | 2.1 | CRUDX tier vocabulary + spec-driven schemas | Renames the wire tiers to a five-rung CRUDX ladder (`read` < `create` < `update` < `delete` < `extra_risky`); renames `clipboard.read`/`write` to `clipboard.get`/`set`; the bridge's `tools/list` schemas are now lifted from `Repos/Protocol/spec/verbs/*.json`. Wire-breaking; clean cut, no aliases. |
-| **v0.3** | 3.0 | Privsep dispatcher | Privileged dispatcher process + tier-restricted worker processes. OS-enforced separation: the kernel refuses out-of-tier operations regardless of agent code paths. Compromise containment. |
-| **v0.4** | 4.0 | SSPI auth + caller impersonation | Per-connection workers spawned under the authenticated caller's Windows identity. Filesystem and registry ACLs match the caller's permissions, not the agent's. Full WinRM-style auth model. |
+| **v0.2** | 2.0 | Stable protocol + per-connection tier system + agent-feedback fixes | First ratified Protocol 2.0. Three-tier model (`observe` / `drive` / `power`) gated by `connection.tier_raise`, file-token auth. Single-process. |
+| **v0.3** *(current)* | 2.1 → 2.2-rc | CRUDX tier vocabulary, spec-driven schemas, three-family rebuild | Five-rung CRUDX ladder (`read` < `create` < `update` < `delete` < `extra_risky`); `clipboard.read`/`write` → `clipboard.get`/`set`; `directory.*` split from `file.*`; tool schemas lifted from the `protocol/` submodule. Three agent families. Wire-breaking; clean cut, no aliases. |
+| **v0.3** *(later)* | 3.0 | Privsep dispatcher | Privileged dispatcher process + tier-restricted worker processes. **Future — not in the current branch.** |
+| **v0.4** | 4.0 | SSPI auth + caller impersonation | Per-connection workers under the authenticated caller's Windows identity. **Future.** |
 
 [Open issues by milestone →](https://github.com/WilliamIsted/agent-remote-hands/milestones)
 

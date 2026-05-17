@@ -1,7 +1,9 @@
 # Wire protocol
 
-**Version:** 2.1
-**Status:** Stable.
+**Version:** 2.2 (tracks the `protocol/` submodule, currently `v2.2.0-rc.1`)
+**Status:** Release candidate.
+
+> **Canonical spec:** the machine-readable source of truth is the `protocol/` git submodule (`spec/verbs/*.json` plus generated `dist/`). This file is a human-readable companion — if the two diverge, the submodule wins.
 
 The Agent Remote Hands wire protocol is a line-oriented, length-prefixed, request/response protocol over plain TCP. Clients send verbs; agents respond with `OK`, `ERR`, or out-of-band `EVENT` frames for active subscriptions.
 
@@ -235,8 +237,8 @@ Field semantics:
 |---|---|---|
 | `name` | string | Agent product name (e.g. `agent-remote-hands`) |
 | `version` | string | Agent build version (e.g. `2.0.0+abc123`) |
-| `protocol` | string | Wire protocol version. MUST be `"2.0"` for this spec. |
-| `os` | string | Target identifier: `windows-modern`, `windows-nt`, etc. |
+| `protocol` | string | Wire protocol version. `"2.2"` for this spec (submodule `v2.2.0-rc.1`). |
+| `os` | string | Family identifier: `windows-modern`, `windows-legacy`, `windows-classic`. |
 | `arch` | string | `x86`, `x64`, `arm64` |
 | `hostname` | string | Target machine hostname |
 | `user` | string | Run-as account name |
