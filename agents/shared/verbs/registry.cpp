@@ -38,6 +38,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shlwapi.h>  // SHDeleteKeyW — XP-compatible recursive registry key delete
 
 namespace remote_hands::registry_verbs {
 
@@ -447,7 +448,9 @@ void delete_(Connection& conn, const wire::Request& req) {
             RegCloseKey(hkey);
         }
     } else {
-        status = RegDeleteTreeW(root, subkey.c_str());
+        // RegDeleteTreeW is Vista+; SHDeleteKeyW is XP-compatible and equivalent
+        // for recursive subtree deletion (shlwapi already linked).
+        status = SHDeleteKeyW(root, subkey.c_str());
     }
 
     if (status != ERROR_SUCCESS) {

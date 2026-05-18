@@ -16,6 +16,7 @@
 
 # CMake build trees (one per agent target)
 agents/*/build/
+agents/*/build-*/
 
 # Visual Studio per-user state
 *.user

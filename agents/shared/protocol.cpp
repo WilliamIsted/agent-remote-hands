@@ -169,9 +169,9 @@ std::vector<std::byte> Reader::read_payload(std::size_t length) {
 
 Writer::Writer(SOCKET socket) : socket_{socket} {}
 
-void Writer::write_raw(std::span<const std::byte> bytes) {
-    const char* p = reinterpret_cast<const char*>(bytes.data());
-    std::size_t remaining = bytes.size();
+void Writer::write_raw(ByteView bytes) {
+    const char* p = reinterpret_cast<const char*>(bytes.data);
+    std::size_t remaining = bytes.size;
     while (remaining > 0) {
         const int chunk = static_cast<int>(std::min<std::size_t>(remaining, INT_MAX));
         const int n = send(socket_, p, chunk, 0);
@@ -184,7 +184,7 @@ void Writer::write_raw(std::span<const std::byte> bytes) {
 }
 
 void Writer::write_raw(std::string_view sv) {
-    write_raw(std::span{
+    write_raw(ByteView{
         reinterpret_cast<const std::byte*>(sv.data()), sv.size()});
 }
 
@@ -193,11 +193,11 @@ void Writer::write_ok() {
     write_raw(std::string_view{"OK 0\n"});
 }
 
-void Writer::write_ok(std::span<const std::byte> payload) {
+void Writer::write_ok(ByteView payload) {
     std::lock_guard lock{mutex_};
     char header[32];
     const int n = std::snprintf(header, sizeof(header),
-                                "OK %zu\n", payload.size());
+                                "OK %zu\n", payload.size);
     if (n <= 0) throw std::runtime_error("header format failed");
     write_raw(std::string_view{header, static_cast<std::size_t>(n)});
     if (!payload.empty()) {
@@ -206,7 +206,7 @@ void Writer::write_ok(std::span<const std::byte> payload) {
 }
 
 void Writer::write_ok(std::string_view payload) {
-    write_ok(std::span{
+    write_ok(ByteView{
         reinterpret_cast<const std::byte*>(payload.data()), payload.size()});
 }
 
@@ -236,14 +236,14 @@ void Writer::write_err(ErrorCode code, std::string_view detail_json) {
 }
 
 void Writer::write_event(std::string_view subscription_id,
-                         std::span<const std::byte> payload) {
+                         ByteView payload) {
     std::lock_guard lock{mutex_};
     char prefix[128];
     const int n = std::snprintf(prefix, sizeof(prefix),
                                 "EVENT %.*s %zu\n",
                                 static_cast<int>(subscription_id.size()),
                                 subscription_id.data(),
-                                payload.size());
+                                payload.size);
     if (n <= 0) throw std::runtime_error("event header format failed");
     write_raw(std::string_view{prefix, static_cast<std::size_t>(n)});
     if (!payload.empty()) {
@@ -254,8 +254,8 @@ void Writer::write_event(std::string_view subscription_id,
 void Writer::write_event(std::string_view subscription_id,
                          std::string_view payload) {
     write_event(subscription_id,
-                std::span{reinterpret_cast<const std::byte*>(payload.data()),
-                          payload.size()});
+                ByteView{reinterpret_cast<const std::byte*>(payload.data()),
+                         payload.size()});
 }
 
 }  // namespace remote_hands::wire

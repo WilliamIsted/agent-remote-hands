@@ -210,7 +210,7 @@ sub-second wall clock.
 
 For end-to-end verification against a real agent:
 
-1. Run an agent on a Windows host: `remote-hands.exe --discoverable`
+1. Run an agent on a Windows host: `rha-win.modern.x64.exe --discoverable`
 2. Set `REMOTE_HANDS_HOST` to that host
 3. Wire up `.mcp.json` and start an LLM session — the bridge starts on demand
 4. Ask the LLM to call `system.info` — you should see the agent's `system.info` JSON

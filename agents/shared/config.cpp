@@ -14,30 +14,23 @@
 
 #include "config.hpp"
 
+#include "platform.hpp"
+
 #include <cstdlib>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <shlobj.h>
-
 namespace remote_hands {
 
 namespace {
 
 std::filesystem::path default_token_path() {
-    PWSTR program_data = nullptr;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &program_data))) {
-        std::filesystem::path p{program_data};
-        CoTaskMemFree(program_data);
-        p /= L"AgentRemoteHands";
-        p /= L"token";
-        return p;
+    const auto program_data = platform::get_program_data_path();
+    if (!program_data.empty()) {
+        return std::filesystem::path{program_data} / L"AgentRemoteHands" / L"token";
     }
-    // Fallback if SHGetKnownFolderPath fails for any reason.
     return L"C:\\ProgramData\\AgentRemoteHands\\token";
 }
 
@@ -64,7 +57,7 @@ EnvBuf get_env(const wchar_t* name) {
 [[noreturn]] void print_usage_and_exit() {
     std::wprintf(LR"(Agent Remote Hands - windows-modern v2 agent
 
-Usage: remote-hands.exe [options]
+Usage: rha-win.modern.x64.exe [options]
 
 Options:
   --port <n>              TCP port to listen on (default: 8765)

@@ -122,7 +122,10 @@ struct Server::Impl {
             }
 
             char ipbuf[INET_ADDRSTRLEN] = {};
-            inet_ntop(AF_INET, &client_addr.sin_addr, ipbuf, sizeof(ipbuf));
+            // inet_ntop is Vista+; inline byte-format works on XP and all later OS.
+            const auto& ab = client_addr.sin_addr.S_un.S_un_b;
+            std::snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
+                          ab.s_b1, ab.s_b2, ab.s_b3, ab.s_b4);
             log::info(L"Accepted connection from %hs:%u",
                       ipbuf, static_cast<unsigned>(ntohs(client_addr.sin_port)));
 

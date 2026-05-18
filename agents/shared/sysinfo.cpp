@@ -14,14 +14,14 @@
 
 #include "sysinfo.hpp"
 
-#include <array>
+#include "platform.hpp"
+
 #include <memory>
 #include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <lmcons.h>
-#include <sddl.h>
 
 namespace remote_hands::sysinfo {
 
@@ -73,6 +73,11 @@ std::vector<BYTE> query_token(HANDLE token, TOKEN_INFORMATION_CLASS klass) {
 std::string arch() {
     SYSTEM_INFO si{};
     GetNativeSystemInfo(&si);
+    // PROCESSOR_ARCHITECTURE_ARM64 (12) was added in later SDK versions;
+    // guard for v141_xp toolset which uses the v7.1A Platform SDK.
+#ifndef PROCESSOR_ARCHITECTURE_ARM64
+#define PROCESSOR_ARCHITECTURE_ARM64 12
+#endif
     switch (si.wProcessorArchitecture) {
         case PROCESSOR_ARCHITECTURE_AMD64: return "x64";
         case PROCESSOR_ARCHITECTURE_INTEL: return "x86";
@@ -98,22 +103,14 @@ std::string current_user() {
     return narrow(buf, len);
 }
 
+std::string integrity_level_from_token(HANDLE token) {
+    return platform::get_integrity_level(token);
+}
+
 std::string integrity_level() {
     TokenHandle tok;
     if (!open_process_token(tok, TOKEN_QUERY)) return {};
-
-    auto buf = query_token(tok.h, TokenIntegrityLevel);
-    if (buf.empty()) return {};
-
-    const auto* tml = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(buf.data());
-    PSID sid = tml->Label.Sid;
-    const DWORD rid = *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1);
-
-    if (rid <  SECURITY_MANDATORY_LOW_RID)         return "untrusted";
-    if (rid <  SECURITY_MANDATORY_MEDIUM_RID)      return "low";
-    if (rid <  SECURITY_MANDATORY_HIGH_RID)        return "medium";
-    if (rid <  SECURITY_MANDATORY_SYSTEM_RID)      return "high";
-    return "system";
+    return integrity_level_from_token(tok.h);
 }
 
 bool uiaccess_enabled() {

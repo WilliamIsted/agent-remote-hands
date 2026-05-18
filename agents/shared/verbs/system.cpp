@@ -18,19 +18,21 @@
 //   system.info                  (read)
 //   system.capabilities          (read)
 //   system.health                (read)
-//   system.shutdown_blockers     (read)
-//   system.lock                  (read)
-//   system.reboot                (extra_risky)
-//   system.shutdown              (extra_risky)
-//   system.logoff                (extra_risky)
-//   system.hibernate             (extra_risky)
-//   system.sleep                 (extra_risky)
+//   system.power.blockers        (read)
+//   system.power.lock            (read)
+//   system.power.reboot          (extra_risky)
+//   system.power.shutdown        (extra_risky)
+//   system.power.logoff          (extra_risky)
+//   system.power.hibernate       (extra_risky)
+//   system.power.sleep           (extra_risky)
+//   system.power.cancel          (extra_risky)
 
 #include "../capabilities.hpp"
 #include "../connection.hpp"
 #include "../errors.hpp"
 #include "../json.hpp"
 #include "../log.hpp"
+#include "../platform.hpp"
 #include "../sysinfo.hpp"
 
 #include <chrono>
@@ -102,6 +104,12 @@ void info(Connection& conn, const wire::Request&) {
     // Image formats: BMP (raw) and PNG (via WIC). WebP arrives with libwebp.
     json::append_string(j, "image_formats");
     j += ":[\"png\",\"bmp\"]";
+    j += ',';
+    // OCR capabilities (probed at startup via platform::init_ocr()).
+    const auto& ocr = platform::ocr_capabilities();
+    json::append_string_array(j, "ocr_languages", ocr.languages);  j += ',';
+    json::append_kv_int(j, "ocr_max_dimension", ocr.max_dimension); j += ',';
+    json::append_string_array(j, "ocr_input_formats", ocr.formats);
     j += '}';
 
     j += '}';

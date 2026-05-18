@@ -629,7 +629,7 @@ Both are deterministic: callers can branch on the code rather than retrying blin
 
 ### 8.4 Workarounds for cross-IL automation
 
-1. **Spawn a second, elevated agent.** Run a second `remote-hands.exe --port 8766` under an elevated token. The Medium-IL agent handles ordinary automation; the elevated one drives installer wizards. Callers pick the agent that matches the target window's IL.
+1. **Spawn a second, elevated agent.** Run a second `rha-win.modern.x64.exe --port 8766` under an elevated token. The Medium-IL agent handles ordinary automation; the elevated one drives installer wizards. Callers pick the agent that matches the target window's IL.
 2. **Sign the agent with `uiAccess="true"`.** Embedding `<requestedExecutionLevel uiAccess="true" level="asInvoker"/>` in the manifest, signing with a trusted code-signing certificate, and installing the binary under `Program Files` exempts the agent from UIPI without making it elevated. This is the path accessibility tools use; once `system.info.uiaccess=true`, cross-IL input verbs work as if the agent were High-IL.
 3. **`--install` with the registering user already in `BUILTIN\Administrators`.** The installed Task Scheduler task uses `HighestAvailable`; if the user is an admin, the task runs elevated on their next logon, making the agent itself High-IL.
 

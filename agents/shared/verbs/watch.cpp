@@ -147,7 +147,7 @@ protected:
                 if (!first && h != prev_hash) {
                     auto encoded = image::encode_png(frame);
                     if (!encoded.empty()) {
-                        emit_bytes(std::span<const std::byte>(encoded));
+                        emit_bytes(wire::ByteView{encoded.data(), encoded.size()});
                     }
                     return;  // auto-cancel
                 }
@@ -156,7 +156,7 @@ protected:
             } else {
                 auto encoded = image::encode_png(frame);
                 if (!encoded.empty()) {
-                    emit_bytes(std::span<const std::byte>(encoded));
+                    emit_bytes(wire::ByteView{encoded.data(), encoded.size()});
                 }
             }
 
@@ -273,8 +273,10 @@ private:
         const std::string utf8 = text::wide_to_utf8(title, static_cast<std::size_t>(len));
         if (utf8.size() < ctx->prefix.size()) return TRUE;
         for (std::size_t i = 0; i < ctx->prefix.size(); ++i) {
-            if (std::tolower(static_cast<unsigned char>(utf8[i])) !=
-                std::tolower(static_cast<unsigned char>(ctx->prefix[i]))) {
+            // Use ::tolower (global namespace) — v141 name lookup finds the locale
+            // two-argument std::tolower before the cctype one-argument version.
+            if (::tolower(static_cast<unsigned char>(utf8[i])) !=
+                ::tolower(static_cast<unsigned char>(ctx->prefix[i]))) {
                 return TRUE;
             }
         }

@@ -82,34 +82,45 @@ option(REMOTE_HANDS_BUILD_TESTS
 add_library(remote-hands-core STATIC)
 
 target_sources(remote-hands-core PRIVATE
-    src/config.cpp
-    src/server.cpp
-    src/protocol.cpp
-    src/connection.cpp
-    src/token.cpp
-    src/capabilities.cpp
-    src/sysinfo.cpp
-    src/uipi.cpp
-    src/element_table.cpp
-    src/screen_capture.cpp
-    src/image_encode.cpp
-    src/subscription.cpp
-    src/crash_check.cpp
-    src/mdns.cpp
+    # Shared sources (platform-agnostic logic)
+    ../shared/config.cpp
+    ../shared/server.cpp
+    ../shared/protocol.cpp
+    ../shared/connection.cpp
+    ../shared/token.cpp
+    ../shared/capabilities.cpp
+    ../shared/sysinfo.cpp
+    ../shared/uipi.cpp
+    ../shared/element_table.cpp
+    ../shared/screen_capture.cpp
+    ../shared/image_encode.cpp
+    ../shared/subscription.cpp
+    ../shared/crash_check.cpp
+    ../shared/mdns.cpp
     # verbs (one file per namespace)
-    src/verbs/system.cpp
-    src/verbs/window.cpp
-    src/verbs/input.cpp
-    src/verbs/clipboard.cpp
-    src/verbs/registry.cpp
-    src/verbs/process.cpp
-    src/verbs/file.cpp
-    src/verbs/element.cpp
-    src/verbs/screen.cpp
-    src/verbs/watch.cpp
+    ../shared/verbs/system.cpp
+    ../shared/verbs/window.cpp
+    ../shared/verbs/input.cpp
+    ../shared/verbs/clipboard.cpp
+    ../shared/verbs/registry.cpp
+    ../shared/verbs/process.cpp
+    ../shared/verbs/file.cpp
+    ../shared/verbs/element.cpp
+    ../shared/verbs/screen.cpp
+    ../shared/verbs/watch.cpp
+    ../shared/verbs/vision.cpp
+    # Platform implementations (windows-modern specific)
+    platform/rng.cpp
+    platform/integrity.cpp
+    platform/image_encode.cpp
+    platform/net_parse.cpp
+    platform/known_folder.cpp
+    platform/ocr.cpp
 )
 
-target_include_directories(remote-hands-core PUBLIC src)
+target_include_directories(remote-hands-core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../shared
+)
 
 target_link_libraries(remote-hands-core PUBLIC
     ws2_32              # Winsock
@@ -125,6 +136,7 @@ target_link_libraries(remote-hands-core PUBLIC
     bcrypt              # BCryptGenRandom (token entropy)
     powrprof            # SetSuspendState (system.hibernate / sleep)
     shlwapi             # PathMatchSpec (watch.file)
+    runtimeobject       # WinRT RoInitialize / RoGetActivationFactory (vision.ocr)
 )
 
 # ---------------------------------------------------------------------------
@@ -134,7 +146,7 @@ add_executable(remote-hands src/main.cpp)
 target_link_libraries(remote-hands PRIVATE remote-hands-core)
 
 set_target_properties(remote-hands PROPERTIES
-    OUTPUT_NAME "remote-hands"
+    OUTPUT_NAME "rha-win.modern.x64"
     SUFFIX ".exe"
 )
 

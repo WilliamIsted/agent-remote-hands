@@ -61,15 +61,15 @@ jobs:
           $zipName = "agent-remote-hands-$version-x64.zip"
 
           $stage = New-Item -ItemType Directory -Force -Path 'release-staging'
-          Copy-Item agents/windows-modern/build/Release/remote-hands.exe $stage.FullName
+          Copy-Item agents/windows-modern/build/Release/rha-win.modern.x64.exe $stage.FullName
           # Ship the matching Release PDB so production crash dumps can be
           # symbolicated without a rebuild (which would produce a fresh,
           # non-matching PDB GUID). The build emits this when /Zi + /DEBUG
           # are set in CMakeLists.txt's Release config.
-          if (Test-Path agents/windows-modern/build/Release/remote-hands.pdb) {
-            Copy-Item agents/windows-modern/build/Release/remote-hands.pdb $stage.FullName
+          if (Test-Path agents/windows-modern/build/Release/rha-win.modern.x64.pdb) {
+            Copy-Item agents/windows-modern/build/Release/rha-win.modern.x64.pdb $stage.FullName
           } else {
-            Write-Warning "remote-hands.pdb not found — release will ship without symbols."
+            Write-Warning "rha-win.modern.x64.pdb not found — release will ship without symbols."
           }
           Copy-Item Tools/install-agent.ps1 $stage.FullName
           Copy-Item README.md $stage.FullName

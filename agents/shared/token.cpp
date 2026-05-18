@@ -15,16 +15,10 @@
 #include "token.hpp"
 
 #include "log.hpp"
+#include "platform.hpp"
 
-#include <array>
 #include <fstream>
 #include <stdexcept>
-
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <bcrypt.h>
-
-#pragma comment(lib, "bcrypt.lib")
 
 namespace remote_hands {
 
@@ -33,14 +27,9 @@ namespace {
 constexpr std::size_t kTokenBytes = 32;          // 256 bits
 
 std::string generate_hex_token() {
-    std::array<std::uint8_t, kTokenBytes> raw{};
-    const NTSTATUS status = BCryptGenRandom(
-        nullptr,
-        raw.data(),
-        static_cast<ULONG>(raw.size()),
-        BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-    if (status != 0) {
-        throw std::runtime_error("BCryptGenRandom failed");
+    const auto raw = platform::generate_random_bytes(kTokenBytes);
+    if (raw.size() != kTokenBytes) {
+        throw std::runtime_error("generate_random_bytes returned wrong size");
     }
 
     static constexpr char kHex[] = "0123456789abcdef";

@@ -15,11 +15,18 @@
 #include "capabilities.hpp"
 
 #include "connection.hpp"
+#include "platform.hpp"
 
 #include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <versionhelpers.h>
 
 namespace remote_hands {
 
@@ -71,7 +78,6 @@ namespace registry_verbs {
     void read(Connection&, const wire::Request&);
     void write(Connection&, const wire::Request&);
     void delete_(Connection&, const wire::Request&);
-    void wait(Connection&, const wire::Request&);
 }  // namespace registry_verbs
 
 namespace process_verbs {
@@ -98,7 +104,7 @@ namespace file_verbs {
     void directory_stat(Connection&, const wire::Request&);    // wire: directory.stat
     void directory_exists(Connection&, const wire::Request&);  // wire: directory.exists
     void directory_rename(Connection&, const wire::Request&);  // wire: directory.rename
-    void directory_remove(Connection&, const wire::Request&);  // wire: directory.remove
+    void directory_remove(Connection&, const wire::Request&);  // wire: directory.delete
 }  // namespace file_verbs
 
 namespace element_verbs {
@@ -122,6 +128,10 @@ namespace screen_verbs {
     void capture(Connection&, const wire::Request&);
 }  // namespace screen_verbs
 
+namespace vision_verbs {
+    void ocr(Connection&, const wire::Request&);
+}  // namespace vision_verbs
+
 namespace watch_verbs {
     void region(Connection&, const wire::Request&);
     void process(Connection&, const wire::Request&);
@@ -136,19 +146,23 @@ namespace watch_verbs {
 
 namespace {
 
+static AgentFamily g_family        = AgentFamily::Modern;
+static bool        g_uia_available = false;
+static bool        g_vista_plus    = false;
+
 const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
     static const std::unordered_map<std::string_view, VerbEntry> kVerbs{
         // system.*
         {"system.info",                {Tier::Read,       &system_verbs::info}},
         {"system.capabilities",        {Tier::Read,       &system_verbs::capabilities}},
         {"system.health",              {Tier::Read,       &system_verbs::health}},
-        {"system.lock",                {Tier::Read,       &system_verbs::lock}},
-        {"system.shutdown_blockers",   {Tier::Read,       &system_verbs::shutdown_blockers}},
-        {"system.reboot",              {Tier::ExtraRisky, &system_verbs::reboot}},
-        {"system.shutdown",            {Tier::ExtraRisky, &system_verbs::shutdown}},
-        {"system.logoff",              {Tier::ExtraRisky, &system_verbs::logoff}},
-        {"system.hibernate",           {Tier::ExtraRisky, &system_verbs::hibernate}},
-        {"system.sleep",               {Tier::ExtraRisky, &system_verbs::sleep}},
+        {"system.power.lock",          {Tier::Read,       &system_verbs::lock}},
+        {"system.power.blockers",      {Tier::Read,       &system_verbs::shutdown_blockers}},
+        {"system.power.reboot",        {Tier::ExtraRisky, &system_verbs::reboot}},
+        {"system.power.shutdown",      {Tier::ExtraRisky, &system_verbs::shutdown}},
+        {"system.power.logoff",        {Tier::ExtraRisky, &system_verbs::logoff}},
+        {"system.power.hibernate",     {Tier::ExtraRisky, &system_verbs::hibernate}},
+        {"system.power.sleep",         {Tier::ExtraRisky, &system_verbs::sleep}},
         {"system.power.cancel",        {Tier::ExtraRisky, &system_verbs::power_cancel}},
 
         // window.*
@@ -160,11 +174,11 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"window.state",               {Tier::Read,       &window_verbs::state}},
 
         // input.*
-        {"input.click",                {Tier::Update,     &input_verbs::click}},
-        {"input.move",                 {Tier::Update,     &input_verbs::move}},
-        {"input.scroll",               {Tier::Update,     &input_verbs::scroll}},
-        {"input.key",                  {Tier::Update,     &input_verbs::key}},
-        {"input.type",                 {Tier::Update,     &input_verbs::type}},
+        {"input.mouse.click",          {Tier::Update,     &input_verbs::click}},
+        {"input.mouse.move",           {Tier::Update,     &input_verbs::move}},
+        {"input.mouse.scroll",         {Tier::Update,     &input_verbs::scroll}},
+        {"input.keyboard.key",         {Tier::Update,     &input_verbs::key}},
+        {"input.keyboard.type",        {Tier::Update,     &input_verbs::type}},
         {"input.send_message",         {Tier::Update,     &input_verbs::send_message}},
         {"input.post_message",         {Tier::Update,     &input_verbs::post_message}},
 
@@ -173,10 +187,11 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"clipboard.set",              {Tier::Update,     &clipboard_verbs::set}},
 
         // registry.*
-        {"registry.read",              {Tier::Read,       &registry_verbs::read}},
-        {"registry.write",             {Tier::Update,     &registry_verbs::write}},
-        {"registry.delete",            {Tier::Delete,     &registry_verbs::delete_}},
-        {"registry.wait",              {Tier::Read,       &registry_verbs::wait}},
+        {"registry.key.read",          {Tier::Read,       &registry_verbs::read}},
+        {"registry.value.create",      {Tier::Create,     &registry_verbs::write}},
+        {"registry.value.update",      {Tier::Update,     &registry_verbs::write}},
+        {"registry.value.delete",      {Tier::Delete,     &registry_verbs::delete_}},
+        {"registry.key.delete",        {Tier::Delete,     &registry_verbs::delete_}},
 
         // process.*
         {"process.list",               {Tier::Read,       &process_verbs::list}},
@@ -201,7 +216,7 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"directory.exists",           {Tier::Read,       &file_verbs::directory_exists}},
         {"directory.create",           {Tier::Create,     &file_verbs::mkdir}},
         {"directory.rename",           {Tier::Update,     &file_verbs::directory_rename}},
-        {"directory.remove",           {Tier::Delete,     &file_verbs::directory_remove}},
+        {"directory.delete",           {Tier::Delete,     &file_verbs::directory_remove}},
 
         // element.*
         {"element.list",               {Tier::Read,       &element_verbs::list}},
@@ -222,6 +237,9 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         // screen.*
         {"screen.capture",             {Tier::Read,       &screen_verbs::capture}},
 
+        // vision.*
+        {"vision.ocr",                 {Tier::Read,       &vision_verbs::ocr}},
+
         // watch.*
         {"watch.region",               {Tier::Read,       &watch_verbs::region}},
         {"watch.process",              {Tier::Read,       &watch_verbs::process}},
@@ -236,7 +254,39 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
 
 }  // namespace
 
+void init_capabilities(AgentFamily f) {
+    g_family = f;
+    if (f == AgentFamily::Legacy) {
+        // UIA probe: LOAD_LIBRARY_AS_DATAFILE maps the file without executing
+        // DllMain, so it is safe to call before CoInitializeEx.
+        HMODULE h = LoadLibraryExW(L"uiautomationcore.dll", nullptr,
+                                   LOAD_LIBRARY_AS_DATAFILE);
+        g_uia_available = (h != nullptr);
+        if (h) FreeLibrary(h);
+        g_vista_plus = IsWindowsVistaOrGreater();
+    }
+}
+
+bool verb_enabled(std::string_view verb) {
+    if (g_family == AgentFamily::Modern) return true;
+
+    // Legacy gating:
+    //   vision.ocr        — requires Windows.Media.Ocr (Win 8.1+, language pack installed)
+    //   system.power.blockers — requires ShutdownBlockReasonQuery (Vista+)
+    //   element.* / watch.element — require IUIAutomation (uiautomationcore.dll)
+    if (verb == "vision.ocr")
+        return !platform::ocr_capabilities().languages.empty();
+    if (verb == "system.power.blockers")
+        return g_vista_plus;
+    if (verb.size() >= 8 && verb.substr(0, 8) == "element.")
+        return g_uia_available;
+    if (verb == "watch.element")
+        return g_uia_available;
+    return true;
+}
+
 const VerbEntry* find_verb(std::string_view verb) {
+    if (!verb_enabled(verb)) return nullptr;
     const auto& tbl = verb_table();
     if (auto it = tbl.find(verb); it != tbl.end()) {
         return &it->second;
@@ -249,6 +299,7 @@ std::string build_capabilities_json() {
     out += '{';
     bool first = true;
     for (const auto& [name, entry] : verb_table()) {
+        if (!verb_enabled(name)) continue;   // skip verbs disabled for this family
         if (!first) out += ',';
         first = false;
         out += '"'; out.append(name); out += "\":{\"tier\":\"";
@@ -263,6 +314,7 @@ std::string build_namespaces_json_array() {
     std::set<std::string_view> namespaces;
     namespaces.insert("connection");
     for (const auto& [name, _] : verb_table()) {
+        if (!verb_enabled(name)) continue;   // skip disabled verbs
         const auto dot = name.find('.');
         if (dot != std::string_view::npos) {
             namespaces.insert(name.substr(0, dot));

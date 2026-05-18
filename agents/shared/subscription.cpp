@@ -67,7 +67,7 @@ void Subscription::emit(std::string_view json) {
     }
 }
 
-void Subscription::emit_bytes(std::span<const std::byte> bytes) {
+void Subscription::emit_bytes(wire::ByteView bytes) {
     try {
         writer_.write_event(id_, bytes);
     } catch (const std::exception& ex) {

@@ -36,13 +36,13 @@ scoop install agent-remote-hands
 agent-remote-hands-setup -Discoverable
 ```
 
-The `bin` field exposes both the agent (`remote-hands.exe`) and a
+The `bin` field exposes both the agent (`rha-win.modern.x64.exe`) and a
 shim for the installer script (`agent-remote-hands-setup`, alias for
 `install-agent.ps1`).
 
 ## Defender note
 
-If Scoop's download fails because Defender quarantines `remote-hands.exe`,
+If Scoop's download fails because Defender quarantines `rha-win.modern.x64.exe`,
 add a Defender exclusion for `~/scoop` first:
 
 ```powershell

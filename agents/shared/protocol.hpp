@@ -38,7 +38,6 @@
 #include <cstddef>
 #include <mutex>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -47,6 +46,13 @@
 #include <winsock2.h>
 
 namespace remote_hands::wire {
+
+// C++17-compatible view over a contiguous byte range (replaces std::span<const std::byte>).
+struct ByteView {
+    const std::byte* data;
+    std::size_t      size;
+    bool empty() const noexcept { return size == 0; }
+};
 
 constexpr std::size_t kMaxHeaderLineBytes = 65535;
 
@@ -113,7 +119,7 @@ public:
 
     // Success responses.
     void write_ok();                                                    // "OK 0\n"
-    void write_ok(std::span<const std::byte> payload);                  // "OK <len>\n<bytes>"
+    void write_ok(ByteView payload);                                      // "OK <len>\n<bytes>"
     void write_ok(std::string_view payload);                            // utf-8 convenience
 
     // Error responses. detail_json is the raw JSON body (caller-formatted).
@@ -122,12 +128,12 @@ public:
 
     // Asynchronous event for an active subscription.
     void write_event(std::string_view subscription_id,
-                     std::span<const std::byte> payload);
+                     ByteView payload);
     void write_event(std::string_view subscription_id,
                      std::string_view payload);
 
 private:
-    void write_raw(std::span<const std::byte> bytes);
+    void write_raw(ByteView bytes);
     void write_raw(std::string_view sv);
 
     SOCKET      socket_;

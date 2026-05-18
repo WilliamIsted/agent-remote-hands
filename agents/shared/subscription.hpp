@@ -27,7 +27,6 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
-#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -63,7 +62,7 @@ protected:
     void emit(std::string_view json);
 
     // Emits an EVENT frame with arbitrary bytes (e.g. a captured image).
-    void emit_bytes(std::span<const std::byte> bytes);
+    void emit_bytes(wire::ByteView bytes);
 
     bool should_stop() const noexcept { return stop_requested_.load(); }
 

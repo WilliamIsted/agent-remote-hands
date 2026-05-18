@@ -18,7 +18,7 @@
 
 .DESCRIPTION
     Adds a Microsoft Defender exclusion for the install directory, copies
-    remote-hands.exe into it, adds binary-scoped Windows Firewall rules,
+    rha-win.modern.x64.exe into it, adds binary-scoped Windows Firewall rules,
     and registers a Task Scheduler logon-task with restart-on-failure.
     Run from an elevated PowerShell.
 
@@ -34,7 +34,7 @@
       1. Get this .ps1 onto the VM (PS scripts are not flagged the same way).
       2. Run from elevated PowerShell with -PrepareDefender FIRST so the
          install directory is excluded BEFORE the binary lands. Then download
-         remote-hands.exe straight to the excluded path.
+         rha-win.modern.x64.exe straight to the excluded path.
       3. Run again normally (no -PrepareDefender) to do the actual install.
 
     Or use -SourceUrl to fetch the binary directly into the excluded path
@@ -42,12 +42,12 @@
     so the binary never touches a Defender-watched location.
 
 .PARAMETER Source
-    Local path to remote-hands.exe. Defaults to the binary next to this
+    Local path to rha-win.modern.x64.exe. Defaults to the binary next to this
     script, falling back to the repo build path
-    (../agents/windows-modern/build/Release/remote-hands.exe).
+    (../agents/windows-modern/build/Release/rha-win.modern.x64.exe).
 
 .PARAMETER SourceUrl
-    URL to fetch remote-hands.exe from instead of using a local file.
+    URL to fetch rha-win.modern.x64.exe from instead of using a local file.
     Downloads directly into the (excluded) install dir, bypassing
     Defender's typical Downloads-folder scan.
 
@@ -61,7 +61,7 @@
 .PARAMETER PrepareDefender
     Add the Defender exclusion ONLY. Use this on a fresh VM before
     downloading the binary so the destination path is already excluded
-    when remote-hands.exe arrives.
+    when rha-win.modern.x64.exe arrives.
 
 .PARAMETER SkipDefenderExclusion
     Don't add a Defender exclusion. The default behaviour adds one for
@@ -79,7 +79,7 @@
 
 .EXAMPLE
     # All-in-one: pull the binary from a URL into the excluded path.
-    .\install-agent.ps1 -SourceUrl https://example/remote-hands.exe -Discoverable
+    .\install-agent.ps1 -SourceUrl https://example/rha-win.modern.x64.exe -Discoverable
 
 .EXAMPLE
     # Local binary, full install.
@@ -104,7 +104,7 @@ $ErrorActionPreference = 'Stop'
 
 # Constants
 $InstallDir    = Join-Path $env:ProgramFiles 'AgentRemoteHands'
-$BinaryName    = 'remote-hands.exe'
+$BinaryName    = 'rha-win.modern.x64.exe'
 $BinaryPath    = Join-Path $InstallDir $BinaryName
 $TaskName      = 'AgentRemoteHands'
 $RuleName      = 'Agent Remote Hands'
@@ -168,7 +168,7 @@ function Resolve-Source {
     foreach ($c in $candidates) {
         if (Test-Path $c) { return (Resolve-Path $c).Path }
     }
-    throw "remote-hands.exe not found next to this script or in agents\windows-modern\build\Release\. Pass -Source <path> or -SourceUrl <url>."
+    throw "rha-win.modern.x64.exe not found next to this script or in agents\windows-modern\build\Release\. Pass -Source <path> or -SourceUrl <url>."
 }
 
 function Fetch-Source {
@@ -190,7 +190,7 @@ function Prepare-Defender {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Write-Host ""
     Write-Host "Defender prep complete. You can now:"
-    Write-Host "  1. Download remote-hands.exe directly to:  $InstallDir"
+    Write-Host "  1. Download rha-win.modern.x64.exe directly to:  $InstallDir"
     Write-Host "  2. Run: .\install-agent.ps1$(if ($Discoverable) {' -Discoverable'})"
 }
 
@@ -215,7 +215,7 @@ function Install-Agent {
         $src = Fetch-Source
     } else {
         $src = Resolve-Source
-        Write-Host "Installing remote-hands.exe to $InstallDir ..."
+        Write-Host "Installing rha-win.modern.x64.exe to $InstallDir ..."
         if ((Resolve-Path $src).Path -ne $BinaryPath) {
             Copy-Item -Path $src -Destination $BinaryPath -Force
             Write-Host "  binary -> $BinaryPath"

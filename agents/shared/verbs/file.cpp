@@ -45,7 +45,6 @@
 #include <charconv>
 #include <chrono>
 #include <cstdio>
-#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -152,7 +151,7 @@ void read(Connection& conn, const wire::Request& req) {
     CloseHandle(h);
 
     buf.resize(total);
-    conn.writer().write_ok(std::span<const std::byte>(buf));
+    conn.writer().write_ok(wire::ByteView{buf.data(), buf.size()});
 }
 
 // ---------------------------------------------------------------------------

@@ -33,7 +33,6 @@
 
 #include <charconv>
 #include <cstdio>
-#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -235,7 +234,7 @@ void capture(Connection& conn, const wire::Request& req) {
         return;
     }
 
-    conn.writer().write_ok(std::span<const std::byte>(encoded));
+    conn.writer().write_ok(wire::ByteView{encoded.data(), encoded.size()});
 }
 
 }  // namespace remote_hands::screen_verbs

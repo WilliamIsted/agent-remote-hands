@@ -10,14 +10,14 @@
         }
     },
     "bin": [
-        "remote-hands.exe",
+        "rha-win.modern.x64.exe",
         [
             "install-agent.ps1",
             "agent-remote-hands-setup"
         ]
     ],
     "notes": [
-        "remote-hands.exe is now on PATH. Before running, complete the system-level install (firewall + Task Scheduler logon-task with restart-on-failure):",
+        "rha-win.modern.x64.exe is now on PATH. Before running, complete the system-level install (firewall + Task Scheduler logon-task with restart-on-failure):",
         "",
         "  1. Open an elevated PowerShell.",
         "  2. agent-remote-hands-setup -Discoverable",

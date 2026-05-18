@@ -20,8 +20,6 @@
 #include "protocol.hpp"
 #include "sysinfo.hpp"
 
-#include <vector>
-
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <sddl.h>
@@ -30,16 +28,6 @@ namespace remote_hands::uipi {
 
 namespace {
 
-// Maps a SECURITY_MANDATORY_*_RID to the integrity-level token used on the
-// wire. Returns empty for unrecognised RIDs.
-const char* rid_to_string(DWORD rid) {
-    if (rid <  SECURITY_MANDATORY_LOW_RID)         return "untrusted";
-    if (rid <  SECURITY_MANDATORY_MEDIUM_RID)      return "low";
-    if (rid <  SECURITY_MANDATORY_HIGH_RID)        return "medium";
-    if (rid <  SECURITY_MANDATORY_SYSTEM_RID)      return "high";
-    return "system";
-}
-
 int integrity_rank(const std::string& il) {
     if (il == "untrusted") return 0;
     if (il == "low")       return 1;
@@ -47,23 +35,6 @@ int integrity_rank(const std::string& il) {
     if (il == "high")      return 3;
     if (il == "system")    return 4;
     return -1;
-}
-
-std::string read_token_il(HANDLE token) {
-    DWORD needed = 0;
-    GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &needed);
-    if (needed == 0) return {};
-
-    std::vector<BYTE> buf(needed);
-    if (!GetTokenInformation(token, TokenIntegrityLevel, buf.data(),
-                             needed, &needed)) {
-        return {};
-    }
-
-    const auto* tml = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(buf.data());
-    PSID sid = tml->Label.Sid;
-    const DWORD rid = *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1);
-    return rid_to_string(rid);
 }
 
 }  // namespace
@@ -90,7 +61,7 @@ std::string window_integrity(HWND hwnd) {
         return {};
     }
 
-    auto il = read_token_il(htok);
+    auto il = sysinfo::integrity_level_from_token(htok);
     CloseHandle(htok);
     CloseHandle(hproc);
     return il;

@@ -53,7 +53,7 @@ cmake --build agents/windows-modern/build --config Release
 # Step 1: configure Defender exclusion BEFORE the binary lands
 .\Tools\install-agent.ps1 -PrepareDefender
 
-# Step 2: drop remote-hands.exe into C:\Program Files\AgentRemoteHands\
+# Step 2: drop rha-win.modern.x64.exe into C:\Program Files\AgentRemoteHands\
 #         (drag-drop, RDP file paste, scp, etc — any path that lands it
 #         directly in the now-excluded directory)
 
@@ -64,7 +64,7 @@ cmake --build agents/windows-modern/build --config Release
 Or one-shot from a URL (release-asset, internal share, etc.):
 
 ```powershell
-.\Tools\install-agent.ps1 -SourceUrl 'https://example/remote-hands.exe' -Discoverable
+.\Tools\install-agent.ps1 -SourceUrl 'https://example/rha-win.modern.x64.exe' -Discoverable
 ```
 
 The script adds a Microsoft Defender exclusion for `%ProgramFiles%\AgentRemoteHands\`, places the binary there, adds binary-scoped Windows Firewall rules (TCP/8765 + UDP/5353 for mDNS when `-Discoverable`), and registers a Task Scheduler logon-task with restart-on-failure so the agent autostarts in the user's interactive desktop session on next logon. `-Uninstall` reverses everything (including the Defender exclusion).
@@ -117,7 +117,7 @@ To wire it into Claude Code (once `mcp-server/` lands — see the Roadmap), drop
 | `client/hostctl-discover` | *(planned)* mDNS LAN scanner |
 | [`Tools/install-agent.ps1`](Tools/install-agent.ps1) | PowerShell installer — adds a Defender exclusion, copies the binary to `%ProgramFiles%`, adds binary-scoped firewall rules, registers a Task Scheduler logon-task with restart-on-failure. `-Uninstall` reverses it. |
 | [`Tools/scoop/`](Tools/scoop/) | Scoop manifest reference + bucket-update notes. Published manifest lives at [`WilliamIsted/scoop-bucket`](https://github.com/WilliamIsted/scoop-bucket). |
-| [`.github/workflows/release.yml`](.github/workflows/release.yml) | Release CI — on `v*.*.*` tag push, builds `windows-modern` Release, packages `remote-hands.exe` + install script + docs into a zip, attaches the zip + `SHA256SUMS` to the GitHub Release. |
+| [`.github/workflows/release.yml`](.github/workflows/release.yml) | Release CI — on `v*.*.*` tag push, builds `windows-modern` Release, packages `rha-win.modern.x64.exe` + install script + docs into a zip, attaches the zip + `SHA256SUMS` to the GitHub Release. |
 | `examples/vagrant/` | *(planned)* Win11 dev fixture for VirtualBox / VMware / Hyper-V |
 
 ## Architecture

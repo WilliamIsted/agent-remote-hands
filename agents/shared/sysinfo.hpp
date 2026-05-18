@@ -21,6 +21,11 @@
 #include <string>
 #include <vector>
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 namespace remote_hands::sysinfo {
 
 // Target identifier for `system.info.os`. Constant for this build.
@@ -37,6 +42,12 @@ std::string hostname();
 
 // Account the agent is running as (e.g. "DOMAIN\\username" or "username").
 std::string current_user();
+
+// Integrity-level string for an arbitrary process token handle.
+// Returns one of "untrusted"/"low"/"medium"/"high"/"system", or empty on
+// failure. Exposed so uipi.cpp can reuse the same decode without duplicating
+// the buffer-query + RID-decode logic.
+std::string integrity_level_from_token(HANDLE token);
 
 // Token integrity level: "low" / "medium" / "high" / "system".
 // Returns empty string if integrity levels can't be queried.

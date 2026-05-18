@@ -4,7 +4,7 @@ What this binary covers, what it requires at runtime, and what it gracefully deg
 
 ## Naming
 
-This is the **edge target** — the unsuffixed `remote-hands.exe`. When a successor target supersedes it, this build will be renamed at the handover. Until then, "modern" is the default.
+This build ships as **`rha-win.modern.x64.exe`** — the naming convention is `rha-win.<family>.<arch>.exe`. Multiple families can coexist on one machine without filename conflicts.
 
 ## What "modern" means
 

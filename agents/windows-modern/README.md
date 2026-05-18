@@ -11,14 +11,14 @@ cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
 
-Output: `build/Release/remote-hands.exe`.
+Output: `build/Release/rha-win.modern.x64.exe`.
 
 ## Run
 
 ```powershell
-.\build\Release\remote-hands.exe                 # Default: TCP 8765, no mDNS
-.\build\Release\remote-hands.exe --discoverable  # Advertise via mDNS
-.\build\Release\remote-hands.exe --port 9000     # Custom port
+.\build\Release\rha-win.modern.x64.exe                 # Default: TCP 8765, no mDNS
+.\build\Release\rha-win.modern.x64.exe --discoverable  # Advertise via mDNS
+.\build\Release\rha-win.modern.x64.exe --port 9000     # Custom port
 ```
 
 The agent generates a token at `%ProgramData%\AgentRemoteHands\token` on first run. Clients use this token to elevate from `observe` tier to `drive` or `power` via `connection.tier_raise`.
@@ -28,12 +28,12 @@ The agent generates a token at `%ProgramData%\AgentRemoteHands\token` on first r
 Run as Administrator from the build output:
 
 ```powershell
-.\remote-hands.exe --install
+.\rha-win.modern.x64.exe --install
 ```
 
 This copies the binary to `%ProgramFiles%\AgentRemoteHands\` and registers a Task Scheduler logon-task. The agent autostarts on user logon in the interactive desktop session so it can drive the visible UI.
 
-`.\remote-hands.exe --uninstall` removes the task and binary.
+`.\rha-win.modern.x64.exe --uninstall` removes the task and binary.
 
 ## Debug
 

@@ -55,15 +55,15 @@ if (-not (Test-Path $StableDir)) {
 
 if ($RefreshFromBuild) {
     $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $build    = Join-Path $repoRoot 'agents\windows-modern\build\Release\remote-hands.exe'
+    $build    = Join-Path $repoRoot 'agents\windows-modern\build\Release\rha-win.modern.x64.exe'
     if (-not (Test-Path $build)) {
         throw "Build artefact not at $build. Run cmake --build first, or drop -RefreshFromBuild."
     }
-    Write-Host "Refreshing $StableDir\remote-hands.exe from $build"
-    Copy-Item $build (Join-Path $StableDir 'remote-hands.exe') -Force
-    $pdb = Join-Path $repoRoot 'agents\windows-modern\build\Release\remote-hands.pdb'
+    Write-Host "Refreshing $StableDir\rha-win.modern.x64.exe from $build"
+    Copy-Item $build (Join-Path $StableDir 'rha-win.modern.x64.exe') -Force
+    $pdb = Join-Path $repoRoot 'agents\windows-modern\build\Release\rha-win.modern.x64.pdb'
     if (Test-Path $pdb) {
-        Copy-Item $pdb (Join-Path $StableDir 'remote-hands.pdb') -Force
+        Copy-Item $pdb (Join-Path $StableDir 'rha-win.modern.x64.pdb') -Force
     }
 }
 
@@ -79,7 +79,7 @@ if ($AddDefenderExclusion) {
     }
 }
 
-$exe       = Join-Path $StableDir 'remote-hands.exe'
+$exe       = Join-Path $StableDir 'rha-win.modern.x64.exe'
 $tokenPath = Join-Path $StableDir 'token'
 
 if (-not (Test-Path $exe)) {

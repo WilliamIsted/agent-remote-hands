@@ -107,4 +107,4 @@ If you encounter a bug or ergonomic gap during real use, file it on GitHub with 
 
 ## Where this document lives
 
-The release zip ships this file alongside `remote-hands.exe`, `PROTOCOL.md`, `README.md`, and `wire.py`. If you have the binary, you have the spec. If you're browsing the GitHub repo, you found it at the root. Either way, this document is the entry point — read it first.
+The release zip ships this file alongside `rha-win.modern.x64.exe`, `PROTOCOL.md`, `README.md`, and `wire.py`. If you have the binary, you have the spec. If you're browsing the GitHub repo, you found it at the root. Either way, this document is the entry point — read it first.

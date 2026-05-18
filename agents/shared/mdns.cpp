@@ -15,6 +15,7 @@
 #include "mdns.hpp"
 
 #include "log.hpp"
+#include "platform.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -227,7 +228,7 @@ struct Responder::Impl {
         }
 
         ip_mreq mreq{};
-        inet_pton(AF_INET, kMulticastAddr, &mreq.imr_multiaddr);
+        platform::inet_pton_ipv4(kMulticastAddr, &mreq.imr_multiaddr);
         mreq.imr_interface.s_addr = htonl(INADDR_ANY);
         if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP,
                        reinterpret_cast<const char*>(&mreq),
@@ -290,7 +291,7 @@ struct Responder::Impl {
 
         sockaddr_in mcast{};
         mcast.sin_family = AF_INET;
-        inet_pton(AF_INET, kMulticastAddr, &mcast.sin_addr);
+        platform::inet_pton_ipv4(kMulticastAddr, &mcast.sin_addr);
         mcast.sin_port   = htons(kMulticastPort);
 
         // Poll for IP changes every ~5 seconds via the same

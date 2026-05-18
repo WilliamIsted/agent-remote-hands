@@ -47,7 +47,17 @@ struct VerbEntry {
     VerbHandler handler;
 };
 
-// Looks up a verb by name. Returns nullptr if unknown to this build.
+// Identifies the agent family so verb_enabled() can gate per-family capabilities.
+enum class AgentFamily { Modern, Legacy };
+
+// Called once at agent startup (before accepting connections) to set the family.
+// Determines which verbs find_verb() and build_capabilities_json() expose.
+void init_capabilities(AgentFamily family);
+
+// Returns true if `verb` is enabled for the family set by init_capabilities().
+bool verb_enabled(std::string_view verb);
+
+// Looks up a verb by name. Returns nullptr if unknown or disabled for this family.
 const VerbEntry* find_verb(std::string_view verb);
 
 // Builds the JSON body for the `system.capabilities` response.

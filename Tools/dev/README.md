@@ -17,7 +17,7 @@ The architectural shape:
    .mcp.json (gitignored, repo root) ----> mcp-server/server.py ---> stable agent
 
    meanwhile, ad-hoc dev test runs:
-   build\Release\remote-hands.exe --port 28765 --token-path C:\temp\dev-token
+   build\Release\rha-win.modern.x64.exe --port 28765 --token-path C:\temp\dev-token
    (different port, different token, no MCP wiring; conformance suite hits it)
 ```
 
@@ -26,7 +26,7 @@ Two ports, two tokens, two roles. The dev session never has to wonder whether th
 ### Initial setup
 
 ```powershell
-# 1. Make sure agents/windows-modern/build/Release/remote-hands.exe is the
+# 1. Make sure agents/windows-modern/build/Release/rha-win.modern.x64.exe is the
 #    build you want to lock as "stable for dogfooding". Conformance should
 #    pass against it before promoting.
 python tests/conformance/run.py 127.0.0.1 18765
@@ -35,8 +35,8 @@ python tests/conformance/run.py 127.0.0.1 18765
 $stable = Join-Path $env:USERPROFILE 'AgentRemoteHands-stable'
 New-Item -ItemType Directory -Force -Path $stable | Out-Null
 $repo = (Resolve-Path '.').Path
-Copy-Item "$repo\agents\windows-modern\build\Release\remote-hands.exe" $stable -Force
-Copy-Item "$repo\agents\windows-modern\build\Release\remote-hands.pdb" $stable -Force
+Copy-Item "$repo\agents\windows-modern\build\Release\rha-win.modern.x64.exe" $stable -Force
+Copy-Item "$repo\agents\windows-modern\build\Release\rha-win.modern.x64.pdb" $stable -Force
 Copy-Item "$repo\LLM-OPERATORS.md" $stable -Force
 Copy-Item "$repo\PROTOCOL.md"      $stable -Force
 Copy-Item "$repo\README.md"        $stable -Force

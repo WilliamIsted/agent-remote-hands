@@ -28,7 +28,9 @@
 // `Program:Win32/Contebrew.A!ml` heuristic, the agent's job is to be a
 // wire-protocol server.
 
+#include "capabilities.hpp"
 #include "config.hpp"
+#include "platform.hpp"
 #include "log.hpp"
 #include "mdns.hpp"
 #include "server.hpp"
@@ -98,6 +100,8 @@ public:
 }  // namespace
 
 int wmain(int argc, wchar_t* argv[]) try {
+    rh::init_capabilities(rh::AgentFamily::Modern);
+    rh::platform::init_ocr();
     auto config = rh::Config::parse(argc, argv);
 
     rh::log::info(L"Agent Remote Hands v2.1 starting on TCP port %u", config.port);
