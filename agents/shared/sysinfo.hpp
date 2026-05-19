@@ -77,4 +77,42 @@ std::vector<std::string> enabled_privileges();
 // on success. Idempotent.
 bool enable_privilege(const wchar_t* privilege_name);
 
+// True when this host can be relied on to wake from a SetWaitableTimer
+// `bResume=TRUE` wake timer (i.e. `system.power.sleep` / `system.power.hibernate`
+// `wake_at` will actually resume the machine). Returns false on virtual-machine
+// guests, where the timer API succeeds but the hypervisor does not honour the
+// resume (issue #82). Determined by CPUID leaf 1 ECX bit 31 (hypervisor-present)
+// AND a WMI `Win32_ComputerSystem.Manufacturer` vendor-string match (VMware,
+// VirtualBox, QEMU, Microsoft/Hyper-V, Xen, Parallels). Computed once on first
+// call and cached for the process lifetime. Surfaced as
+// `system.info.capabilities.wake_timer_supported`.
+bool wake_timer_supported();
+
+// OS pointer/keyboard input timings, sourced from the Win32 user settings.
+// Surfaced as `system.info.capabilities.input_settings` (issue #86) so callers
+// can pace synthetic input to match the host's configured cadence.
+struct InputSettings {
+    // GetDoubleClickTime() — max ms between two clicks counted as a double.
+    unsigned int double_click_time_ms = 0;
+    // GetSystemMetrics(SM_CXDOUBLECLK / SM_CYDOUBLECLK) — the double-click
+    // rectangle the second click must fall within, in pixels.
+    int double_click_w = 0;
+    int double_click_h = 0;
+    // SystemParametersInfo(SPI_GETKEYBOARDDELAY) — 0..3 setting mapped to the
+    // documented 250/500/750/1000 ms repeat-delay scale.
+    unsigned int keyboard_repeat_delay_ms = 0;
+    // SystemParametersInfo(SPI_GETKEYBOARDSPEED) — 0..31 setting mapped to the
+    // documented ~2.5..30 characters-per-second repeat-rate scale.
+    unsigned int keyboard_repeat_rate_cps = 0;
+    // SystemParametersInfo(SPI_GETWHEELSCROLLLINES). Optional: WHEEL_PAGESCROLL
+    // (lines == UINT_MAX, "scroll one page") and pre-wheel hosts are reported
+    // as absent. `has_wheel_scroll_lines` gates emission of the JSON key.
+    bool has_wheel_scroll_lines = false;
+    unsigned int wheel_scroll_lines = 0;
+};
+
+// Query the live OS input timings. Cheap Win32 calls; not cached (the values
+// can change at runtime via Control Panel / SystemParametersInfo broadcasts).
+InputSettings input_settings();
+
 }  // namespace remote_hands::sysinfo

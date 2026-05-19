@@ -170,6 +170,7 @@ target_link_libraries(remote-hands-core PUBLIC
     windowscodecs       # WIC (PNG encoder)
     bcrypt              # BCryptGenRandom (token entropy)
     powrprof            # SetSuspendState (system.hibernate / sleep)
+    wbemuuid            # WMI Win32_ComputerSystem (VM detection, issue #82)
     shlwapi             # PathMatchSpec (watch.file)
     runtimeobject       # WinRT RoInitialize / RoGetActivationFactory (vision.ocr)
 )

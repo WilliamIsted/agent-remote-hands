@@ -230,7 +230,41 @@ void info(Connection& conn, const wire::Request& req) {
     const auto& ocr = platform::ocr_capabilities();
     json::append_string_array(j, "ocr_languages", ocr.languages);   j += ',';
     json::append_kv_int(j, "ocr_max_dimension", ocr.max_dimension); j += ',';
-    json::append_string_array(j, "ocr_input_formats", ocr.formats);
+    json::append_string_array(j, "ocr_input_formats", ocr.formats); j += ',';
+
+    // wake_timer_supported (issue #82): false on detected VM guests, where a
+    // SetWaitableTimer bResume wake timer is armed successfully but the
+    // hypervisor never resumes the guest. Cached after first computation.
+    json::append_kv_bool(j, "wake_timer_supported",
+                         sysinfo::wake_timer_supported());
+    j += ',';
+
+    // input_settings (issue #86): the host's configured pointer/keyboard
+    // timings, so callers can pace synthetic input to match the OS cadence.
+    {
+        const sysinfo::InputSettings in = sysinfo::input_settings();
+        json::append_string(j, "input_settings");
+        j += ":{";
+        json::append_kv_int(j, "double_click_time_ms",
+                            in.double_click_time_ms);
+        j += ',';
+        json::append_string(j, "double_click_rect");
+        j += ":{";
+        json::append_kv_int(j, "w", in.double_click_w);  j += ',';
+        json::append_kv_int(j, "h", in.double_click_h);
+        j += "},";
+        json::append_kv_int(j, "keyboard_repeat_delay_ms",
+                            in.keyboard_repeat_delay_ms);
+        j += ',';
+        json::append_kv_int(j, "keyboard_repeat_rate_cps",
+                            in.keyboard_repeat_rate_cps);
+        if (in.has_wheel_scroll_lines) {
+            j += ',';
+            json::append_kv_int(j, "wheel_scroll_lines",
+                                in.wheel_scroll_lines);
+        }
+        j += '}';
+    }
     j += "},";
 
     json::append_kv_string(j, "current_tier", to_wire(conn.tier()));       j += ',';
@@ -427,11 +461,67 @@ struct PendingShutdown {
     long long                               unix_deadline_ms = 0;
     UINT                                    exit_flags = 0;
     DWORD                                   reason = 0;
+    // wake_at carry-through for a delayed suspend (issue #82): the detached
+    // fire thread arms the wake timer just before SetSuspendState.
+    bool                                    wake_at_set = false;
+    long long                               wake_at_unix = 0;
 };
 
 PendingShutdown& pending_shutdown() {
     static PendingShutdown p;
     return p;
+}
+
+// ---------------------------------------------------------------------------
+// Wake-timer arming (issue #82).
+//
+// `wake_at` schedules an OS resume after sleep/hibernate. The mechanism is a
+// Win32 waitable timer created with SetWaitableTimer(..., bResume=TRUE): the
+// power manager treats the timer as a wake source and resumes the machine
+// from S3/S4 when it elapses. The timer must remain valid (handle not closed,
+// owning thread alive) until it fires, so we hand it to a detached
+// process-lifetime thread that blocks on it. There can be at most one armed
+// wake timer at a time (a second `wake_at` re-arms it).
+//
+// FILETIME due-time is the absolute UTC instant (positive value) computed
+// from the unix `wake_at` seconds; SetWaitableTimer accepts an absolute time
+// directly, avoiding negative-relative arithmetic and clock-skew between the
+// request and the actual suspend.
+
+void arm_wake_timer(long long wake_at_unix) {
+    // 100ns ticks between the Windows epoch (1601-01-01) and the Unix epoch
+    // (1970-01-01): 11644473600 seconds.
+    constexpr long long kUnixToFileTime = 116444736000000000LL;
+    const long long ft_ticks =
+        kUnixToFileTime + wake_at_unix * 10000000LL;
+
+    HANDLE timer = CreateWaitableTimerW(nullptr, TRUE, nullptr);
+    if (!timer) {
+        log::warning(L"system.power: CreateWaitableTimer failed (%lu); "
+                     L"wake_at will not resume the machine",
+                     GetLastError());
+        return;
+    }
+
+    LARGE_INTEGER due;
+    due.QuadPart = ft_ticks;   // absolute time (positive => UTC FILETIME)
+
+    if (!SetWaitableTimer(timer, &due, 0, nullptr, nullptr, TRUE)) {
+        log::warning(L"system.power: SetWaitableTimer(bResume=TRUE) failed "
+                     L"(%lu); wake_at will not resume the machine",
+                     GetLastError());
+        CloseHandle(timer);
+        return;
+    }
+
+    // Process-lifetime owner: keep the handle alive and the thread parked on
+    // it so the OS retains the wake source through suspend. Detached — the
+    // agent never joins it; the timer self-disarms after a single fire.
+    std::thread([timer]() {
+        WaitForSingleObject(timer, INFINITE);
+        CloseHandle(timer);
+        log::info(L"system.power: wake timer elapsed");
+    }).detach();
 }
 
 void do_power(Connection& conn, UINT exit_flags, std::string_view verb,
@@ -482,6 +572,10 @@ void do_power(Connection& conn, UINT exit_flags, std::string_view verb,
             p.unix_deadline_ms = now_ms + args.delay_seconds * 1000LL;
             p.exit_flags       = exit_flags;
             p.reason           = reason;
+            // Not a suspend: clear any wake_at carry-over from a prior
+            // delayed sleep/hibernate that reused this static slot.
+            p.wake_at_set      = false;
+            p.wake_at_unix     = 0;
         }
         std::thread([]() {
             auto& p = pending_shutdown();
@@ -560,12 +654,10 @@ void do_suspend(Connection& conn, BOOLEAN hibernate_flag,
         delay_seconds = *d;
     }
 
-    // wake_at / bypass_vm_check: validated for shape here. Arming a
-    // SetWaitableTimerEx wake timer is deferred (it is a binary/OS-timer
-    // concern, not arg-input work) — see report. The VM-environment gate
-    // and wake-timer arming are tracked for the dedicated power-timer task;
-    // a malformed value still surfaces as invalid_args rather than being
-    // silently ignored.
+    bool      have_wake_at = false;
+    long long wake_at      = 0;
+    bool      bypass_vm    = false;
+
     if (args.present("wake_at")) {
         auto w = args.integer("wake_at");
         if (!w || *w < 0) {
@@ -574,6 +666,8 @@ void do_suspend(Connection& conn, BOOLEAN hibernate_flag,
                          "(unix epoch seconds)");
             return;
         }
+        have_wake_at = true;
+        wake_at      = *w;
     }
     if (args.present("bypass_vm_check")) {
         auto b = args.boolean("bypass_vm_check");
@@ -582,6 +676,7 @@ void do_suspend(Connection& conn, BOOLEAN hibernate_flag,
                          " 'bypass_vm_check' must be a boolean");
             return;
         }
+        bypass_vm = *b;
     }
     if (args.present("reason")) {
         auto r = args.str("reason");
@@ -590,6 +685,19 @@ void do_suspend(Connection& conn, BOOLEAN hibernate_flag,
                          " 'reason' must be a string");
             return;
         }
+    }
+
+    // VM-environment gate for wake_at (issue #82). On a detected VM guest the
+    // waitable timer arms successfully but the hypervisor does not resume the
+    // guest, so the machine would sleep and never wake. Reject up front
+    // unless the caller explicitly opts out with bypass_vm_check. The gate
+    // has no effect when wake_at is absent (spec input_schema description).
+    if (have_wake_at && !bypass_vm && !sysinfo::wake_timer_supported()) {
+        // system.power.sleep/hibernate x-errors include "not_supported"; the
+        // spec wake_at description mandates `{"reason":"vm_environment"}`.
+        conn.writer().write_err(ErrorCode::NotSupported,
+                                "{\"reason\":\"vm_environment\"}");
+        return;
     }
 
     if (!ensure_shutdown_privilege()) {
@@ -601,6 +709,11 @@ void do_suspend(Connection& conn, BOOLEAN hibernate_flag,
     }
 
     auto fire = [&]() -> bool {
+        // Arm the OS wake timer (bResume=TRUE) immediately before entering
+        // suspend so the power manager registers it as a wake source. The
+        // absolute FILETIME means a fixed wall-clock wake instant regardless
+        // of how long the suspend takes to engage.
+        if (have_wake_at) arm_wake_timer(wake_at);
         // SetSuspendState(Hibernate, ForceCritical=FALSE,
         // DisableWakeEvent=FALSE).
         return SetSuspendState(hibernate_flag, FALSE, FALSE) != FALSE;
@@ -632,21 +745,30 @@ void do_suspend(Connection& conn, BOOLEAN hibernate_flag,
             p.unix_deadline_ms = now_ms + delay_seconds * 1000LL;
             p.exit_flags       = 0;
             p.reason           = hibernate_flag ? 1u : 0u;
+            p.wake_at_set      = have_wake_at;
+            p.wake_at_unix     = wake_at;
         }
         std::thread([]() {
             auto& p = pending_shutdown();
-            bool    fired;
-            BOOLEAN hib;
+            bool      fired;
+            BOOLEAN   hib;
+            bool      wake_set;
+            long long wake_unix;
             {
                 std::unique_lock<std::mutex> lk(p.mu);
                 const auto deadline = p.steady_deadline;
-                hib = p.reason ? TRUE : FALSE;
+                hib       = p.reason ? TRUE : FALSE;
+                wake_set  = p.wake_at_set;
+                wake_unix = p.wake_at_unix;
                 p.cv.wait_until(lk, deadline,
                                 [&p]() { return !p.active; });
                 fired = p.active;
                 p.active = false;
             }
             if (fired) {
+                // Arm the wake timer immediately before suspend so the power
+                // manager registers it as a wake source (issue #82).
+                if (wake_set) arm_wake_timer(wake_unix);
                 if (!SetSuspendState(hib, FALSE, FALSE)) {
                     log::warning(L"system.power: SetSuspendState failed "
                                  L"(%lu) after delayed fire",

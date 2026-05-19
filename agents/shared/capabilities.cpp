@@ -16,6 +16,7 @@
 
 #include "connection.hpp"
 #include "platform.hpp"
+#include "sysinfo.hpp"
 
 #include <set>
 #include <string>
@@ -297,6 +298,16 @@ void init_capabilities(AgentFamily f) {
             }
         }
     }
+
+    // Prime the wake-timer / VM-detection once-cache here, on the main thread
+    // and after ComInit, so the WMI Win32_ComputerSystem query inside
+    // sysinfo::wake_timer_supported() fires in the documented main-thread
+    // context. Deferring it to first system.info dispatch would run the
+    // CoCreateInstance(CLSID_WbemLocator) call_once on an STA connection
+    // worker, relying on WMI's free-threaded in-proc server tolerating an
+    // STA caller — correct in practice but contractually unsound. Modern and
+    // legacy compile this TU; classic does not.
+    (void)sysinfo::wake_timer_supported();
 }
 
 bool verb_enabled(std::string_view verb) {

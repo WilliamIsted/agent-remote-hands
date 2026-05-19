@@ -220,6 +220,7 @@ target_link_libraries(remote-hands-legacy-core PUBLIC
     oleaut32            # COM extensions
     "${WINSDK_UM_LIB_X64}/UIAutomationCore.lib"  # IUIAutomation COM interface
     powrprof            # SetSuspendState (system.hibernate / sleep)
+    "${WINSDK_UM_LIB_X64}/wbemuuid.lib"  # WMI Win32_ComputerSystem (VM detect, #82)
     shlwapi             # PathMatchSpec (watch.file); SHDeleteKeyW (registry.key.delete)
     "$<$<CONFIG:Release>:${WINSDK_UCRT_LIB_X64}/libucrt.lib>"    # static UCRT release (ldoc-115 quirk 3)
     "$<$<CONFIG:Debug>:${WINSDK_UCRT_LIB_X64}/libucrtd.lib>"    # static UCRT debug
