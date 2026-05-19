@@ -81,6 +81,9 @@ add_compile_definitions(
     _WINSOCK_DEPRECATED_NO_WARNINGS  # inet_addr used intentionally in net_parse (XP compat)
 )
 
+option(RH_DEBUG
+       "Enable compile-time debug wire-trace logging (verb dispatch + OK/ERR responses)" OFF)
+
 if(MSVC)
     add_compile_options(
         /W4
@@ -105,6 +108,8 @@ target_sources(remote-hands-legacy-core PRIVATE
     # Shared sources (platform-agnostic logic — identical to modern)
     ../shared/config.cpp
     ../shared/server.cpp
+    ../shared/power_watcher.cpp
+    ../shared/socket_watchdog.cpp
     ../shared/protocol.cpp
     ../shared/connection.cpp
     ../shared/token.cpp
@@ -140,6 +145,10 @@ target_sources(remote-hands-legacy-core PRIVATE
 
 target_include_directories(remote-hands-legacy-core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../shared
+)
+
+target_compile_definitions(remote-hands-legacy-core PUBLIC
+    $<$<BOOL:${RH_DEBUG}>:RH_DEBUG>
 )
 
 # Win10 SDK header injection (ldoc-115 quirk 3 + WRL/UIAutomation headers).
@@ -184,7 +193,8 @@ target_link_libraries(remote-hands-legacy-core PUBLIC
     "${WINSDK_UM_LIB_X64}/UIAutomationCore.lib"  # IUIAutomation COM interface
     powrprof            # SetSuspendState (system.hibernate / sleep)
     shlwapi             # PathMatchSpec (watch.file); SHDeleteKeyW (registry.key.delete)
-    "${WINSDK_UCRT_LIB_X64}/libucrt.lib"   # static UCRT (ldoc-115 quirk 3)
+    "$<$<CONFIG:Release>:${WINSDK_UCRT_LIB_X64}/libucrt.lib>"    # static UCRT release (ldoc-115 quirk 3)
+    "$<$<CONFIG:Debug>:${WINSDK_UCRT_LIB_X64}/libucrtd.lib>"    # static UCRT debug
     # OMITTED vs modern: bcrypt (legacy uses CryptGenRandom via advapi32)
     #                    runtimeobject (WinRT loaded dynamically in ocr seam)
     #                    windowscodecs (WIC — GDI+ used instead)
@@ -201,7 +211,7 @@ add_executable(remote-hands src/main.cpp)
 target_link_libraries(remote-hands PRIVATE remote-hands-legacy-core)
 
 set_target_properties(remote-hands PROPERTIES
-    OUTPUT_NAME "rha-win.legacy.x64"
+    OUTPUT_NAME "rha-win.legacy$<$<CONFIG:Debug>:.debug>.x64"
     SUFFIX ".exe"
 )
 

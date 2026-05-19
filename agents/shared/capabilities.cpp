@@ -26,6 +26,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <objbase.h>          // CoCreateInstance + IUnknown — used for legacy UIA probe
 #include <versionhelpers.h>
 
 namespace remote_hands {
@@ -40,6 +41,7 @@ namespace system_verbs {
     void info(Connection&, const wire::Request&);
     void capabilities(Connection&, const wire::Request&);
     void health(Connection&, const wire::Request&);
+    void verbs(Connection&, const wire::Request&);
     void lock(Connection&, const wire::Request&);
     void shutdown_blockers(Connection&, const wire::Request&);
     void reboot(Connection&, const wire::Request&);
@@ -156,14 +158,15 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"system.info",                {Tier::Read,       &system_verbs::info}},
         {"system.capabilities",        {Tier::Read,       &system_verbs::capabilities}},
         {"system.health",              {Tier::Read,       &system_verbs::health}},
-        {"system.power.lock",          {Tier::Read,       &system_verbs::lock}},
+        {"system.verbs",               {Tier::Read,       &system_verbs::verbs}},
+        {"system.power.lock",          {Tier::ExtraRisky, &system_verbs::lock}},
         {"system.power.blockers",      {Tier::Read,       &system_verbs::shutdown_blockers}},
         {"system.power.reboot",        {Tier::ExtraRisky, &system_verbs::reboot}},
         {"system.power.shutdown",      {Tier::ExtraRisky, &system_verbs::shutdown}},
         {"system.power.logoff",        {Tier::ExtraRisky, &system_verbs::logoff}},
         {"system.power.hibernate",     {Tier::ExtraRisky, &system_verbs::hibernate}},
         {"system.power.sleep",         {Tier::ExtraRisky, &system_verbs::sleep}},
-        {"system.power.cancel",        {Tier::ExtraRisky, &system_verbs::power_cancel}},
+        {"system.power.cancel",        {Tier::Update,     &system_verbs::power_cancel}},
 
         // window.*
         {"window.list",                {Tier::Read,       &window_verbs::list}},
@@ -257,23 +260,55 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
 void init_capabilities(AgentFamily f) {
     g_family = f;
     if (f == AgentFamily::Legacy) {
-        // UIA probe: LOAD_LIBRARY_AS_DATAFILE maps the file without executing
-        // DllMain, so it is safe to call before CoInitializeEx.
+        g_vista_plus = IsWindowsVistaOrGreater();
+
+        // Two-stage UIA probe:
+        //
+        // Stage 1 — DLL presence check (LOAD_LIBRARY_AS_DATAFILE is safe before
+        //   CoInitializeEx and avoids executing DllMain). Fast-fails on XP where
+        //   the DLL is absent entirely.
+        //
+        // Stage 2 — COM registration check (CoCreateInstance). Vista RTM ships
+        //   uiautomationcore.dll but does NOT register CLSID_CUIAutomation; the
+        //   server was added in Vista SP1 / Windows 7. Stage 1 alone would falsely
+        //   advertise element.* on bare Vista. Requires COM to be initialised
+        //   before init_capabilities is called (legacy main.cpp orders ComInit
+        //   first).
         HMODULE h = LoadLibraryExW(L"uiautomationcore.dll", nullptr,
                                    LOAD_LIBRARY_AS_DATAFILE);
         g_uia_available = (h != nullptr);
         if (h) FreeLibrary(h);
-        g_vista_plus = IsWindowsVistaOrGreater();
+
+        if (g_uia_available) {
+            // CLSID_CUIAutomation  = {FF48DBA4-60EF-4201-AA87-54103EEF594E}
+            // IID_IUIAutomation    = {30CBE57D-D9D0-452A-AB13-7AC5AC4825EE}
+            static const CLSID clsid = {0xFF48DBA4,0x60EF,0x4201,
+                                        {0xAA,0x87,0x54,0x10,0x3E,0xEF,0x59,0x4E}};
+            static const IID   iid   = {0x30CBE57D,0xD9D0,0x452A,
+                                        {0xAB,0x13,0x7A,0xC5,0xAC,0x48,0x25,0xEE}};
+            IUnknown* p = nullptr;
+            HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER,
+                                          iid, reinterpret_cast<void**>(&p));
+            if (SUCCEEDED(hr) && p) {
+                p->Release();
+            } else {
+                g_uia_available = false;
+            }
+        }
     }
 }
 
 bool verb_enabled(std::string_view verb) {
+    // system.verbs: modern only (verbs_blob.cpp is a modern-only TU).
+    if (verb == "system.verbs")
+        return g_family == AgentFamily::Modern;
+
     if (g_family == AgentFamily::Modern) return true;
 
     // Legacy gating:
     //   vision.ocr        — requires Windows.Media.Ocr (Win 8.1+, language pack installed)
     //   system.power.blockers — requires ShutdownBlockReasonQuery (Vista+)
-    //   element.* / watch.element — require IUIAutomation (uiautomationcore.dll)
+    //   element.* / watch.element — require IUIAutomation (uiautomationcore.dll, registered)
     if (verb == "vision.ocr")
         return !platform::ocr_capabilities().languages.empty();
     if (verb == "system.power.blockers")

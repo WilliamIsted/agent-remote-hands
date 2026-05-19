@@ -100,18 +100,22 @@ public:
 }  // namespace
 
 int wmain(int argc, wchar_t* argv[]) try {
-    rh::init_capabilities(rh::AgentFamily::Legacy);
-    rh::platform::init_ocr();
     auto config = rh::Config::parse(argc, argv);
 
-    rh::log::info(L"Agent Remote Hands v2.1 starting on TCP port %u", config.port);
+    rh::log::info(L"Agent Remote Hands v0.3.0 starting on TCP port %u", config.port);
 
     WsaInit wsa;
     ComInit com;
 
+    // init_capabilities runs after ComInit so the legacy UIA probe can call
+    // CoCreateInstance to verify CLSID_CUIAutomation is registered — not just
+    // that the DLL is present. Vista RTM has the DLL but not the COM server.
+    rh::init_capabilities(rh::AgentFamily::Legacy);
+    rh::platform::init_ocr();
+
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 
-    // Optional mDNS advertisement (`-Discoverable` / REMOTE_HANDS_DISCOVERABLE=1).
+    // mDNS advertisement (on by default; suppress with --no-discoverable / REMOTE_HANDS_DISCOVERABLE=0).
     std::unique_ptr<rh::mdns::Responder> mdns_responder;
     if (config.discoverable) {
         rh::mdns::Config mdns_cfg{};
