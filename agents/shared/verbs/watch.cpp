@@ -15,13 +15,20 @@
 // `watch.*` namespace verb handlers and concrete Subscription implementations.
 //
 // Implements PROTOCOL.md §4.10 / §6:
-//   watch.region    — periodic capture, optionally --until-change.
+//   watch.region    — periodic capture, optionally until_change.
 //   watch.process   — auto-cancels on process exit.
 //   watch.window    — appearance / disappearance of windows by title prefix.
 //   watch.element   — auto-cancels when an element invalidates.
 //   watch.file      — ReadDirectoryChangesW on the parent directory.
 //   watch.registry  — RegNotifyChangeKeyValue on a key.
 //   watch.cancel    — idempotent removal from the registry.
+//
+// Verb handlers resolve their arguments through the shared SchemaArgs
+// resolver (named-first, positional fallback by input_schema slot) — see
+// schema_args.hpp. The concrete Subscription EVENT side-channel (binary
+// vs base64 frames, watch.registry's until_change sync one-shot mode)
+// is Phase-2b; those args are validated here but the streaming behaviour
+// is unchanged by this slice.
 //
 // Each watch's run loop polls a short timeout (~100 ms) so should_stop()
 // gets a chance to break out of waits when the connection closes.
@@ -37,10 +44,13 @@
 #include "../screen_capture.hpp"
 #include "../subscription.hpp"
 #include "../text_util.hpp"
+#include "args.hpp"
+#include "schema_args.hpp"
 
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -63,40 +73,12 @@
 namespace remote_hands::watch_verbs {
 
 using Microsoft::WRL::ComPtr;
+using wire::SchemaArgs;
+using wire::invalid_args;
 
 namespace {
 
 constexpr DWORD kPollMs = 100;
-
-// ---------------------------------------------------------------------------
-// Argument-parsing helpers
-
-bool parse_uint(std::string_view s, unsigned long long& out) {
-    const auto* end = s.data() + s.size();
-    const auto [p, ec] = std::from_chars(s.data(), end, out, 10);
-    return ec == std::errc{} && p == end;
-}
-
-bool parse_region4(std::string_view s, int& x, int& y, int& w, int& h) {
-    int values[4] = {};
-    std::size_t cursor = 0;
-    for (int i = 0; i < 4; ++i) {
-        const std::size_t comma = s.find(',', cursor);
-        const std::size_t end_pos = (comma == std::string_view::npos) ? s.size() : comma;
-        if (end_pos == cursor) return false;
-
-        const auto* p_end = s.data() + end_pos;
-        long parsed = 0;
-        const auto [p, ec] = std::from_chars(s.data() + cursor, p_end, parsed, 10);
-        if (ec != std::errc{} || p != p_end) return false;
-
-        values[i] = static_cast<int>(parsed);
-        if (comma == std::string_view::npos && i < 3) return false;
-        cursor = end_pos + 1;
-    }
-    x = values[0]; y = values[1]; w = values[2]; h = values[3];
-    return true;
-}
 
 // FNV-1a 64-bit hash over a byte buffer. Used by watch.region for
 // "did the pixels change?" without keeping a full prior frame around.
@@ -358,8 +340,10 @@ private:
 // filtering on the filename component.
 class FileWatch : public Subscription {
 public:
-    FileWatch(wire::Writer& w, std::string id, std::wstring pattern)
-        : Subscription(w, std::move(id)), pattern_{std::move(pattern)} {}
+    FileWatch(wire::Writer& w, std::string id, std::wstring pattern,
+              bool recursive)
+        : Subscription(w, std::move(id)), pattern_{std::move(pattern)},
+          recursive_{recursive} {}
 
     // Join the worker before pattern_ is destructed — the run loop derives
     // `dir` and `spec` from pattern_ at the top, but PathMatchSpecW reads
@@ -401,7 +385,8 @@ protected:
 
             DWORD returned = 0;
             const BOOL ok = ReadDirectoryChangesW(
-                dir_handle, buffer.data(), kBufBytes, FALSE,
+                dir_handle, buffer.data(), kBufBytes,
+                recursive_ ? TRUE : FALSE,
                 FILE_NOTIFY_CHANGE_FILE_NAME |
                 FILE_NOTIFY_CHANGE_DIR_NAME  |
                 FILE_NOTIFY_CHANGE_LAST_WRITE,
@@ -463,13 +448,16 @@ done:
 
 private:
     std::wstring pattern_;
+    bool         recursive_;
 };
 
 // watch.registry — RegNotifyChangeKeyValue.
 class RegistryWatch : public Subscription {
 public:
-    RegistryWatch(wire::Writer& w, std::string id, HKEY key, std::string path)
-        : Subscription(w, std::move(id)), key_{key}, path_{std::move(path)} {}
+    RegistryWatch(wire::Writer& w, std::string id, HKEY key, std::string path,
+                  bool watch_subtree)
+        : Subscription(w, std::move(id)), key_{key}, path_{std::move(path)},
+          watch_subtree_{watch_subtree} {}
 
     ~RegistryWatch() override {
         // Join FIRST. The worker calls RegNotifyChangeKeyValue(key_) on
@@ -488,7 +476,7 @@ protected:
         while (!should_stop()) {
             ResetEvent(event);
             if (RegNotifyChangeKeyValue(
-                    key_, TRUE,
+                    key_, watch_subtree_ ? TRUE : FALSE,
                     REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET,
                     event, TRUE) != ERROR_SUCCESS) {
                 break;
@@ -513,6 +501,7 @@ done:
 private:
     HKEY        key_  = nullptr;
     std::string path_;
+    bool        watch_subtree_ = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -543,95 +532,146 @@ HKEY parse_registry_root(std::string_view name) {
 // ---------------------------------------------------------------------------
 // watch.region
 
+// watch.region — input_schema (schema order):
+//   ["region","interval_ms","until_change","encoding"]
+// x-errors: ["permission_denied","invalid_args"].
+// `encoding` selects the EVENT wire format (binary vs base64 envelope);
+// the EVENT-frame side-channel is Phase-2b, so the value is validated here
+// but not yet threaded into RegionWatch's emit path.
 void region(Connection& conn, const wire::Request& req) {
-    if (req.args.empty()) {
-        conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"watch.region requires <x,y,w,h> [--interval <ms>] [--until-change]\"}");
+    SchemaArgs args(req, {"region", "interval_ms", "until_change", "encoding"});
+
+    // --- region: nested object {x,y,w,h}, all required ---------------------
+    const mcp::JsonValue* rnode = args.node("region");
+    if (rnode == nullptr || !rnode->is_object()) {
+        invalid_args(conn,
+                     "watch.region 'region' must be an object {x,y,w,h}");
         return;
     }
-
-    int x = 0, y = 0, w = 0, h = 0;
-    if (!parse_region4(req.args[0], x, y, w, h)) {
-        conn.writer().write_err(ErrorCode::InvalidArgs,
-                                "{\"message\":\"first arg must be x,y,w,h\"}");
-        return;
+    int rx = 0, ry = 0, rw = 0, rh = 0;
+    struct Member { const char* key; int* out; bool min_one; };
+    const Member members[] = {
+        {"x", &rx, false}, {"y", &ry, false},
+        {"w", &rw, true},  {"h", &rh, true},
+    };
+    for (const Member& m : members) {
+        const mcp::JsonValue* v = rnode->find(m.key);
+        if (v == nullptr || v->is_null()) {
+            invalid_args(conn, "watch.region 'region' requires x,y,w,h");
+            return;
+        }
+        std::optional<std::string> lex;
+        if (v->is_number())      lex = v->num_lexeme();
+        else if (v->is_string()) lex = v->as_string();
+        if (!lex) {
+            invalid_args(conn,
+                         "watch.region 'region' x,y,w,h must be integers");
+            return;
+        }
+        const char* begin = lex->data();
+        const char* end   = begin + lex->size();
+        if (begin != end && *begin == '+') {
+            invalid_args(conn,
+                         "watch.region 'region' x,y,w,h must be integers");
+            return;
+        }
+        long long parsed = 0;
+        const auto [p, ec] = std::from_chars(begin, end, parsed, 10);
+        if (ec != std::errc{} || p != end ||
+            parsed < INT_MIN || parsed > INT_MAX) {
+            invalid_args(conn,
+                         "watch.region 'region' x,y,w,h must be integers");
+            return;
+        }
+        if (m.min_one && parsed < 1) {
+            invalid_args(conn,
+                         "watch.region 'region' w and h must be >= 1");
+            return;
+        }
+        *m.out = static_cast<int>(parsed);
     }
 
-    int  interval_ms = 500;
+    // --- interval_ms: integer, minimum 50, default 250 --------------------
+    int interval_ms = 250;
+    if (args.present("interval_ms")) {
+        auto v = args.integer32("interval_ms");
+        if (!v || *v < 50) {
+            invalid_args(conn,
+                         "watch.region 'interval_ms' must be an integer >= 50");
+            return;
+        }
+        interval_ms = *v;
+    }
+
+    // --- until_change: boolean, default false -----------------------------
     bool until_change = false;
-    for (std::size_t i = 1; i < req.args.size(); ++i) {
-        if (req.args[i] == "--interval" && i + 1 < req.args.size()) {
-            unsigned long long v = 0;
-            if (!parse_uint(req.args[++i], v) || v == 0) {
-                conn.writer().write_err(ErrorCode::InvalidArgs,
-                                        "{\"message\":\"--interval must be a positive integer\"}");
-                return;
-            }
-            interval_ms = static_cast<int>(v);
-        } else if (req.args[i] == "--until-change") {
-            until_change = true;
-        } else if (req.args[i].size() >= 2 &&
-                   req.args[i].compare(0, 2, "--") == 0) {
-            std::string detail = "{\"unknown_flag\":\"";
-            detail += req.args[i];
-            detail += "\"}";
-            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+    if (args.present("until_change")) {
+        auto b = args.boolean("until_change");
+        if (!b) {
+            invalid_args(conn,
+                         "watch.region 'until_change' must be a boolean");
+            return;
+        }
+        until_change = *b;
+    }
+
+    // --- encoding: enum [binary, base64], default binary ------------------
+    if (args.present("encoding")) {
+        auto e = args.str("encoding");
+        if (!e || (*e != "binary" && *e != "base64")) {
+            invalid_args(conn,
+                         "watch.region 'encoding' must be 'binary' or "
+                         "'base64'");
             return;
         }
     }
 
     auto sub = std::make_unique<RegionWatch>(
         conn.writer(), conn.subscriptions().allocate_id(),
-        x, y, w, h, interval_ms, until_change);
+        rx, ry, rw, rh, interval_ms, until_change);
     register_and_ack(conn, std::move(sub));
 }
 
 // ---------------------------------------------------------------------------
 // watch.process
 
+// watch.process — input_schema: ["pid"] (integer, minimum 1, required).
+// x-errors: ["not_found","permission_denied","invalid_args"].
 void process(Connection& conn, const wire::Request& req) {
-    if (req.args.size() != 1) {
-        conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"watch.process requires <pid>\"}");
-        return;
-    }
-    unsigned long long pid_v = 0;
-    if (!parse_uint(req.args[0], pid_v)) {
-        conn.writer().write_err(ErrorCode::InvalidArgs,
-                                "{\"message\":\"pid must be a non-negative integer\"}");
+    SchemaArgs args(req, {"pid"});
+
+    auto pid = args.integer32("pid");
+    if (!pid || *pid < 1) {
+        invalid_args(conn,
+                     "watch.process 'pid' must be an integer >= 1");
         return;
     }
 
     auto sub = std::make_unique<ProcessWatch>(
         conn.writer(), conn.subscriptions().allocate_id(),
-        static_cast<DWORD>(pid_v));
+        static_cast<DWORD>(*pid));
     register_and_ack(conn, std::move(sub));
 }
 
 // ---------------------------------------------------------------------------
 // watch.window
 
+// watch.window — input_schema: ["title_prefix"] (string, optional).
+// Omitting title_prefix watches all top-level windows (per spec); an
+// empty prefix matches every window in WindowWatch's enum filter.
+// x-errors: ["permission_denied","invalid_args"].
 void window(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"title_prefix"});
+
     std::string prefix;
-    for (std::size_t i = 0; i < req.args.size(); ++i) {
-        if (req.args[i] == "--title-prefix" && i + 1 < req.args.size()) {
-            prefix = req.args[++i];
-        } else if (req.args[i].size() >= 2 &&
-                   req.args[i].compare(0, 2, "--") == 0) {
-            std::string detail = "{\"unknown_flag\":\"";
-            detail += req.args[i];
-            detail += "\"}";
-            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+    if (args.present("title_prefix")) {
+        auto p = args.str("title_prefix");
+        if (!p) {
+            invalid_args(conn,
+                         "watch.window 'title_prefix' must be a string");
             return;
         }
-    }
-    if (prefix.empty()) {
-        conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"watch.window requires --title-prefix <pattern>\"}");
-        return;
+        prefix = std::move(*p);
     }
 
     auto sub = std::make_unique<WindowWatch>(
@@ -642,17 +682,22 @@ void window(Connection& conn, const wire::Request& req) {
 // ---------------------------------------------------------------------------
 // watch.element
 
+// watch.element — input_schema: ["handle"] (string, required, elt:N form).
+// x-errors: ["target_gone","uia_blind","permission_denied","invalid_args"].
 void element(Connection& conn, const wire::Request& req) {
-    if (req.args.size() != 1) {
-        conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"watch.element requires <elt-id>\"}");
+    SchemaArgs args(req, {"handle"});
+
+    auto handle = args.str("handle");
+    if (!handle || handle->empty()) {
+        invalid_args(conn,
+                     "watch.element requires 'handle' (elt:N form)");
         return;
     }
-    IUIAutomationElement* elem = conn.element_table().lookup(req.args[0]);
+
+    IUIAutomationElement* elem = conn.element_table().lookup(*handle);
     if (!elem) {
         std::string detail = "{";
-        json::append_kv_string(detail, "handle", req.args[0]);
+        json::append_kv_string(detail, "handle", *handle);
         detail += '}';
         conn.writer().write_err(ErrorCode::TargetGone, detail);
         return;
@@ -660,48 +705,106 @@ void element(Connection& conn, const wire::Request& req) {
 
     auto sub = std::make_unique<ElementWatch>(
         conn.writer(), conn.subscriptions().allocate_id(),
-        std::string{req.args[0]}, elem);
+        std::move(*handle), elem);
     register_and_ack(conn, std::move(sub));
 }
 
 // ---------------------------------------------------------------------------
 // watch.file
 
+// watch.file — input_schema (schema order): ["glob","recursive"].
+//   glob:      string, required.
+//   recursive: boolean, default false -> ReadDirectoryChangesW bWatchSubtree.
+// x-errors: ["not_found","permission_denied","invalid_args"].
 void file(Connection& conn, const wire::Request& req) {
-    if (req.args.size() != 1) {
-        conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"watch.file requires <pattern>\"}");
+    SchemaArgs args(req, {"glob", "recursive"});
+
+    auto glob = args.str("glob");
+    if (!glob || glob->empty()) {
+        invalid_args(conn, "watch.file requires 'glob'");
         return;
+    }
+
+    bool recursive = false;
+    if (args.present("recursive")) {
+        auto b = args.boolean("recursive");
+        if (!b) {
+            invalid_args(conn,
+                         "watch.file 'recursive' must be a boolean");
+            return;
+        }
+        recursive = *b;
     }
 
     auto sub = std::make_unique<FileWatch>(
         conn.writer(), conn.subscriptions().allocate_id(),
-        text::utf8_to_wide(req.args[0]));
+        text::utf8_to_wide(*glob), recursive);
     register_and_ack(conn, std::move(sub));
 }
 
 // ---------------------------------------------------------------------------
 // watch.registry
 
+// watch.registry — input_schema (schema order):
+//   ["path","watch_subtree","until_change","timeout_ms"].
+// x-errors: ["not_found","timeout","permission_denied","invalid_args"].
+//
+// `until_change: true` is the synchronous one-shot mode (blocks the
+// connection, returns {path} on the first change, replaces v2.0
+// registry.wait). That blocking/EVENT-delivery behaviour shares the
+// Phase-2b boundary with the rest of the watch.* namespace, so the
+// argument is validated here but only the subscription path
+// (until_change: false) is wired. `watch_subtree` IS threaded — it
+// corrects a latent spec-default bug (the loop hardcoded bWatchSubtree
+// = TRUE; the spec default is false).
 void registry(Connection& conn, const wire::Request& req) {
-    if (req.args.size() != 1) {
-        conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"watch.registry requires <path>\"}");
+    SchemaArgs args(req,
+                    {"path", "watch_subtree", "until_change", "timeout_ms"});
+
+    auto path = args.str("path");
+    if (!path || path->empty()) {
+        invalid_args(conn, "watch.registry requires 'path'");
         return;
     }
-    const auto& full = req.args[0];
+    const std::string full = std::move(*path);
+
+    bool watch_subtree = false;
+    if (args.present("watch_subtree")) {
+        auto b = args.boolean("watch_subtree");
+        if (!b) {
+            invalid_args(conn,
+                         "watch.registry 'watch_subtree' must be a boolean");
+            return;
+        }
+        watch_subtree = *b;
+    }
+
+    if (args.present("until_change")) {
+        auto b = args.boolean("until_change");
+        if (!b) {
+            invalid_args(conn,
+                         "watch.registry 'until_change' must be a boolean");
+            return;
+        }
+    }
+    if (args.present("timeout_ms")) {
+        auto v = args.integer32("timeout_ms");
+        if (!v || *v < 0) {
+            invalid_args(conn,
+                         "watch.registry 'timeout_ms' must be an integer "
+                         ">= 0");
+            return;
+        }
+    }
+
     const auto sep = full.find('\\');
     if (sep == std::string::npos || sep == 0) {
-        conn.writer().write_err(ErrorCode::InvalidArgs,
-                                "{\"message\":\"unrecognised registry path\"}");
+        invalid_args(conn, "watch.registry 'path' is unrecognised");
         return;
     }
     HKEY root = parse_registry_root(std::string_view{full}.substr(0, sep));
     if (!root) {
-        conn.writer().write_err(ErrorCode::InvalidArgs,
-                                "{\"message\":\"unrecognised registry root\"}");
+        invalid_args(conn, "watch.registry 'path' has an unrecognised root");
         return;
     }
 
@@ -715,21 +818,25 @@ void registry(Connection& conn, const wire::Request& req) {
     }
 
     auto sub = std::make_unique<RegistryWatch>(
-        conn.writer(), conn.subscriptions().allocate_id(), key, full);
+        conn.writer(), conn.subscriptions().allocate_id(), key, full,
+        watch_subtree);
     register_and_ack(conn, std::move(sub));
 }
 
 // ---------------------------------------------------------------------------
 // watch.cancel
 
+// watch.cancel — input_schema: ["subscription_id"] (string, required).
+// x-errors: ["invalid_args"]. Idempotent on unknown / already-cancelled ids.
 void cancel(Connection& conn, const wire::Request& req) {
-    if (req.args.size() != 1) {
-        conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"watch.cancel requires <sub-id>\"}");
+    SchemaArgs args(req, {"subscription_id"});
+
+    auto id = args.str("subscription_id");
+    if (!id || id->empty()) {
+        invalid_args(conn, "watch.cancel requires 'subscription_id'");
         return;
     }
-    conn.subscriptions().cancel(req.args[0]);  // idempotent on unknown ids
+    conn.subscriptions().cancel(*id);  // idempotent on unknown ids
     conn.writer().write_ok();
 }
 
