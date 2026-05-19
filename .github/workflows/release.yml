@@ -43,7 +43,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0    # need full history to read the tag annotation
+          fetch-depth: 0       # need full history to read the tag annotation
+          submodules: recursive # protocol/ submodule required for gen steps
+
+      - name: Generate protocol dist + verbs blob
+        shell: pwsh
+        run: |
+          # Render the protocol spec (produces protocol/dist/PROTOCOL.md etc.)
+          python protocol/Tools/gen.py
+          # Embed spec JSON into the modern build (produces src/verbs_blob.cpp)
+          python Tools/gen_verbs.py
 
       - name: Configure (CMake)
         shell: pwsh
