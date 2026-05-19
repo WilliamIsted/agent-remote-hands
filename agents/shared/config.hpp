@@ -28,8 +28,12 @@ namespace remote_hands {
 // `Tools/install-agent.ps1`, not in this binary — see the README.
 struct Config {
     std::uint16_t           port            = 8765;
-    bool                    discoverable    = false;
+    bool                    discoverable    = true;
     std::filesystem::path   token_path;       // Default: %ProgramData%\AgentRemoteHands\token
+    // Token TTL in hours. -1 = FOREVER (never rotate), 0 = per-session
+    // (rotate on every start, delete on exit), >0 = hours from file creation.
+    // Default: 720 (30 days).
+    int                     token_ttl_hours = 720;
     int                     max_connections = 4;
     // Per-connection idle-receive timeout in seconds. Connections with no
     // activity for longer than this are dropped; 0 disables.

@@ -105,6 +105,13 @@ void Connection::run() {
 }
 
 void Connection::dispatch(const wire::Request& req) {
+#ifdef RH_DEBUG
+    {
+        std::string line = req.verb;
+        for (const auto& a : req.args) { line += ' '; line += a; }
+        log::debug(L">> %hs", line.c_str());
+    }
+#endif
     // Header tokenisation failed (e.g. unmatched quote per PROTOCOL.md
     // §1.2.5). Surface as ERR invalid_args rather than dispatching.
     if (!req.parse_error.empty()) {

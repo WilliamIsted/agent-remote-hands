@@ -54,6 +54,16 @@ EnvBuf get_env(const wchar_t* name) {
     return EnvBuf{raw, std::free};
 }
 
+// Accepts "FOREVER" → -1, "0" → per-session, positive integer → hours.
+int parse_token_ttl(const wchar_t* s) {
+    if (std::wcscmp(s, L"FOREVER") == 0) return -1;
+    const long v = std::wcstol(s, nullptr, 10);
+    if (v < 0) {
+        throw std::runtime_error("--token-ttl: use FOREVER, 0 (per-session), or a positive number of hours");
+    }
+    return static_cast<int>(v);
+}
+
 [[noreturn]] void print_usage_and_exit() {
     std::wprintf(LR"(Agent Remote Hands - windows-modern v2 agent
 
@@ -61,9 +71,13 @@ Usage: rha-win.modern.x64.exe [options]
 
 Options:
   --port <n>              TCP port to listen on (default: 8765)
-  --discoverable          Advertise via mDNS (_remote-hands._tcp.local.)
+  --no-discoverable       Suppress mDNS advertisement (_remote-hands._tcp.local.)
   --token-path <path>     Path to the elevation token file
                           (default: %%ProgramData%%\AgentRemoteHands\token)
+  --token-ttl <hours|FOREVER>
+                          Token lifetime. FOREVER = never rotate; 0 = per-session
+                          (new token on every start, file deleted on exit); any
+                          positive integer = hours from file creation (default: 720 = 30 days)
   --max-connections <n>   Concurrent connection cap (default: 4)
   --idle-timeout <s>      Drop connections idle for this many seconds (default: 0 = off)
   --watchdog <s>          Self-exit if no connection activity for this many
@@ -73,8 +87,9 @@ Options:
 
 Environment variables (overridden by CLI flags):
   REMOTE_HANDS_PORT
-  REMOTE_HANDS_DISCOVERABLE   (set to "1" to enable)
+  REMOTE_HANDS_DISCOVERABLE   (set to "0" to disable; mDNS is on by default)
   REMOTE_HANDS_TOKEN_PATH
+  REMOTE_HANDS_TOKEN_TTL      (FOREVER, 0, or hours; mirrors --token-ttl)
   REMOTE_HANDS_IDLE_TIMEOUT   (seconds)
   REMOTE_HANDS_WATCHDOG       (seconds)
 
@@ -98,10 +113,13 @@ Config Config::parse(int argc, wchar_t* argv[]) {
         c.port = parse_port(env_port.get());
     }
     if (auto env_disc = get_env(L"REMOTE_HANDS_DISCOVERABLE"); env_disc) {
-        c.discoverable = (std::wstring_view{env_disc.get()} == L"1");
+        c.discoverable = (std::wstring_view{env_disc.get()} != L"0");
     }
     if (auto env_token = get_env(L"REMOTE_HANDS_TOKEN_PATH"); env_token && *env_token) {
         c.token_path = env_token.get();
+    }
+    if (auto env_ttl = get_env(L"REMOTE_HANDS_TOKEN_TTL"); env_ttl && *env_ttl) {
+        c.token_ttl_hours = parse_token_ttl(env_ttl.get());
     }
     if (auto env_idle = get_env(L"REMOTE_HANDS_IDLE_TIMEOUT"); env_idle && *env_idle) {
         c.idle_timeout_seconds = static_cast<unsigned int>(
@@ -117,10 +135,12 @@ Config Config::parse(int argc, wchar_t* argv[]) {
         const std::wstring_view arg{argv[i]};
         if (arg == L"--port" && i + 1 < argc) {
             c.port = parse_port(argv[++i]);
-        } else if (arg == L"--discoverable") {
-            c.discoverable = true;
+        } else if (arg == L"--no-discoverable") {
+            c.discoverable = false;
         } else if (arg == L"--token-path" && i + 1 < argc) {
             c.token_path = argv[++i];
+        } else if (arg == L"--token-ttl" && i + 1 < argc) {
+            c.token_ttl_hours = parse_token_ttl(argv[++i]);
         } else if (arg == L"--max-connections" && i + 1 < argc) {
             const auto v = std::wcstoul(argv[++i], nullptr, 10);
             if (v == 0 || v > 1024) {

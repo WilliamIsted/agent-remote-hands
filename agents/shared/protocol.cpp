@@ -13,6 +13,7 @@
 //   limitations under the License.
 
 #include "protocol.hpp"
+#include "log.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -190,11 +191,17 @@ void Writer::write_raw(std::string_view sv) {
 
 void Writer::write_ok() {
     std::lock_guard lock{mutex_};
+#ifdef RH_DEBUG
+    log::debug(L"<< OK 0");
+#endif
     write_raw(std::string_view{"OK 0\n"});
 }
 
 void Writer::write_ok(ByteView payload) {
     std::lock_guard lock{mutex_};
+#ifdef RH_DEBUG
+    log::debug(L"<< OK %zu bytes", payload.size);
+#endif
     char header[32];
     const int n = std::snprintf(header, sizeof(header),
                                 "OK %zu\n", payload.size);
@@ -212,6 +219,9 @@ void Writer::write_ok(std::string_view payload) {
 
 void Writer::write_err(ErrorCode code) {
     std::lock_guard lock{mutex_};
+#ifdef RH_DEBUG
+    log::debug(L"<< ERR %hs", to_wire(code).data());
+#endif
     std::string line = "ERR ";
     line += to_wire(code);
     line += " 0\n";
@@ -224,6 +234,11 @@ void Writer::write_err(ErrorCode code, std::string_view detail_json) {
         return;
     }
     std::lock_guard lock{mutex_};
+#ifdef RH_DEBUG
+    log::debug(L"<< ERR %hs %.*hs",
+               to_wire(code).data(),
+               static_cast<int>(detail_json.size()), detail_json.data());
+#endif
     char prefix[64];
     const int n = std::snprintf(prefix, sizeof(prefix),
                                 "ERR %.*s %zu\n",

@@ -44,6 +44,21 @@ inline const wchar_t* level_tag(Level lvl) noexcept {
     return L"?    ";
 }
 
+#ifdef RH_DEBUG
+/* Opens debug.log once on first call; returns the FILE* for all subsequent
+ * calls. The file is opened for appending so successive runs accumulate.
+ * Returns nullptr if fopen fails (writes silently dropped). */
+inline FILE* debug_log_fp() noexcept {
+    static FILE* fp = [] {
+        FILE* f{};
+#pragma warning(suppress: 4996)  // fopen: MSVC prefers fopen_s, but we need C-linkage here
+        f = std::fopen("debug.log", "a");
+        return f;
+    }();
+    return fp;
+}
+#endif
+
 inline void emit_v(Level lvl, const wchar_t* fmt, va_list args) noexcept {
     wchar_t buf[1024];
     int prefix = std::swprintf(buf, 16, L"[%s] ", level_tag(lvl));
@@ -57,14 +72,26 @@ inline void emit_v(Level lvl, const wchar_t* fmt, va_list args) noexcept {
 
     OutputDebugStringW(buf);
     OutputDebugStringW(L"\n");
+
+#ifdef RH_DEBUG
+    if (FILE* lf = debug_log_fp()) {
+        std::fputws(buf, lf);
+        std::fputwc(L'\n', lf);
+        std::fflush(lf);
+    }
+#endif
 }
 
 }  // namespace detail
 
 inline void debug(const wchar_t* fmt, ...) noexcept {
+#ifdef RH_DEBUG
     va_list args; va_start(args, fmt);
     detail::emit_v(Level::Debug, fmt, args);
     va_end(args);
+#else
+    (void)fmt;
+#endif
 }
 
 inline void info(const wchar_t* fmt, ...) noexcept {
