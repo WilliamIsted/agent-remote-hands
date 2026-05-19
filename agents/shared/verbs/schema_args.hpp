@@ -61,7 +61,37 @@ public:
         if (root != nullptr) {
             const mcp::JsonValue* a = root->find("_args");
             if (a != nullptr && a->is_array()) positional_ = a;
+            scan_unknown(*root);
         }
+    }
+
+    // Strict unknown-flag rejection. The MCP `arguments` object (named_root)
+    // must only carry keys that are declared schema properties for this verb.
+    // Any other named key is a caller mistake — a misspelled or unsupported
+    // flag — and is rejected with ERR invalid_args + a machine-readable
+    // {"unknown_flag":"--<flag>"} detail so the caller can self-correct.
+    //
+    // EVERY handler that constructs a SchemaArgs calls this immediately after
+    // construction and early-returns if it returns true. It is an explicit
+    // call (not folded into the first typed accessor) because zero-property
+    // verbs (system.info, …) never touch a typed accessor yet must still
+    // reject a stray flag.
+    //
+    // The reconstructed token is `--` + key with '_'->'-' — the exact inverse
+    // of wire.py _args_to_dict (`--bogus-flag` -> key `bogus_flag`) and of
+    // mcp_session.cpp map_arguments' flag projection, so the emitted value
+    // round-trips to the literal flag the caller passed.
+    bool reject_unknown(Connection& conn) const {
+        if (!unknown_flag_) return false;
+        std::string detail = "{";
+        json::append_kv_string(detail, "unknown_flag", *unknown_flag_);
+        detail += ',';
+        json::append_kv_string(
+            detail, "message",
+            "unknown argument " + *unknown_flag_ + " for this verb");
+        detail += '}';
+        conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+        return true;
     }
 
     // The JSON node for a schema property, resolved named-first then by the
@@ -149,6 +179,35 @@ private:
         return -1;
     }
 
+    bool is_declared(std::string_view key) const {
+        for (const auto& p : props_) {
+            if (p == key) return true;
+        }
+        return false;
+    }
+
+    // Walk the named-args object once at construction; record the first key
+    // that is neither a declared schema property nor one of the two infra
+    // containers the wire client / MCP session legitimately inject:
+    //   * "_args"       — the reference client's positional projection
+    //                     (wire.py _args_to_dict): NOT an unknown flag.
+    //   * "content_b64" — the binary payload side-channel read directly via
+    //                     wire::arg_node() by file.create/file.write/
+    //                     clipboard.set; never a declared SchemaArgs prop.
+    // First offender wins; insertion order is preserved by the parser so the
+    // reported flag is deterministic.
+    void scan_unknown(const mcp::JsonValue& root) {
+        for (const auto& kv : root.as_object()) {
+            const std::string& key = kv.first;
+            if (key == "_args" || key == "content_b64") continue;
+            if (is_declared(key)) continue;
+            std::string flag = "--";
+            for (char c : key) flag += (c == '_') ? '-' : c;
+            unknown_flag_ = std::move(flag);
+            return;
+        }
+    }
+
     static std::optional<long long> parse_ll(std::string_view s) {
         // Tolerate a leading minus and surrounding nothing else. Reject a
         // value that does not parse cleanly so a bad arg surfaces as the
@@ -172,6 +231,7 @@ private:
     const wire::Request& req_;
     std::vector<std::string_view> props_;
     const mcp::JsonValue* positional_ = nullptr;
+    std::optional<std::string> unknown_flag_;
 };
 
 // Emit ERR invalid_args with the same {"message":...} shape the positional

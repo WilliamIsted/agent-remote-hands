@@ -31,6 +31,8 @@
 #include "token.hpp"
 
 #include <memory>
+#include <set>
+#include <string>
 
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -83,6 +85,23 @@ public:
     HWND  focus_track_hwnd() const noexcept { return focus_track_hwnd_; }
     DWORD focus_track_pid()  const noexcept { return focus_track_pid_; }
 
+    // Held-input tracking (PROTOCOL.md §2.8). input.mouse.press /
+    // input.keyboard.key_down register here so the connection-teardown path
+    // (run()'s post-loop cleanup, mirroring subscriptions_->cancel_all())
+    // can issue the matching *UP events and never leave input stuck after a
+    // socket drop. input.mouse.release / input.keyboard.key_up clear entries.
+    // Mouse buttons are tracked by their MOUSEEVENTF_*DOWN flag; keyboard
+    // keys by virtual-key code. Sets are tiny (a few entries at most); a
+    // std::set keeps the membership idempotent (repeated press is a no-op).
+    std::set<unsigned long>& held_mouse_buttons() noexcept {
+        return held_mouse_buttons_;
+    }
+    std::set<unsigned short>& held_keys() noexcept { return held_keys_; }
+    // Issues *UP for every tracked button/key and clears the sets. Idempotent
+    // at the OS level (a no-op if already released). Called on connection
+    // teardown; safe to call when both sets are empty.
+    void release_held_input() noexcept;
+
 private:
     enum class State {
         PreHello,
@@ -126,6 +145,9 @@ private:
 
     HWND   focus_track_hwnd_ = nullptr;
     DWORD  focus_track_pid_  = 0;
+
+    std::set<unsigned long>  held_mouse_buttons_;  // MOUSEEVENTF_*DOWN flags
+    std::set<unsigned short> held_keys_;           // virtual-key codes
 };
 
 }  // namespace remote_hands

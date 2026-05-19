@@ -188,7 +188,7 @@ void info(Connection& conn, const wire::Request& req) {
     // No input properties (input_schema.properties == {}); still routed
     // through SchemaArgs for consistency with the migrated namespaces.
     SchemaArgs args(req, {});
-    (void)args;
+    if (args.reject_unknown(conn)) return;
 
     std::string j;
     j += '{';
@@ -285,7 +285,7 @@ void info(Connection& conn, const wire::Request& req) {
 
 void capabilities(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {});
-    (void)args;
+    if (args.reject_unknown(conn)) return;
     conn.writer().write_ok(build_capabilities_json());
 }
 
@@ -295,7 +295,7 @@ void capabilities(Connection& conn, const wire::Request& req) {
 
 void health(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {});
-    (void)args;
+    if (args.reject_unknown(conn)) return;
     conn.writer().write_ok();
 }
 
@@ -305,7 +305,7 @@ void health(Connection& conn, const wire::Request& req) {
 
 void lock(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {});
-    (void)args;
+    if (args.reject_unknown(conn)) return;
 
     if (!LockWorkStation()) {
         const DWORD err = GetLastError();
@@ -374,7 +374,7 @@ BOOL CALLBACK enum_blocker(HWND hwnd, LPARAM lparam) {
 
 void shutdown_blockers(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {});
-    (void)args;
+    if (args.reject_unknown(conn)) return;
 
     BlockerCollector col;
     col.out = "{\"blockers\":[";
@@ -415,6 +415,7 @@ struct PowerArgs {
 bool resolve_power_args(Connection& conn, const wire::Request& req,
                         std::string_view verb, PowerArgs& out) {
     SchemaArgs args(req, {"delay_seconds", "force_close_apps", "reason"});
+    if (args.reject_unknown(conn)) return false;
 
     if (args.present("delay_seconds")) {
         auto d = args.integer("delay_seconds");
@@ -642,6 +643,7 @@ void do_suspend(Connection& conn, BOOLEAN hibernate_flag,
                 std::string_view verb, const wire::Request& req) {
     SchemaArgs args(req, {"delay_seconds", "wake_at",
                           "bypass_vm_check", "reason"});
+    if (args.reject_unknown(conn)) return;
 
     long long delay_seconds = 0;
     if (args.present("delay_seconds")) {
@@ -833,7 +835,7 @@ void sleep(Connection& conn, const wire::Request& req) {
 
 void power_cancel(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {});
-    (void)args;
+    if (args.reject_unknown(conn)) return;
 
     auto& p = pending_shutdown();
     bool      was_pending = false;
@@ -884,7 +886,7 @@ void power_cancel(Connection& conn, const wire::Request& req) {
 #ifdef RH_MCP
 void verbs(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {});
-    (void)args;
+    if (args.reject_unknown(conn)) return;
 
     const auto& specs = verb_specs();
 

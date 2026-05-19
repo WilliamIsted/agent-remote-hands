@@ -30,9 +30,11 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
+#include <windows.h>   // SendInput — held-input teardown (PROTOCOL.md §2.8)
 
 namespace remote_hands {
 
@@ -76,6 +78,41 @@ Connection::~Connection() {
     if (socket_ != INVALID_SOCKET) {
         closesocket(socket_);
     }
+}
+
+// PROTOCOL.md §2.8 — issue the matching *UP for every button/key this
+// connection left held, then drop the sets. Idempotent at the OS level: if
+// the user-app or another connection already released it, the up-event is a
+// harmless no-op. One SendInput batch carries all of them. Mirrors the
+// per-verb atomic-SendInput discipline; never throws (noexcept teardown).
+void Connection::release_held_input() noexcept {
+    if (held_mouse_buttons_.empty() && held_keys_.empty()) {
+        return;
+    }
+    std::vector<INPUT> seq;
+    seq.reserve(held_mouse_buttons_.size() + held_keys_.size());
+    for (unsigned long down_flag : held_mouse_buttons_) {
+        // Stored as the MOUSEEVENTF_*DOWN flag; the matching *UP is the
+        // DOWN flag shifted left one bit (LEFTDOWN 0x0002 -> LEFTUP 0x0004,
+        // RIGHTDOWN 0x0008 -> RIGHTUP 0x0010, MIDDLEDOWN 0x0020 ->
+        // MIDDLEUP 0x0040). Documented Win32 MOUSEEVENTF_* bit layout.
+        INPUT in{};
+        in.type        = INPUT_MOUSE;
+        in.mi.dwFlags  = static_cast<DWORD>(down_flag << 1);
+        seq.push_back(in);
+    }
+    for (unsigned short vk : held_keys_) {
+        INPUT in{};
+        in.type       = INPUT_KEYBOARD;
+        in.ki.wVk     = vk;
+        in.ki.dwFlags = KEYEVENTF_KEYUP;
+        seq.push_back(in);
+    }
+    if (!seq.empty()) {
+        SendInput(static_cast<UINT>(seq.size()), seq.data(), sizeof(INPUT));
+    }
+    held_mouse_buttons_.clear();
+    held_keys_.clear();
 }
 
 void Connection::run() {
@@ -128,6 +165,12 @@ void Connection::run() {
     if (subscriptions_) {
         subscriptions_->cancel_all();
     }
+    // PROTOCOL.md §2.8 — never leave synthesised input held after the
+    // connection drops. Covers both the graceful connection.close path and
+    // every abrupt-drop / exception path (same rationale as the
+    // subscription cancel_all() above). Idempotent and no-op when nothing
+    // was held.
+    release_held_input();
     state_ = State::Closed;
 }
 

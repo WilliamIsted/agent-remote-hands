@@ -198,6 +198,7 @@ void ocr(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"region", "window", "monitor", "path", "bytes",
                           "bytes_format", "language", "min_confidence",
                           "include_word_bboxes"});
+    if (args.reject_unknown(conn)) return;
 
     bool has_region  = false, has_window  = false, has_monitor = false;
     bool has_path    = false, has_bytes   = false;

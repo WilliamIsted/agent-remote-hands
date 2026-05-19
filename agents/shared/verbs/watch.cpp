@@ -540,6 +540,7 @@ HKEY parse_registry_root(std::string_view name) {
 // but not yet threaded into RegionWatch's emit path.
 void region(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"region", "interval_ms", "until_change", "encoding"});
+    if (args.reject_unknown(conn)) return;
 
     // --- region: nested object {x,y,w,h}, all required ---------------------
     const mcp::JsonValue* rnode = args.node("region");
@@ -639,6 +640,7 @@ void region(Connection& conn, const wire::Request& req) {
 // x-errors: ["not_found","permission_denied","invalid_args"].
 void process(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"pid"});
+    if (args.reject_unknown(conn)) return;
 
     auto pid = args.integer32("pid");
     if (!pid || *pid < 1) {
@@ -662,6 +664,7 @@ void process(Connection& conn, const wire::Request& req) {
 // x-errors: ["permission_denied","invalid_args"].
 void window(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"title_prefix"});
+    if (args.reject_unknown(conn)) return;
 
     std::string prefix;
     if (args.present("title_prefix")) {
@@ -686,6 +689,7 @@ void window(Connection& conn, const wire::Request& req) {
 // x-errors: ["target_gone","uia_blind","permission_denied","invalid_args"].
 void element(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"handle"});
+    if (args.reject_unknown(conn)) return;
 
     auto handle = args.str("handle");
     if (!handle || handle->empty()) {
@@ -718,6 +722,7 @@ void element(Connection& conn, const wire::Request& req) {
 // x-errors: ["not_found","permission_denied","invalid_args"].
 void file(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"glob", "recursive"});
+    if (args.reject_unknown(conn)) return;
 
     auto glob = args.str("glob");
     if (!glob || glob->empty()) {
@@ -760,6 +765,7 @@ void file(Connection& conn, const wire::Request& req) {
 void registry(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req,
                     {"path", "watch_subtree", "until_change", "timeout_ms"});
+    if (args.reject_unknown(conn)) return;
 
     auto path = args.str("path");
     if (!path || path->empty()) {
@@ -830,6 +836,7 @@ void registry(Connection& conn, const wire::Request& req) {
 // x-errors: ["invalid_args"]. Idempotent on unknown / already-cancelled ids.
 void cancel(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"subscription_id"});
+    if (args.reject_unknown(conn)) return;
 
     auto id = args.str("subscription_id");
     if (!id || id->empty()) {

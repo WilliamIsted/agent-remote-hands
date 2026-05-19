@@ -58,6 +58,9 @@ enum class ErrorCode {
     CrossDevice,
     UnsupportedFormat,
     ImageTooLarge,
+    SizeLimitExceeded,
+    NoImplementationAvailable,
+    TransferFailed,
 };
 
 constexpr std::string_view to_wire(ErrorCode code) noexcept {
@@ -92,6 +95,10 @@ constexpr std::string_view to_wire(ErrorCode code) noexcept {
         case ErrorCode::CrossDevice:            return "cross_device";
         case ErrorCode::UnsupportedFormat:      return "unsupported_format";
         case ErrorCode::ImageTooLarge:          return "image_too_large";
+        case ErrorCode::SizeLimitExceeded:      return "size_limit_exceeded";
+        case ErrorCode::NoImplementationAvailable:
+                                                return "no_implementation_available";
+        case ErrorCode::TransferFailed:         return "transfer_failed";
     }
     return "unknown";
 }

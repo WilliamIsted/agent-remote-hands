@@ -66,7 +66,13 @@ namespace input_verbs {
     void click(Connection&, const wire::Request&);
     void move(Connection&, const wire::Request&);
     void scroll(Connection&, const wire::Request&);
+    void mouse_press(Connection&, const wire::Request&);
+    void mouse_release(Connection&, const wire::Request&);
+    void mouse_drag(Connection&, const wire::Request&);
+    void position(Connection&, const wire::Request&);
     void key(Connection&, const wire::Request&);
+    void key_down(Connection&, const wire::Request&);
+    void key_up(Connection&, const wire::Request&);
     void type(Connection&, const wire::Request&);
     void send_message(Connection&, const wire::Request&);
     void post_message(Connection&, const wire::Request&);
@@ -93,6 +99,8 @@ namespace process_verbs {
 
 namespace file_verbs {
     void read(Connection&, const wire::Request&);
+    void create(Connection&, const wire::Request&);
+    void download(Connection&, const wire::Request&);
     void write(Connection&, const wire::Request&);
     void write_at(Connection&, const wire::Request&);
     void stat(Connection&, const wire::Request&);
@@ -181,7 +189,13 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"input.mouse.click",          {Tier::Update,     &input_verbs::click}},
         {"input.mouse.move",           {Tier::Update,     &input_verbs::move}},
         {"input.mouse.scroll",         {Tier::Update,     &input_verbs::scroll}},
+        {"input.mouse.press",          {Tier::Update,     &input_verbs::mouse_press}},
+        {"input.mouse.release",        {Tier::Update,     &input_verbs::mouse_release}},
+        {"input.mouse.drag",           {Tier::Update,     &input_verbs::mouse_drag}},
+        {"input.position",             {Tier::Read,       &input_verbs::position}},
         {"input.keyboard.key",         {Tier::Update,     &input_verbs::key}},
+        {"input.keyboard.key_down",    {Tier::Update,     &input_verbs::key_down}},
+        {"input.keyboard.key_up",      {Tier::Update,     &input_verbs::key_up}},
         {"input.keyboard.type",        {Tier::Update,     &input_verbs::type}},
         {"input.send_message",         {Tier::Update,     &input_verbs::send_message}},
         {"input.post_message",         {Tier::Update,     &input_verbs::post_message}},
@@ -207,6 +221,8 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
 
         // file.*
         {"file.read",                  {Tier::Read,       &file_verbs::read}},
+        {"file.create",                {Tier::Create,     &file_verbs::create}},
+        {"file.download",              {Tier::Create,     &file_verbs::download}},
         {"file.write",                 {Tier::Update,     &file_verbs::write}},
         {"file.write_at",              {Tier::Update,     &file_verbs::write_at}},
         {"file.stat",                  {Tier::Read,       &file_verbs::stat}},

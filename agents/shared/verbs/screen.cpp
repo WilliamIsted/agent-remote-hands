@@ -189,6 +189,7 @@ BOOL CALLBACK find_monitor_by_index(HMONITOR mon, HDC, LPRECT, LPARAM lparam) {
 void capture(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"region", "window", "monitor", "format", "quality",
                           "cursor", "encoding"});
+    if (args.reject_unknown(conn)) return;
 
     // --- region: nested object {x,y,w,h}, all required, all integers -------
     bool has_region = false;

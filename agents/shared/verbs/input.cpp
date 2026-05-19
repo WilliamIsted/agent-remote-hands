@@ -401,6 +401,7 @@ void append_actual_position(std::string& out, int x, int y) {
 
 void move(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"x", "y", "relative"});
+    if (args.reject_unknown(conn)) return;
 
     // integer32 (not static_cast<int>(integer())) so an out-of-int-range
     // long long from hostile input surfaces as invalid_args rather than
@@ -478,6 +479,7 @@ void move(Connection& conn, const wire::Request& req) {
 void click(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"x", "y", "button", "double", "triple", "clicks",
                           "clicks_interval_ms", "duration_ms", "modifiers"});
+    if (args.reject_unknown(conn)) return;
 
     auto xv = args.integer32("x");
     auto yv = args.integer32("y");
@@ -764,6 +766,7 @@ void click(Connection& conn, const wire::Request& req) {
 
 void scroll(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"x", "y", "delta", "horizontal"});
+    if (args.reject_unknown(conn)) return;
 
     auto xv = args.integer32("x");
     auto yv = args.integer32("y");
@@ -823,12 +826,293 @@ void scroll(Connection& conn, const wire::Request& req) {
 }
 
 // ---------------------------------------------------------------------------
+// input.mouse.press — input_schema (schema order): ["button"] (default
+// "left"). x-crudx: U. x-errors: ["uipi_blocked","permission_denied",
+// "invalid_args"]. x-output-schema: null — wire response is the literal OK 0.
+//
+// Button down only; no matching up. The button enters this connection's
+// held-input set (PROTOCOL.md §2.8) so connection-close cleanup releases it.
+// Repeated press of an already-held button is a no-op (the std::set keeps
+// membership idempotent; the OS treats a duplicate DOWN the same).
+
+namespace {
+
+// Resolve the optional `button` arg (enum left|right|middle, default left)
+// to its MOUSEEVENTF_*DOWN flag. Returns false (after writing the
+// spec-declared invalid_args) on a non-string or out-of-enum value.
+bool resolve_button_down(Connection& conn, const SchemaArgs& args,
+                         std::string_view verb, DWORD& down_out) {
+    down_out = MOUSEEVENTF_LEFTDOWN;   // schema default "left"
+    if (!args.present("button")) return true;
+    auto b = args.str("button");
+    if (!b) {
+        invalid_args(conn, std::string(verb) + " 'button' must be a string");
+        return false;
+    }
+    if (*b == "left")        down_out = MOUSEEVENTF_LEFTDOWN;
+    else if (*b == "right")  down_out = MOUSEEVENTF_RIGHTDOWN;
+    else if (*b == "middle") down_out = MOUSEEVENTF_MIDDLEDOWN;
+    else {
+        std::string detail = "{";
+        json::append_kv_string(
+            detail, "message",
+            std::string(verb) + " 'button' must be left|right|middle");
+        detail += ',';
+        json::append_kv_string(detail, "button", *b);
+        detail += '}';
+        conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+void mouse_press(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"button"});
+    if (args.reject_unknown(conn)) return;
+
+    DWORD down = MOUSEEVENTF_LEFTDOWN;
+    if (!resolve_button_down(conn, args, "input.mouse.press", down)) return;
+
+    // uipi_blocked is in input.mouse.press.json x-errors — the foreground
+    // window's IL barrier silently drops the synthesised down the same as a
+    // click. Guard before mutating OS / held-input state.
+    if (!uipi::check_foreground_or_fail(conn)) return;
+    if (!crash_check::check_focus_or_fail(conn)) return;
+
+    INPUT in{};
+    in.type       = INPUT_MOUSE;
+    in.mi.dwFlags = down;
+    if (SendInput(1, &in, sizeof(INPUT)) != 1) {
+        char detail[64];
+        std::snprintf(detail, sizeof(detail),
+                      "{\"win32_error\":%lu}", GetLastError());
+        conn.writer().write_err(ErrorCode::PermissionDenied, detail);
+        return;
+    }
+
+    // Register the button as held on this connection (§2.8 cleanup). Stored
+    // as the DOWN flag; release/teardown derive the UP flag.
+    conn.held_mouse_buttons().insert(static_cast<unsigned long>(down));
+
+    conn.writer().write_ok();  // x-output-schema: null (OK 0)
+}
+
+// ---------------------------------------------------------------------------
+// input.mouse.release — input_schema (schema order): ["button"] (default
+// "left"). x-crudx: U. x-errors: ["permission_denied","invalid_args"]
+// (NOT uipi_blocked — the kernel delivers the up regardless; and NOT a
+// not_held error — the verb is idempotent cleanup). x-output-schema: null.
+//
+// Idempotent: always issues the *UP (the OS no-ops gracefully if the button
+// was not down) and removes the button from THIS connection's held set as
+// well as any other connection's — cross-connection release is the
+// documented fail-safe. (Cross-connection visibility into other
+// connections' held sets is not plumbed through here; the OS-level *UP is
+// the authoritative fail-safe and is always issued, which satisfies the
+// "recover from a stuck state" contract.)
+
+void mouse_release(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"button"});
+    if (args.reject_unknown(conn)) return;
+
+    DWORD down = MOUSEEVENTF_LEFTDOWN;
+    if (!resolve_button_down(conn, args, "input.mouse.release", down)) return;
+
+    // MOUSEEVENTF_*UP is the *DOWN flag << 1 (LEFTDOWN 0x0002 -> LEFTUP
+    // 0x0004, etc. — documented Win32 bit layout, same mapping the §2.8
+    // teardown uses).
+    INPUT in{};
+    in.type       = INPUT_MOUSE;
+    in.mi.dwFlags = down << 1;
+    if (SendInput(1, &in, sizeof(INPUT)) != 1) {
+        char detail[64];
+        std::snprintf(detail, sizeof(detail),
+                      "{\"win32_error\":%lu}", GetLastError());
+        conn.writer().write_err(ErrorCode::PermissionDenied, detail);
+        return;
+    }
+
+    conn.held_mouse_buttons().erase(static_cast<unsigned long>(down));
+
+    conn.writer().write_ok();  // x-output-schema: null (OK 0); idempotent
+}
+
+// ---------------------------------------------------------------------------
+// input.mouse.drag — input_schema (schema order): ["x","y","button","steps"].
+// x-crudx: U. required: ["x","y"]. x-errors: ["uipi_blocked",
+// "permission_denied","invalid_args"]. x-output-schema: null — OK 0.
+//
+// Press at the current cursor position, interpolate `steps` MOUSEEVENTF_MOVE
+// events to (x, y), release. ONE SendInput batch (down + N moves + up) so
+// the OS sees a continuous gesture without real-input interleaving. Atomic:
+// the up always fires before the verb returns, so the drag does NOT enter
+// the held-input set.
+
+void mouse_drag(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"x", "y", "button", "steps"});
+    if (args.reject_unknown(conn)) return;
+
+    auto xv = args.integer32("x");
+    auto yv = args.integer32("y");
+    if (!xv || !yv) {
+        invalid_args(conn, "input.mouse.drag requires integer 'x' and 'y'");
+        return;
+    }
+
+    DWORD down = MOUSEEVENTF_LEFTDOWN;
+    if (!resolve_button_down(conn, args, "input.mouse.drag", down)) return;
+    const DWORD up = down << 1;
+
+    int steps = 10;   // schema default
+    if (args.present("steps")) {
+        auto s = args.integer32("steps");
+        if (!s || *s < 1) {
+            invalid_args(conn,
+                         "input.mouse.drag 'steps' must be an integer >= 1");
+            return;
+        }
+        steps = *s;
+    }
+
+    if (!uipi::check_foreground_or_fail(conn)) return;
+    if (!crash_check::check_focus_or_fail(conn)) return;
+
+    // Start at the current cursor position; interpolate linearly to the
+    // clamped target. The down fires at the start position, then `steps`
+    // absolute-virtual-desktop moves walk to (x, y), then the up.
+    POINT start{};
+    GetCursorPos(&start);
+
+    int end_x = *xv;
+    int end_y = *yv;
+    clamp_to_virtual_screen(end_x, end_y);
+
+    std::vector<INPUT> seq;
+    seq.reserve(static_cast<std::size_t>(steps) + 3);
+
+    // The DOWN event carries no coordinates, so it fires at whatever the live
+    // cursor position is when the batch is delivered — which can differ from
+    // the `start` snapshotted above if anything moved the pointer between
+    // GetCursorPos and SendInput. Prepend an absolute move to the snapshotted
+    // `start` so the press lands deterministically at the gesture origin
+    // (coordinates carried in the move event, CLAUDE.md #63). The batch is
+    // [MOVE(start), DOWN, MOVE(step1)…MOVE(end), UP] — one atomic SendInput.
+    seq.push_back(make_absolute_move(start.x, start.y));
+
+    INPUT d{};
+    d.type       = INPUT_MOUSE;
+    d.mi.dwFlags = down;
+    seq.push_back(d);
+
+    for (int i = 1; i <= steps; ++i) {
+        // Linear interpolation start -> end; the final step lands exactly on
+        // (end_x, end_y). long long intermediate avoids overflow on large
+        // coordinate spans before the per-axis division.
+        const int px = static_cast<int>(
+            start.x + (static_cast<long long>(end_x - start.x) * i) / steps);
+        const int py = static_cast<int>(
+            start.y + (static_cast<long long>(end_y - start.y) * i) / steps);
+        seq.push_back(make_absolute_move(px, py));
+    }
+
+    INPUT u{};
+    u.type       = INPUT_MOUSE;
+    u.mi.dwFlags = up;
+    seq.push_back(u);
+
+    if (SendInput(static_cast<UINT>(seq.size()), seq.data(),
+                  sizeof(INPUT)) != static_cast<UINT>(seq.size())) {
+        // A short/zero return means user32 rejected the batch (UIPI/IL
+        // barrier). permission_denied is in input.mouse.drag.json x-errors.
+        conn.writer().write_err(
+            ErrorCode::PermissionDenied,
+            "{\"message\":\"SendInput rejected the synthesized drag\"}");
+        return;
+    }
+
+    conn.writer().write_ok();  // x-output-schema: null (OK 0)
+}
+
+// ---------------------------------------------------------------------------
+// input.position — input_schema (schema order): ["include_monitor"] (default
+// false). x-crudx: R. x-errors: ["permission_denied"]. x-output-schema:
+// {x, y, monitor_index?} — x/y required; monitor_index present iff
+// include_monitor:true.
+
+void position(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"include_monitor"});
+    if (args.reject_unknown(conn)) return;
+
+    bool include_monitor = false;   // schema default false
+    if (args.present("include_monitor")) {
+        auto m = args.boolean("include_monitor");
+        if (!m) {
+            // input.position.json x-errors is ["permission_denied"] only —
+            // invalid_args is NOT declared. A malformed include_monitor is
+            // a caller fault the agent cannot honour; permission_denied is
+            // the closest spec-declared code (carries a reason for
+            // diagnosis). The schema default (false) is NOT silently
+            // assumed for a present-but-wrong-typed value.
+            conn.writer().write_err(
+                ErrorCode::PermissionDenied,
+                "{\"reason\":\"invalid_include_monitor\",\"message\":"
+                "\"input.position 'include_monitor' must be a boolean\"}");
+            return;
+        }
+        include_monitor = *m;
+    }
+
+    POINT pt{};
+    if (!GetCursorPos(&pt)) {
+        char detail[64];
+        std::snprintf(detail, sizeof(detail),
+                      "{\"win32_error\":%lu}", GetLastError());
+        conn.writer().write_err(ErrorCode::PermissionDenied, detail);
+        return;
+    }
+
+    std::string body = "{";
+    json::append_kv_int(body, "x", pt.x);
+    body += ',';
+    json::append_kv_int(body, "y", pt.y);
+    if (include_monitor) {
+        // Monitor index = position of this monitor's handle in the
+        // EnumDisplayMonitors order, which is the same ordering
+        // system.info.screens[].index uses. NT4 single-monitor: always 0.
+        HMONITOR target =
+            MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        struct EnumCtx {
+            HMONITOR target;
+            int      found;   // -1 until matched
+            int      seen;
+        } ctx{target, -1, 0};
+        EnumDisplayMonitors(
+            nullptr, nullptr,
+            [](HMONITOR h, HDC, LPRECT, LPARAM lp) -> BOOL {
+                auto* c = reinterpret_cast<EnumCtx*>(lp);
+                if (h == c->target) c->found = c->seen;
+                ++c->seen;
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&ctx));
+        const int idx = ctx.found >= 0 ? ctx.found : 0;
+        body += ',';
+        json::append_kv_int(body, "monitor_index", idx);
+    }
+    body += '}';
+    conn.writer().write_ok(body);
+}
+
+// ---------------------------------------------------------------------------
 // input.keyboard.key — input_schema (schema order): ["vk","duration_ms",
 // "modifiers"]. x-errors: ["uipi_blocked","permission_denied",
 // "invalid_args"]. x-output-schema: null — wire response is the literal OK 0.
 
 void key(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"vk", "duration_ms", "modifiers"});
+    if (args.reject_unknown(conn)) return;
 
     std::optional<std::string> vk_name = args.str("vk");
     if (!vk_name || vk_name->empty()) {
@@ -916,6 +1200,109 @@ void key(Connection& conn, const wire::Request& req) {
 }
 
 // ---------------------------------------------------------------------------
+// input.keyboard.key_down — input_schema (schema order): ["vk"] (required).
+// x-crudx: U. x-errors: ["uipi_blocked","permission_denied","invalid_args"].
+// x-output-schema: null — wire response is the literal OK 0.
+//
+// Press a key and leave it held. The vk enters this connection's held-input
+// set (PROTOCOL.md §2.8) so connection-close cleanup releases it. Repeated
+// key_down of an already-held key is a no-op (the std::set keeps membership
+// idempotent). Same user32-layer-only delivery as input.keyboard.key.
+
+void key_down(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"vk"});
+    if (args.reject_unknown(conn)) return;
+
+    std::optional<std::string> vk_name = args.str("vk");
+    if (!vk_name || vk_name->empty()) {
+        invalid_args(conn,
+                     "input.keyboard.key_down requires 'vk' (a key name)");
+        return;
+    }
+    const WORD vk = parse_key_name(*vk_name);
+    if (vk == 0) {
+        std::string detail = "{";
+        json::append_kv_string(detail, "message",
+                               "input.keyboard.key_down 'vk' is not a "
+                               "recognised key name");
+        detail += ',';
+        json::append_kv_string(detail, "vk", *vk_name);
+        detail += '}';
+        conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+        return;
+    }
+
+    if (!uipi::check_foreground_or_fail(conn)) return;
+    if (!crash_check::check_focus_or_fail(conn)) return;
+
+    INPUT in{};
+    in.type   = INPUT_KEYBOARD;
+    in.ki.wVk = vk;
+    // dwFlags 0 == KEYEVENTF_KEYDOWN (no explicit down flag in Win32).
+    if (SendInput(1, &in, sizeof(INPUT)) != 1) {
+        char detail[64];
+        std::snprintf(detail, sizeof(detail),
+                      "{\"win32_error\":%lu}", GetLastError());
+        conn.writer().write_err(ErrorCode::PermissionDenied, detail);
+        return;
+    }
+
+    conn.held_keys().insert(static_cast<unsigned short>(vk));
+
+    conn.writer().write_ok();  // x-output-schema: null (OK 0)
+}
+
+// ---------------------------------------------------------------------------
+// input.keyboard.key_up — input_schema (schema order): ["vk"] (required).
+// x-crudx: U. x-errors: ["permission_denied","invalid_args"] (NOT
+// uipi_blocked — the up event is delivered regardless; and NOT a not_held
+// error — the verb is idempotent cleanup). x-output-schema: null — OK 0.
+//
+// Idempotent: always issues KEYEVENTF_KEYUP (the OS no-ops if the key was
+// not down) and removes the vk from this connection's held set. The
+// conformance suite asserts key_up on a never-held key returns OkResponse.
+
+void key_up(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"vk"});
+    if (args.reject_unknown(conn)) return;
+
+    std::optional<std::string> vk_name = args.str("vk");
+    if (!vk_name || vk_name->empty()) {
+        invalid_args(conn,
+                     "input.keyboard.key_up requires 'vk' (a key name)");
+        return;
+    }
+    const WORD vk = parse_key_name(*vk_name);
+    if (vk == 0) {
+        std::string detail = "{";
+        json::append_kv_string(detail, "message",
+                               "input.keyboard.key_up 'vk' is not a "
+                               "recognised key name");
+        detail += ',';
+        json::append_kv_string(detail, "vk", *vk_name);
+        detail += '}';
+        conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+        return;
+    }
+
+    INPUT in{};
+    in.type       = INPUT_KEYBOARD;
+    in.ki.wVk     = vk;
+    in.ki.dwFlags = KEYEVENTF_KEYUP;
+    if (SendInput(1, &in, sizeof(INPUT)) != 1) {
+        char detail[64];
+        std::snprintf(detail, sizeof(detail),
+                      "{\"win32_error\":%lu}", GetLastError());
+        conn.writer().write_err(ErrorCode::PermissionDenied, detail);
+        return;
+    }
+
+    conn.held_keys().erase(static_cast<unsigned short>(vk));
+
+    conn.writer().write_ok();  // x-output-schema: null (OK 0); idempotent
+}
+
+// ---------------------------------------------------------------------------
 // input.keyboard.type — input_schema: ["text"] (required string; empty is a
 // valid no-op). x-errors: ["uipi_blocked","permission_denied",
 // "invalid_args"]. x-output-schema: null — wire response is the literal OK 0.
@@ -927,6 +1314,7 @@ void key(Connection& conn, const wire::Request& req) {
 
 void type(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"text"});
+    if (args.reject_unknown(conn)) return;
 
     if (!args.present("text")) {
         invalid_args(conn, "input.keyboard.type requires 'text'");
@@ -1010,6 +1398,7 @@ void message_impl(Connection& conn, const wire::Request& req, bool is_send) {
         : std::initializer_list<std::string_view>{
               "handle", "msg", "wparam", "lparam",
               "wparam_string", "lparam_string"});
+    if (args.reject_unknown(conn)) return;
 
     std::optional<std::string> handle = args.str("handle");
     if (!handle || handle->empty()) {

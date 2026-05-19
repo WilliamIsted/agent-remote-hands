@@ -612,6 +612,7 @@ void invoke_on_element(Connection& conn, IUIAutomationElement* elem) {
 
 void list(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"region", "limit", "offset", "full"});
+    if (args.reject_unknown(conn)) return;
 
     IUIAutomation* uia = require_uia(conn);
     if (!uia) return;
@@ -744,6 +745,7 @@ void list(Connection& conn, const wire::Request& req) {
 
 void tree(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"handle", "depth", "full"});
+    if (args.reject_unknown(conn)) return;
 
     std::optional<std::string> handle = args.str("handle");
     if (!handle) {
@@ -825,6 +827,7 @@ void tree(Connection& conn, const wire::Request& req) {
 
 void at(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"x", "y"});
+    if (args.reject_unknown(conn)) return;
 
     auto xv = args.integer32("x");
     auto yv = args.integer32("y");
@@ -859,6 +862,7 @@ void at(Connection& conn, const wire::Request& req) {
 void find(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"root", "name", "role", "automation_id",
                           "timeout_ms"});
+    if (args.reject_unknown(conn)) return;
 
     IUIAutomation* uia = require_uia(conn);
     if (!uia) return;
@@ -909,6 +913,7 @@ void find(Connection& conn, const wire::Request& req) {
 void wait(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"root", "name", "role", "automation_id",
                           "flags_required", "timeout_ms"});
+    if (args.reject_unknown(conn)) return;
 
     IUIAutomation* uia = require_uia(conn);
     if (!uia) return;
@@ -1005,6 +1010,7 @@ void wait(Connection& conn, const wire::Request& req) {
 
 void invoke(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"handle"});
+    if (args.reject_unknown(conn)) return;
 
     IUIAutomationElement* elem = require_handle(conn, args, "element.invoke");
     if (!elem) return;
@@ -1018,6 +1024,7 @@ void invoke(Connection& conn, const wire::Request& req) {
 
 void toggle(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"handle"});
+    if (args.reject_unknown(conn)) return;
 
     IUIAutomationElement* elem = require_handle(conn, args, "element.toggle");
     if (!elem) return;
@@ -1061,6 +1068,7 @@ namespace {
 void do_expand_collapse(Connection& conn, const wire::Request& req,
                         bool expand, std::string_view verb) {
     SchemaArgs args(req, {"handle"});
+    if (args.reject_unknown(conn)) return;
 
     IUIAutomationElement* elem = require_handle(conn, args, verb);
     if (!elem) return;
@@ -1111,6 +1119,7 @@ void collapse(Connection& conn, const wire::Request& req) {
 
 void focus(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"handle"});
+    if (args.reject_unknown(conn)) return;
 
     IUIAutomationElement* elem = require_handle(conn, args, "element.focus");
     if (!elem) return;
@@ -1136,6 +1145,7 @@ void focus(Connection& conn, const wire::Request& req) {
 
 void text(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"handle"});
+    if (args.reject_unknown(conn)) return;
 
     IUIAutomationElement* elem = require_handle(conn, args, "element.text");
     if (!elem) return;
@@ -1194,6 +1204,7 @@ void text(Connection& conn, const wire::Request& req) {
 
 void set_text(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"handle", "text"});
+    if (args.reject_unknown(conn)) return;
 
     IUIAutomationElement* elem = require_handle(conn, args, "element.set_text");
     if (!elem) return;
@@ -1254,6 +1265,7 @@ void set_text(Connection& conn, const wire::Request& req) {
 void find_invoke(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"root", "name", "role", "automation_id",
                           "timeout_ms"});
+    if (args.reject_unknown(conn)) return;
 
     IUIAutomation* uia = require_uia(conn);
     if (!uia) return;
@@ -1299,6 +1311,7 @@ void find_invoke(Connection& conn, const wire::Request& req) {
 
 void at_invoke(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"x", "y"});
+    if (args.reject_unknown(conn)) return;
 
     auto xv = args.integer32("x");
     auto yv = args.integer32("y");

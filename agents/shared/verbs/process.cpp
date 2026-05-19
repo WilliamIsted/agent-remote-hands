@@ -196,6 +196,7 @@ void append_quoted_arg(std::wstring& cmdline, const std::wstring& arg) {
 void list(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"pattern", "include_counters", "limit",
                           "include_system"});
+    if (args.reject_unknown(conn)) return;
 
     std::string filter;
     if (args.present("pattern")) {
@@ -326,6 +327,7 @@ void list(Connection& conn, const wire::Request& req) {
 
 void start(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"argv", "stdin", "cwd"});
+    if (args.reject_unknown(conn)) return;
 
     const mcp::JsonValue* argv_node = args.node("argv");
     if (argv_node == nullptr || !argv_node->is_array()) {
@@ -508,6 +510,7 @@ bool is_valid_shell_verb(std::string_view v) {
 
 void shell(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path", "args", "verb", "cwd"});
+    if (args.reject_unknown(conn)) return;
 
     std::optional<std::string> path = args.str("path");
     if (!path || path->empty()) {
@@ -639,6 +642,7 @@ void shell(Connection& conn, const wire::Request& req) {
 
 void kill(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"pid", "exit_code"});
+    if (args.reject_unknown(conn)) return;
 
     auto pid = args.integer32("pid");
     if (!pid || *pid < 1) {
@@ -705,6 +709,7 @@ void kill(Connection& conn, const wire::Request& req) {
 
 void wait(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"pid", "timeout_ms"});
+    if (args.reject_unknown(conn)) return;
 
     auto pid = args.integer32("pid");
     if (!pid || *pid < 1) {

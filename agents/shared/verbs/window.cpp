@@ -431,6 +431,7 @@ BOOL CALLBACK enum_for_find(HWND hwnd, LPARAM lparam) {
 void list(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"visible_only", "pid", "pattern",
                           "include_monitor", "limit", "full"});
+    if (args.reject_unknown(conn)) return;
 
     ListContext ctx;
     ctx.monitors = build_monitor_index_map();
@@ -519,6 +520,7 @@ void list(Connection& conn, const wire::Request& req) {
 
 void find(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"pattern", "match"});
+    if (args.reject_unknown(conn)) return;
 
     std::optional<std::string> pattern = args.str("pattern");
     if (!pattern || pattern->empty()) {
@@ -606,6 +608,7 @@ void find(Connection& conn, const wire::Request& req) {
 
 void focus(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"handle"});
+    if (args.reject_unknown(conn)) return;
 
     HWND target = require_target(conn, args, "window.focus");
     if (!target) return;
@@ -644,6 +647,7 @@ void focus(Connection& conn, const wire::Request& req) {
 
 void close(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"handle"});
+    if (args.reject_unknown(conn)) return;
 
     HWND target = require_target(conn, args, "window.close");
     if (!target) return;
@@ -662,6 +666,7 @@ void close(Connection& conn, const wire::Request& req) {
 
 void move(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"handle", "x", "y", "w", "h", "foreground"});
+    if (args.reject_unknown(conn)) return;
 
     HWND target = require_target(conn, args, "window.move");
     if (!target) return;
@@ -769,6 +774,7 @@ void move(Connection& conn, const wire::Request& req) {
 
 void state(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"handle"});
+    if (args.reject_unknown(conn)) return;
 
     HWND target = require_target(conn, args, "window.state");
     if (!target) return;

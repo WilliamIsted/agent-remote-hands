@@ -458,6 +458,7 @@ void read(Connection& conn, const wire::Request& req) {
                              ? std::initializer_list<std::string_view>{"path",
                                                                        "value"}
                              : std::initializer_list<std::string_view>{"path"});
+    if (args.reject_unknown(conn)) return;
 
     HKEY root = nullptr;
     std::wstring subkey;
@@ -571,6 +572,7 @@ void write(Connection& conn, const wire::Request& req) {
         is_create ? "registry.value.create" : "registry.value.update";
 
     SchemaArgs args(req, {"path", "value", "type", "data"});
+    if (args.reject_unknown(conn)) return;
 
     HKEY root = nullptr;
     std::wstring subkey;
@@ -706,6 +708,7 @@ void delete_(Connection& conn, const wire::Request& req) {
                                                                        "value"}
                              : std::initializer_list<std::string_view>{
                                    "path", "recursive"});
+    if (args.reject_unknown(conn)) return;
 
     HKEY root = nullptr;
     std::wstring subkey;

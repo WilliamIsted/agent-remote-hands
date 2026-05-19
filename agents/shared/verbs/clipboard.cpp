@@ -144,6 +144,7 @@ bool resolve_format(Connection& conn, SchemaArgs& args, std::string_view verb) {
 
 void get(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"format"});
+    if (args.reject_unknown(conn)) return;
     if (!resolve_format(conn, args, "clipboard.get")) return;
 
     ClipboardLock lock;
@@ -208,6 +209,7 @@ void get(Connection& conn, const wire::Request& req) {
 
 void set(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"content", "format"});
+    if (args.reject_unknown(conn)) return;
 
     // content (required string per input_schema "required": ["content"]).
     // str() is scalar-only; an object/array node returns nullopt and is

@@ -99,8 +99,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shlwapi.h>   // PathMatchSpecW — directory.list `pattern` name filter
+#include <winhttp.h>   // file.download — HTTP(S) client (XP SP3+: WinHTTP 5.1)
 
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "winhttp.lib")
 
 namespace remote_hands::file_verbs {
 
@@ -210,6 +212,168 @@ void write_open_err(Connection& conn, std::string_view path) {
     conn.writer().write_err(ErrorCode::PermissionDenied, detail);
 }
 
+// Decode standard base64 (RFC 4648) into bytes. Skips whitespace; stops at
+// '='. File-local — the shared layer has no base64 helper and the scope is
+// file.cpp only (same rationale as registry.cpp's local base64_encode and
+// vision.cpp's local base64_decode). Returns false on a malformed alphabet
+// character so a bad payload surfaces as the caller's invalid_args.
+bool base64_decode(std::string_view s, std::vector<unsigned char>& out) {
+    auto char_val = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    out.clear();
+    out.reserve((s.size() * 3) / 4);
+    int val = 0, bits = 0;
+    for (char c : s) {
+        if (c == '=') break;
+        if (c == ' ' || c == '\r' || c == '\n' || c == '\t') continue;
+        const int v = char_val(c);
+        if (v < 0) return false;
+        val = (val << 6) | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<unsigned char>(val >> bits));
+            val &= (1 << bits) - 1;
+        }
+    }
+    return true;
+}
+
+// Resolve file.create's content to the exact bytes to write.
+//
+// Two delivery shapes, both spec-aligned:
+//   1. schema `content` (string) + `encoding` discriminator
+//      (PROTOCOL.md §1.6 wire framing: file verbs carry `content` plus an
+//      `encoding`; when encoding=binary the string is base64). Non-binary
+//      encodings transcode the decoded JSON text via the named Windows code
+//      page; binary base64-decodes.
+//   2. `content_b64` — the conformance harness / reference-client binary
+//      side-channel (wire.py _args_to_dict packs a `payload=` kwarg here;
+//      mcp_session keeps it named-only). Always base64 of the raw bytes.
+//
+// On success `bytes_out` holds the file content and `encoding_echo` is the
+// encoding string to echo in the response. Returns false having already
+// written the spec-declared invalid_args.
+bool resolve_create_content(Connection& conn, SchemaArgs& args,
+                            const wire::Request& req,
+                            std::vector<unsigned char>& bytes_out,
+                            std::string& encoding_echo) {
+    // Side-channel first: if content_b64 is present it is the authoritative
+    // raw-bytes carrier (the harness sends a numeric `content` placeholder —
+    // the byte length — alongside it, so content_b64 must win).
+    if (const mcp::JsonValue* cb = wire::arg_node(req, "content_b64");
+        cb != nullptr && cb->is_string()) {
+        if (!base64_decode(cb->as_string(), bytes_out)) {
+            invalid_args(conn,
+                         "file.create 'content_b64' is not valid base64");
+            return false;
+        }
+        encoding_echo = "binary";
+        return true;
+    }
+
+    if (!args.present("content")) {
+        invalid_args(conn, "file.create requires 'content'");
+        return false;
+    }
+    std::optional<std::string> content = args.str("content");
+    if (!content) {
+        invalid_args(conn, "file.create 'content' must be a string");
+        return false;
+    }
+
+    std::string encoding = "utf-8";   // schema default
+    if (args.present("encoding")) {
+        auto enc = args.str("encoding");
+        if (!enc) {
+            invalid_args(conn, "file.create 'encoding' must be a string");
+            return false;
+        }
+        encoding = *enc;
+    }
+    encoding_echo = encoding;
+
+    if (encoding == "binary") {
+        if (!base64_decode(*content, bytes_out)) {
+            invalid_args(conn,
+                         "file.create 'content' is not valid base64 "
+                         "(encoding=binary)");
+            return false;
+        }
+        return true;
+    }
+
+    // Text encodings. `content` is already-decoded UTF-8 JSON text. Map the
+    // spec encoding enum to a Win32 code page / UTF-16 transform.
+    if (encoding == "utf-8" || encoding == "ascii" ||
+        encoding == "latin-1" || encoding == "cp1252") {
+        if (encoding == "utf-8") {
+            bytes_out.assign(content->begin(), content->end());
+            return true;
+        }
+        // Transcode UTF-8 -> UTF-16 -> target single-byte code page.
+        const UINT cp = (encoding == "ascii")   ? 20127u   // US-ASCII
+                       : (encoding == "latin-1") ? 28591u   // ISO-8859-1
+                                                 : 1252u;   // cp1252
+        const int wlen = MultiByteToWideChar(
+            CP_UTF8, 0, content->data(),
+            static_cast<int>(content->size()), nullptr, 0);
+        std::wstring w(static_cast<std::size_t>(wlen > 0 ? wlen : 0), L'\0');
+        if (wlen > 0) {
+            MultiByteToWideChar(CP_UTF8, 0, content->data(),
+                                static_cast<int>(content->size()),
+                                w.data(), wlen);
+        }
+        const int blen = WideCharToMultiByte(cp, 0, w.data(),
+                                             static_cast<int>(w.size()),
+                                             nullptr, 0, nullptr, nullptr);
+        bytes_out.assign(static_cast<std::size_t>(blen > 0 ? blen : 0), 0);
+        if (blen > 0) {
+            WideCharToMultiByte(
+                cp, 0, w.data(), static_cast<int>(w.size()),
+                reinterpret_cast<char*>(bytes_out.data()), blen,
+                nullptr, nullptr);
+        }
+        return true;
+    }
+    if (encoding == "utf-16le" || encoding == "utf-16be") {
+        const int wlen = MultiByteToWideChar(
+            CP_UTF8, 0, content->data(),
+            static_cast<int>(content->size()), nullptr, 0);
+        std::wstring w(static_cast<std::size_t>(wlen > 0 ? wlen : 0), L'\0');
+        if (wlen > 0) {
+            MultiByteToWideChar(CP_UTF8, 0, content->data(),
+                                static_cast<int>(content->size()),
+                                w.data(), wlen);
+        }
+        bytes_out.clear();
+        bytes_out.reserve(w.size() * 2);
+        const bool be = (encoding == "utf-16be");
+        for (wchar_t ch : w) {
+            const unsigned u = static_cast<unsigned short>(ch);
+            if (be) {
+                bytes_out.push_back(static_cast<unsigned char>(u >> 8));
+                bytes_out.push_back(static_cast<unsigned char>(u & 0xFF));
+            } else {
+                bytes_out.push_back(static_cast<unsigned char>(u & 0xFF));
+                bytes_out.push_back(static_cast<unsigned char>(u >> 8));
+            }
+        }
+        return true;
+    }
+
+    invalid_args(conn,
+                 "file.create 'encoding' must be one of utf-8|utf-16le|"
+                 "utf-16be|ascii|latin-1|cp1252|binary");
+    return false;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -225,6 +389,7 @@ void write_open_err(Connection& conn, std::string_view path) {
 
 void read(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path", "encoding", "offset", "length"});
+    if (args.reject_unknown(conn)) return;
 
     std::string path;
     if (!resolve_path(conn, args, "file.read", path)) return;
@@ -269,6 +434,7 @@ void read(Connection& conn, const wire::Request& req) {
 
 void write(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path", "content", "encoding", "atomic"});
+    if (args.reject_unknown(conn)) return;
 
     std::string path;
     if (!resolve_path(conn, args, "file.write", path)) return;
@@ -310,6 +476,7 @@ void write(Connection& conn, const wire::Request& req) {
 
 void write_at(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path", "offset", "content", "encoding", "truncate"});
+    if (args.reject_unknown(conn)) return;
 
     std::string path;
     if (!resolve_path(conn, args, "file.write_at", path)) return;
@@ -366,6 +533,500 @@ void write_at(Connection& conn, const wire::Request& req) {
 }
 
 // ---------------------------------------------------------------------------
+// file.create — input_schema (schema order): ["path","content","encoding",
+// "atomic"]. required: ["path","content"]. x-crudx: C. x-errors:
+// ["not_found","already_exists","permission_denied","invalid_args"].
+// x-output-schema: {bytes_written, encoding} both required.
+//
+// CRUDX split of file.write: a Create-tier verb that REFUSES to overwrite
+// (CREATE_NEW disposition / no MOVEFILE_REPLACE_EXISTING) — an existing
+// target is already_exists, not a silent overwrite. Atomic by default: write
+// a sibling temp file then MoveFileExW into place. Unlike file.write (whose
+// content path is the deferred Phase-2b side-channel), file.create lands the
+// bytes here — it is the explicit R2 Create-tier file-creation deliverable.
+
+void create(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"path", "content", "encoding", "atomic"});
+    if (args.reject_unknown(conn)) return;
+
+    std::string path;
+    if (!resolve_path(conn, args, "file.create", path)) return;
+
+    std::vector<unsigned char> bytes;
+    std::string encoding_echo;
+    if (!resolve_create_content(conn, args, req, bytes, encoding_echo)) {
+        return;   // helper already wrote invalid_args
+    }
+
+    bool atomic = true;   // schema default
+    if (args.present("atomic")) {
+        auto a = args.boolean("atomic");
+        if (!a) {
+            invalid_args(conn, "file.create 'atomic' must be a boolean");
+            return;
+        }
+        atomic = *a;
+    }
+
+    const std::wstring wpath = text::utf8_to_wide(path);
+
+    // Write helper: CREATE_NEW so an existing target fails (mapped to
+    // already_exists). Returns the Win32 status (0 == success).
+    auto write_new = [&](const std::wstring& target) -> DWORD {
+        HANDLE h = CreateFileW(target.c_str(), GENERIC_WRITE, 0, nullptr,
+                               CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return GetLastError();
+        DWORD written = 0;
+        bool ok = true;
+        if (!bytes.empty()) {
+            ok = WriteFile(h, bytes.data(),
+                           static_cast<DWORD>(bytes.size()),
+                           &written, nullptr) != 0 &&
+                 written == static_cast<DWORD>(bytes.size());
+        }
+        const DWORD werr = ok ? 0u : GetLastError();
+        CloseHandle(h);
+        return werr;
+    };
+
+    auto map_create_err = [&](DWORD err) {
+        if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) {
+            conn.writer().write_err(
+                ErrorCode::AlreadyExists,
+                "{\"message\":\"file already exists; use file.write to "
+                "overwrite\"}");
+            return;
+        }
+        if (err == ERROR_PATH_NOT_FOUND || err == ERROR_FILE_NOT_FOUND ||
+            err == ERROR_INVALID_NAME) {
+            conn.writer().write_err(
+                ErrorCode::NotFound,
+                "{\"message\":\"parent directory does not exist "
+                "(use directory.create first)\"}");
+            return;
+        }
+        char detail[64];
+        std::snprintf(detail, sizeof(detail), "{\"win32_error\":%lu}", err);
+        conn.writer().write_err(ErrorCode::PermissionDenied, detail);
+    };
+
+    if (atomic) {
+        // Sibling temp file then MoveFileExW WITHOUT MOVEFILE_REPLACE_EXISTING
+        // so an existing target fails the rename (surfaced as already_exists),
+        // matching file.create.json's create_file_w_atomic_new
+        // implementation. Probe the final target up front so the
+        // already_exists answer is precise and no temp file is left behind.
+        if (GetFileAttributesW(wpath.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            conn.writer().write_err(
+                ErrorCode::AlreadyExists,
+                "{\"message\":\"file already exists; use file.write to "
+                "overwrite\"}");
+            return;
+        }
+        std::wstring tmp = wpath;
+        tmp += L".rh-tmp";
+        // Best-effort clean of a stale temp from a previous aborted create.
+        DeleteFileW(tmp.c_str());
+        const DWORD werr = write_new(tmp);
+        if (werr != 0) {
+            DeleteFileW(tmp.c_str());   // don't leak the partial temp
+            map_create_err(werr);
+            return;
+        }
+        if (!MoveFileExW(tmp.c_str(), wpath.c_str(),
+                         MOVEFILE_WRITE_THROUGH)) {
+            const DWORD merr = GetLastError();
+            DeleteFileW(tmp.c_str());   // don't leak the temp
+            map_create_err(merr);
+            return;
+        }
+    } else {
+        const DWORD werr = write_new(wpath);
+        if (werr != 0) {
+            map_create_err(werr);
+            return;
+        }
+    }
+
+    std::string body = "{";
+    json::append_kv_uint(body, "bytes_written",
+                         static_cast<unsigned long long>(bytes.size()));
+    body += ',';
+    json::append_kv_string(body, "encoding", encoding_echo);
+    body += '}';
+    conn.writer().write_ok(body);
+}
+
+// ---------------------------------------------------------------------------
+// file.download — input_schema (schema order): ["url","local_path","method",
+// "headers","max_bytes","atomic","create_only","follow_redirects"].
+// required: ["url","local_path"]. x-crudx: C. x-errors: ["not_found",
+// "already_exists","permission_denied","size_limit_exceeded",
+// "no_implementation_available","transfer_failed"]. x-output-schema:
+// {bytes_written, status_code?, implementation_used} (bytes_written +
+// implementation_used required).
+//
+// IMPLEMENTATION CHOICE — WinHTTP (winhttp.lib / winhttp.h). The spec's
+// x-implementations name an external-tool chain (curl/wget/powershell-bits);
+// the agent has no inline HTTP client of its own and shelling out to those
+// tools is brittle (PATH, install hint surfacing, the no-self-installer
+// constraint). WinHTTP is an OS library (no new third-party dep) present on
+// EVERY family floor including the legacy floor:
+//   * Windows XP SP3 / Server 2003 ship WinHTTP 5.1 (winhttp.dll + the
+//     v7.1A-era SDK winhttp.h / winhttp.lib the v141_xp toolchain links).
+//   * Modern Windows ships a newer WinHTTP with the same API surface used
+//     here. WINVER=0x0501 (the legacy build) keeps the API to the XP-safe
+//     subset (WinHttpOpen/Connect/OpenRequest/SendRequest/ReceiveResponse/
+//     QueryDataAvailable/ReadData/QueryHeaders — all XP SP3).
+// WinHTTP is also the Microsoft-recommended client for non-interactive /
+// service contexts (unlike WinINet, which is unsupported from a service).
+// `implementation_used` is reported as "winhttp".
+
+void download(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"url", "local_path", "method", "headers",
+                          "max_bytes", "atomic", "create_only",
+                          "follow_redirects"});
+    if (args.reject_unknown(conn)) return;
+
+    std::optional<std::string> url = args.str("url");
+    if (!url || url->empty()) {
+        invalid_args(conn, "file.download requires 'url'");
+        return;
+    }
+    std::optional<std::string> local_path = args.str("local_path");
+    if (!local_path || local_path->empty()) {
+        invalid_args(conn, "file.download requires 'local_path'");
+        return;
+    }
+
+    std::string method = "GET";
+    if (args.present("method")) {
+        auto m = args.str("method");
+        if (!m || (*m != "GET" && *m != "HEAD")) {
+            invalid_args(conn,
+                         "file.download 'method' must be GET or HEAD");
+            return;
+        }
+        method = *m;
+    }
+
+    long long max_bytes = -1;   // -1 == no cap
+    if (args.present("max_bytes")) {
+        auto mb = args.integer("max_bytes");
+        if (!mb || *mb < 0) {
+            invalid_args(conn,
+                         "file.download 'max_bytes' must be a "
+                         "non-negative integer");
+            return;
+        }
+        max_bytes = *mb;
+    }
+
+    bool atomic = true;
+    if (args.present("atomic")) {
+        auto a = args.boolean("atomic");
+        if (!a) {
+            invalid_args(conn, "file.download 'atomic' must be a boolean");
+            return;
+        }
+        atomic = *a;
+    }
+
+    bool create_only = false;
+    if (args.present("create_only")) {
+        auto c = args.boolean("create_only");
+        if (!c) {
+            invalid_args(conn,
+                         "file.download 'create_only' must be a boolean");
+            return;
+        }
+        create_only = *c;
+    }
+
+    bool follow_redirects = true;
+    if (args.present("follow_redirects")) {
+        auto f = args.boolean("follow_redirects");
+        if (!f) {
+            invalid_args(conn,
+                         "file.download 'follow_redirects' must be a "
+                         "boolean");
+            return;
+        }
+        follow_redirects = *f;
+    }
+
+    // Optional request headers — array of "Header-Name: value" strings.
+    std::wstring extra_headers;
+    if (const mcp::JsonValue* hn = wire::arg_node(req, "headers");
+        hn != nullptr && hn->is_array()) {
+        for (const mcp::JsonValue& el : hn->as_array()) {
+            if (!el.is_string()) {
+                invalid_args(conn,
+                             "file.download 'headers' entries must be "
+                             "strings (\"Name: value\")");
+                return;
+            }
+            extra_headers += text::utf8_to_wide(el.as_string());
+            extra_headers += L"\r\n";
+        }
+    }
+
+    if (create_only &&
+        GetFileAttributesW(text::utf8_to_wide(*local_path).c_str())
+            != INVALID_FILE_ATTRIBUTES) {
+        conn.writer().write_err(
+            ErrorCode::AlreadyExists,
+            "{\"message\":\"local_path already exists "
+            "(create_only:true)\"}");
+        return;
+    }
+
+    // --- Parse the URL via WinHttpCrackUrl --------------------------------
+    const std::wstring wurl = text::utf8_to_wide(*url);
+    URL_COMPONENTS uc{};
+    uc.dwStructSize     = sizeof(uc);
+    wchar_t host[256]   = {0};
+    wchar_t urlpath[2048] = {0};
+    wchar_t scheme[16]  = {0};
+    uc.lpszHostName     = host;     uc.dwHostNameLength    = 255;
+    uc.lpszUrlPath      = urlpath;  uc.dwUrlPathLength     = 2047;
+    uc.lpszScheme       = scheme;   uc.dwSchemeLength      = 15;
+    if (!WinHttpCrackUrl(wurl.c_str(),
+                         static_cast<DWORD>(wurl.size()), 0, &uc)) {
+        invalid_args(conn,
+                     "file.download 'url' is not a valid absolute "
+                     "http/https URL");
+        return;
+    }
+    if (uc.nScheme != INTERNET_SCHEME_HTTP &&
+        uc.nScheme != INTERNET_SCHEME_HTTPS) {
+        invalid_args(conn,
+                     "file.download 'url' scheme must be http or https");
+        return;
+    }
+    const bool https = (uc.nScheme == INTERNET_SCHEME_HTTPS);
+
+    // --- WinHTTP session/connect/request ----------------------------------
+    HINTERNET hSession = WinHttpOpen(
+        L"agent-remote-hands/0.3 (file.download; WinHTTP)",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) {
+        char d[64];
+        std::snprintf(d, sizeof(d),
+                      "{\"win32_error\":%lu}", GetLastError());
+        conn.writer().write_err(ErrorCode::TransferFailed, d);
+        return;
+    }
+
+    HINTERNET hConnect = WinHttpConnect(hSession, host, uc.nPort, 0);
+    if (!hConnect) {
+        char d[64];
+        std::snprintf(d, sizeof(d),
+                      "{\"win32_error\":%lu}", GetLastError());
+        WinHttpCloseHandle(hSession);
+        conn.writer().write_err(ErrorCode::TransferFailed, d);
+        return;
+    }
+
+    DWORD req_flags = https ? WINHTTP_FLAG_SECURE : 0u;
+    const std::wstring wmethod = text::utf8_to_wide(method);
+    HINTERNET hRequest = WinHttpOpenRequest(
+        hConnect, wmethod.c_str(), urlpath, nullptr,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, req_flags);
+    if (!hRequest) {
+        char d[64];
+        std::snprintf(d, sizeof(d),
+                      "{\"win32_error\":%lu}", GetLastError());
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        conn.writer().write_err(ErrorCode::TransferFailed, d);
+        return;
+    }
+
+    if (!follow_redirects) {
+        DWORD opt = WINHTTP_DISABLE_REDIRECTS;
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_DISABLE_FEATURE,
+                         &opt, sizeof(opt));
+    }
+
+    auto close_all = [&]() {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+    };
+
+    const LPCWSTR hdr_ptr =
+        extra_headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS
+                              : extra_headers.c_str();
+    const DWORD hdr_len =
+        extra_headers.empty() ? 0u
+                              : static_cast<DWORD>(extra_headers.size());
+    if (!WinHttpSendRequest(hRequest, hdr_ptr, hdr_len,
+                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+        !WinHttpReceiveResponse(hRequest, nullptr)) {
+        const DWORD err = GetLastError();
+        close_all();
+        if (err == ERROR_WINHTTP_NAME_NOT_RESOLVED ||
+            err == ERROR_WINHTTP_CANNOT_CONNECT) {
+            conn.writer().write_err(
+                ErrorCode::TransferFailed,
+                "{\"message\":\"host unreachable / name not resolved\"}");
+            return;
+        }
+        char d[64];
+        std::snprintf(d, sizeof(d), "{\"win32_error\":%lu}", err);
+        conn.writer().write_err(ErrorCode::TransferFailed, d);
+        return;
+    }
+
+    // HTTP status code.
+    DWORD status = 0, slen = sizeof(status);
+    WinHttpQueryHeaders(
+        hRequest,
+        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &status, &slen,
+        WINHTTP_NO_HEADER_INDEX);
+    if (status == 404) {
+        close_all();
+        conn.writer().write_err(
+            ErrorCode::NotFound,
+            "{\"status_code\":404,\"message\":\"remote returned 404\"}");
+        return;
+    }
+    if (status >= 400) {
+        close_all();
+        char d[96];
+        std::snprintf(d, sizeof(d),
+            "{\"status_code\":%lu,\"message\":\"HTTP error status\"}",
+            status);
+        conn.writer().write_err(ErrorCode::TransferFailed, d);
+        return;
+    }
+
+    // --- Stream body to a temp file (atomic) or the target directly -------
+    const std::wstring wdst = text::utf8_to_wide(*local_path);
+    std::wstring target = wdst;
+    if (atomic) {
+        target += L".rh-tmp";
+        DeleteFileW(target.c_str());
+    }
+    HANDLE hFile = CreateFileW(
+        target.c_str(), GENERIC_WRITE, 0, nullptr,
+        create_only && !atomic ? CREATE_NEW : CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        const DWORD ferr = GetLastError();
+        close_all();
+        if (ferr == ERROR_FILE_EXISTS || ferr == ERROR_ALREADY_EXISTS) {
+            conn.writer().write_err(
+                ErrorCode::AlreadyExists,
+                "{\"message\":\"local_path already exists\"}");
+            return;
+        }
+        if (ferr == ERROR_PATH_NOT_FOUND) {
+            conn.writer().write_err(
+                ErrorCode::NotFound,
+                "{\"message\":\"local_path parent directory missing\"}");
+            return;
+        }
+        char d[64];
+        std::snprintf(d, sizeof(d), "{\"win32_error\":%lu}", ferr);
+        conn.writer().write_err(ErrorCode::PermissionDenied, d);
+        return;
+    }
+
+    unsigned long long total = 0;
+    bool ok = true;
+    bool over_limit = false;
+    // HEAD: no body to read; an empty file is the documented behaviour.
+    if (method != "HEAD") {
+        for (;;) {
+            DWORD avail = 0;
+            if (!WinHttpQueryDataAvailable(hRequest, &avail)) {
+                ok = false;
+                break;
+            }
+            if (avail == 0) break;
+            std::vector<char> chunk(avail);
+            DWORD got = 0;
+            if (!WinHttpReadData(hRequest, chunk.data(), avail, &got) ||
+                got == 0) {
+                if (got == 0) break;   // clean EOF
+                ok = false;
+                break;
+            }
+            if (max_bytes >= 0 &&
+                total + got > static_cast<unsigned long long>(max_bytes)) {
+                over_limit = true;
+                break;
+            }
+            DWORD wrote = 0;
+            if (!WriteFile(hFile, chunk.data(), got, &wrote, nullptr) ||
+                wrote != got) {
+                ok = false;
+                break;
+            }
+            total += got;
+        }
+    }
+    CloseHandle(hFile);
+    close_all();
+
+    if (over_limit) {
+        DeleteFileW(target.c_str());
+        char d[96];
+        std::snprintf(d, sizeof(d),
+            "{\"limit\":%lld,\"message\":\"max_bytes exceeded\"}",
+            max_bytes);
+        conn.writer().write_err(ErrorCode::SizeLimitExceeded, d);
+        return;
+    }
+    if (!ok) {
+        DeleteFileW(target.c_str());
+        conn.writer().write_err(
+            ErrorCode::TransferFailed,
+            "{\"message\":\"transfer aborted mid-body\"}");
+        return;
+    }
+
+    if (atomic) {
+        // create_only honoured at rename time (no MOVEFILE_REPLACE_EXISTING
+        // -> existing target fails as already_exists). When overwrite is
+        // allowed, replace existing.
+        DWORD mv_flags = MOVEFILE_WRITE_THROUGH;
+        if (!create_only) mv_flags |= MOVEFILE_REPLACE_EXISTING;
+        if (!MoveFileExW(target.c_str(), wdst.c_str(), mv_flags)) {
+            const DWORD merr = GetLastError();
+            DeleteFileW(target.c_str());
+            if (merr == ERROR_ALREADY_EXISTS ||
+                merr == ERROR_FILE_EXISTS) {
+                conn.writer().write_err(
+                    ErrorCode::AlreadyExists,
+                    "{\"message\":\"local_path already exists "
+                    "(create_only:true)\"}");
+                return;
+            }
+            char d[64];
+            std::snprintf(d, sizeof(d),
+                          "{\"win32_error\":%lu}", merr);
+            conn.writer().write_err(ErrorCode::PermissionDenied, d);
+            return;
+        }
+    }
+
+    std::string body = "{";
+    json::append_kv_uint(body, "bytes_written", total);
+    body += ',';
+    json::append_kv_int(body, "status_code",
+                        static_cast<long long>(status));
+    body += ',';
+    json::append_kv_string(body, "implementation_used", "winhttp");
+    body += '}';
+    conn.writer().write_ok(body);
+}
+
+// ---------------------------------------------------------------------------
 // directory.list — input_schema (schema order): ["path","recursive",
 // "pattern","limit","offset","sort","reverse","full"].
 // x-errors: ["not_found","not_a_directory","permission_denied",
@@ -374,6 +1035,7 @@ void write_at(Connection& conn, const wire::Request& req) {
 void list(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path", "recursive", "pattern", "limit", "offset",
                           "sort", "reverse", "full"});
+    if (args.reject_unknown(conn)) return;
 
     std::string path;
     if (!resolve_path(conn, args, "directory.list", path)) return;
@@ -609,6 +1271,7 @@ void list(Connection& conn, const wire::Request& req) {
 
 void stat(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path"});
+    if (args.reject_unknown(conn)) return;
 
     std::string path;
     if (!resolve_path(conn, args, "file.stat", path)) return;
@@ -652,6 +1315,7 @@ void stat(Connection& conn, const wire::Request& req) {
 
 void delete_(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path"});
+    if (args.reject_unknown(conn)) return;
 
     std::string path;
     if (!resolve_path(conn, args, "file.delete", path)) return;
@@ -695,6 +1359,7 @@ void delete_(Connection& conn, const wire::Request& req) {
 
 void exists(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path"});
+    if (args.reject_unknown(conn)) return;
 
     std::string path;
     if (!resolve_path(conn, args, "file.exists", path)) return;
@@ -741,6 +1406,7 @@ void exists(Connection& conn, const wire::Request& req) {
 
 void wait(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"glob", "timeout_ms"});
+    if (args.reject_unknown(conn)) return;
 
     std::optional<std::string> glob = args.str("glob");
     if (!glob || glob->empty()) {
@@ -809,6 +1475,7 @@ void wait(Connection& conn, const wire::Request& req) {
 
 void mkdir(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path", "parents", "mode"});
+    if (args.reject_unknown(conn)) return;
 
     std::string path;
     if (!resolve_path(conn, args, "directory.create", path)) return;
@@ -930,6 +1597,7 @@ namespace {
 void rename_impl(Connection& conn, const wire::Request& req,
                  std::string_view verb, bool require_directory) {
     SchemaArgs args(req, {"src", "dst", "overwrite", "cross_fs"});
+    if (args.reject_unknown(conn)) return;
 
     std::optional<std::string> src = args.str("src");
     if (!src || src->empty()) {
@@ -1083,6 +1751,7 @@ void rename(Connection& conn, const wire::Request& req) {
 
 void directory_stat(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path"});
+    if (args.reject_unknown(conn)) return;
 
     std::string path;
     if (!resolve_path(conn, args, "directory.stat", path)) return;
@@ -1144,6 +1813,7 @@ void directory_stat(Connection& conn, const wire::Request& req) {
 
 void directory_exists(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path"});
+    if (args.reject_unknown(conn)) return;
 
     std::string path;
     if (!resolve_path(conn, args, "directory.exists", path)) return;
@@ -1250,6 +1920,7 @@ bool remove_recursive(const std::wstring& dir, std::uint64_t& removed) {
 
 void directory_remove(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path", "recursive"});
+    if (args.reject_unknown(conn)) return;
 
     std::string path;
     if (!resolve_path(conn, args, "directory.delete", path)) return;
