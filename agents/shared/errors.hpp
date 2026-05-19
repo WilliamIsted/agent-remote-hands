@@ -54,6 +54,8 @@ enum class ErrorCode {
     Empty,
     AlreadyExists,
     NotEmpty,
+    NotADirectory,
+    CrossDevice,
 };
 
 constexpr std::string_view to_wire(ErrorCode code) noexcept {
@@ -84,6 +86,8 @@ constexpr std::string_view to_wire(ErrorCode code) noexcept {
         case ErrorCode::Empty:                  return "empty";
         case ErrorCode::AlreadyExists:          return "already_exists";
         case ErrorCode::NotEmpty:               return "not_empty";
+        case ErrorCode::NotADirectory:          return "not_a_directory";
+        case ErrorCode::CrossDevice:            return "cross_device";
     }
     return "unknown";
 }
