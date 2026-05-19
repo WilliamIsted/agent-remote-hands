@@ -115,8 +115,9 @@ private:
     // Set by handle_hello() when the v2.2 bootstrap negotiates MCP framing.
     // run() picks this up after the hello OK body is on the wire and hands
     // the socket to the MCP session. Bootstrap framing (the hello exchange
-    // itself) stays ARH header-line regardless. windows-modern only in
-    // Phase 1; legacy/classic keep the v2.1 header-line path.
+    // itself) stays ARH header-line regardless. windows-modern and (as of
+    // Phase 2.0) windows-legacy both compile this path (RH_MCP);
+    // windows-classic keeps the v2.1 header-line path.
     bool            switch_to_mcp_ = false;
     std::string     negotiated_protocol_;   // e.g. "2.2"
 

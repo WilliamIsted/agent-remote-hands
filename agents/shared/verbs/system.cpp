@@ -35,7 +35,7 @@
 #include "../platform.hpp"
 #include "../sysinfo.hpp"
 
-#ifdef RH_MODERN
+#ifdef RH_MCP
 #include "../verbs_blob.hpp"
 #endif
 
@@ -65,7 +65,7 @@ void info(Connection& conn, const wire::Request&) {
 
     json::append_kv_string(j, "name", "agent-remote-hands");                 j += ',';
     json::append_kv_string(j, "version", sysinfo::kAgentVersion);            j += ',';
-    json::append_kv_string(j, "protocol", "2.1");                            j += ',';
+    json::append_kv_string(j, "protocol", "2.2");                            j += ',';
     json::append_kv_string(j, "os", sysinfo::kOsName);                       j += ',';
     json::append_kv_string(j, "arch", sysinfo::arch());                      j += ',';
     json::append_kv_string(j, "hostname", sysinfo::hostname());              j += ',';
@@ -424,11 +424,16 @@ void power_cancel(Connection& conn, const wire::Request&) {
 // ---------------------------------------------------------------------------
 // system.verbs — return the full spec corpus for every implemented verb.
 //
-// Only compiled when verbs_blob.cpp is linked (RH_MODERN builds).  For other
-// families the stub below satisfies the linker; verb_enabled() ensures it is
-// never actually dispatched.
+// Only compiled when verbs_blob.cpp is linked (RH_MCP builds: windows-modern
+// and, as of Phase 2.0, windows-legacy).  For other families (windows-classic)
+// the stub below satisfies the linker; verb_enabled() ensures it is never
+// actually dispatched.
+//
+// NOTE: system.verbs itself stays gated to the Modern family at runtime via
+// verb_enabled() (capabilities.cpp) — legacy compiles the blob so tools/list
+// has verb_tool_meta(), but does not surface system.verbs as a verb.
 
-#ifdef RH_MODERN
+#ifdef RH_MCP
 void verbs(Connection& conn, const wire::Request&) {
     const auto& specs = verb_specs();
 

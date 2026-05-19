@@ -36,6 +36,7 @@
 #include "errors.hpp"
 
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -44,6 +45,15 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
+
+// Forward declaration only — protocol.hpp is shared by every family including
+// the non-MCP classic/legacy-bootstrap translation units, so it must NOT pull
+// in the MCP JSON parser. Request carries the named-args view as an opaque
+// shared_ptr<const mcp::JsonValue>; the typed accessors that dereference it
+// live in agents/shared/verbs/args.hpp and are only included by TUs that
+// already depend on the MCP module. (Strangler-fig Phase 2.0: additive — the
+// positional `args` vector below stays the active path until Phase 2.1.)
+namespace remote_hands::mcp { class JsonValue; }
 
 namespace remote_hands::wire {
 
@@ -63,6 +73,19 @@ struct Request {
     // dispatcher emits ERR invalid_args with this message instead of
     // attempting to dispatch.
     std::string                 parse_error;
+
+    // Phase 2.0 (strangler-fig): the named-args view. Non-null only when the
+    // request arrived over MCP framing — it owns the parsed `params.arguments`
+    // JSON object (per the verb's input_schema, §1.6.3). The legacy/classic
+    // bootstrap ARH header path leaves this null and handlers keep reading
+    // `args` positionally. Both `args` and `named_root` are populated on the
+    // MCP path during the migration; handlers migrate to the named view
+    // per-namespace in Phase 2.1, after which `args` retires.
+    //
+    // Typed accessors (has / arg_str / arg_int / arg_bool / arg_node) live in
+    // agents/shared/verbs/args.hpp so this header stays free of any MCP
+    // include — only the opaque shared_ptr crosses the layering boundary.
+    std::shared_ptr<const mcp::JsonValue> named_root;
 };
 
 // Tokenises a header line (with any trailing \r already stripped) per

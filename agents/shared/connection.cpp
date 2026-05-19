@@ -21,7 +21,7 @@
 #include "subscription.hpp"
 #include "sysinfo.hpp"
 
-#ifdef RH_MODERN
+#ifdef RH_MCP
 #include "platform.hpp"
 #include "mcp/mcp_codec.hpp"
 #include "mcp/mcp_session.hpp"
@@ -95,7 +95,7 @@ void Connection::run() {
                                   json_kv("message", ex.what()));
             }
 
-#ifdef RH_MODERN
+#ifdef RH_MCP
             // v2.2 framing handoff (§1.6). handle_hello() set this once the
             // hello OK body has been written (ARH-framed) to the socket. From
             // the next byte the connection speaks MCP-stdio. The bootstrap
@@ -280,7 +280,7 @@ void Connection::dispatch_mcp_verb(const wire::Request& req) {
 // ---------------------------------------------------------------------------
 // connection.* handlers
 
-#ifdef RH_MODERN
+#ifdef RH_MCP
 
 namespace {
 
@@ -360,9 +360,10 @@ void Connection::handle_hello(const wire::Request& req) {
     negotiated_protocol_ = "2.2";
 
     if (framing == "ws") {
-        // WS framing is Phase 3. windows-modern advertises it in the spec but
-        // does not implement it yet — reject explicitly (ARH-framed) so the
-        // client does not switch its parser. Empty-detail ERR per §1.2.
+        // WS framing (§1.5) is windows-modern-only and not implemented yet
+        // (a later phase). windows-legacy never supports ws regardless. Both
+        // reject explicitly (ARH-framed) so the client does not switch its
+        // parser. Empty-detail ERR per §1.2.
         writer_.write_err(ErrorCode::FramingUnsupported);
         state_ = State::Closed;
         return;
@@ -392,8 +393,9 @@ void Connection::handle_hello(const wire::Request& req) {
     writer_.write_ok(body);    // still ARH-framed (the hello response itself)
 }
 
-#else  // !RH_MODERN  — legacy / classic keep the v2.1 header-line behaviour
-       // unchanged (Phase 4 enables MCP on legacy).
+#else  // !RH_MCP  — classic (C++ non-MCP build) keeps the v2.1 header-line
+       // behaviour unchanged. As of Phase 2.0 legacy DOES define RH_MCP and
+       // takes the v2.2 MCP path above; only windows-classic stays here.
 
 void Connection::handle_hello(const wire::Request& req) {
     // connection.hello <client-name> <protocol-version>
@@ -419,7 +421,7 @@ void Connection::handle_hello(const wire::Request& req) {
     writer_.write_ok();
 }
 
-#endif  // RH_MODERN
+#endif  // RH_MCP
 
 void Connection::handle_tier_raise(const wire::Request& req) {
     // connection.tier_raise <tier> <token>

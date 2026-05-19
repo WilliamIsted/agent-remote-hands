@@ -101,85 +101,66 @@ std::string serialise(const JsonValue& v) {
     return "null";
 }
 
-// Result of mapping a JSON `arguments` object onto a flat wire::Request.
-struct ArgMapResult {
-    bool        ok = true;
-    std::string reject_reason;   // populated when ok == false
-};
-
-// Inverse of wire.py _args_to_dict (§1.6.3). Reconstructs the flat token
-// stream the existing verb handlers expect:
+// Best-effort positional flattening — the inverse of wire.py _args_to_dict
+// (§1.6.3). Reconstructs the flat token stream the existing (not-yet-migrated)
+// verb handlers expect:
 //
 //   "_args": [a, b]   -> leading positional tokens a b (array order)
 //   "flag": true      -> --flag           (bare; no value token)
 //   "key": <scalar>   -> --key <value>    ('_'->'-' in the key)
 //
 // Scalars: string verbatim; number as its JSON lexeme; bool false -> "false".
-// Nested object / array values (other than _args) and the binary side-channel
-// key `content_b64` are Phase-1 non-functional — rejected with a reason so
-// the caller can surface a clean verb-level error rather than guess a shape.
-ArgMapResult map_arguments(const JsonValue& args, wire::Request& req) {
-    ArgMapResult r;
-    if (args.is_null()) {
-        return r;  // no arguments — valid (e.g. system.info)
-    }
-    if (!args.is_object()) {
-        r.ok = false;
-        r.reject_reason = "params.arguments must be a JSON object";
-        return r;
+//
+// Phase 2.0 change: this NO LONGER hard-rejects. Nested object/array values
+// and `content_b64` simply cannot be represented as flat tokens, so this skips
+// them in the positional projection — the named view (req.named_root,
+// attached separately by the caller) carries them losslessly for handlers
+// migrated in Phase 2.1. A handler still on the positional path that needs a
+// skipped arg will fail with its OWN invalid_args, which is the accepted
+// transitional behaviour (Phase 2.1 migrates exactly those handlers). Nothing
+// that flattened cleanly in Phase 1 flattens differently now, so no Phase-1
+// positional path regresses. `void` return: there is no longer a reject state.
+void map_arguments(const JsonValue& args, wire::Request& req) {
+    if (args.is_null() || !args.is_object()) {
+        // No arguments (e.g. system.info) or a non-object value. The named
+        // view (if any) is attached by the caller regardless; the positional
+        // projection is simply empty here.
+        return;
     }
 
-    // Pass 1: positional _args (array order) become leading tokens.
+    // Pass 1: positional _args (array order) become leading tokens. A
+    // non-array _args or a non-scalar entry can't be projected positionally —
+    // skip it rather than reject; the named view still carries it verbatim.
     if (const JsonValue* pos = args.find("_args")) {
-        if (!pos->is_array()) {
-            r.ok = false;
-            r.reject_reason = "_args must be an array";
-            return r;
-        }
-        for (const auto& e : pos->as_array()) {
-            if (e.is_string()) {
-                req.args.push_back(e.as_string());
-            } else if (e.is_number()) {
-                req.args.push_back(e.num_lexeme());
-            } else if (e.is_bool()) {
-                req.args.push_back(e.as_bool() ? "true" : "false");
-            } else {
-                r.ok = false;
-                r.reject_reason =
-                    "_args entries must be scalar (string/number/bool)";
-                return r;
+        if (pos->is_array()) {
+            for (const auto& e : pos->as_array()) {
+                if (e.is_string()) {
+                    req.args.push_back(e.as_string());
+                } else if (e.is_number()) {
+                    req.args.push_back(e.num_lexeme());
+                } else if (e.is_bool()) {
+                    req.args.push_back(e.as_bool() ? "true" : "false");
+                }
+                // Non-scalar _args entry: skip in the positional projection.
             }
         }
     }
 
-    // Pass 2: every other key becomes --key [value].
+    // Pass 2: every other key becomes --key [value]. Keys whose value is a
+    // nested object/array, or the binary side-channel `content_b64`, cannot
+    // be flattened to the token grammar — skip them here (the named view holds
+    // them). This is the strangler seam: positional stays best-effort while
+    // handlers migrate.
     for (const auto& kv : args.as_object()) {
         const std::string& key = kv.first;
         if (key == "_args") continue;
-
-        if (key == "content_b64") {
-            // Binary side-channel: the existing handlers read payload bytes
-            // via reader_.read_payload(), which does not exist under MCP.
-            // Base64 content handling is Phase 2 (§1.6.6).
-            r.ok = false;
-            r.reject_reason =
-                "binary payload (content_b64) is not supported over MCP "
-                "framing in this build (Phase 2)";
-            return r;
-        }
+        if (key == "content_b64") continue;   // binary side-channel: named-only
 
         const JsonValue& val = kv.second;
-
-        // Nested object / array argument shapes (region:{x,y,w,h},
-        // modifiers:[...], argv:[...], …) cannot be losslessly flattened to
-        // the comma/space token grammar the handlers parse without
-        // verb-specific knowledge. Reject explicitly — never guess.
         if (val.is_object() || val.is_array()) {
-            r.ok = false;
-            r.reject_reason =
-                "argument '" + key + "' has a nested object/array shape not "
-                "supported over MCP framing in this build (Phase 2)";
-            return r;
+            // Nested shape (region:{x,y,w,h}, modifiers:[...], argv:[...], …):
+            // not representable positionally. Carried by the named view only.
+            continue;
         }
 
         std::string flag = "--";
@@ -198,11 +179,11 @@ ArgMapResult map_arguments(const JsonValue& args, wire::Request& req) {
         } else if (val.is_number()) {
             req.args.push_back(val.num_lexeme());
         } else if (val.is_null()) {
-            // Null value: drop the flag we just pushed (treat as absent).
+            // Null value: drop the flag we just pushed (treat as absent —
+            // matches the named view's has()/null == absent semantics).
             req.args.pop_back();
         }
     }
-    return r;
 }
 
 }  // namespace
@@ -309,29 +290,36 @@ void McpSession::handle_tools_call(const std::string& id_json,
         return;
     }
 
-    // Map params.arguments -> flat wire::Request (inverse of _args_to_dict).
+    // Phase 2.0 (strangler-fig): populate BOTH the named view and the
+    // positional projection on `req`.
+    //
+    //  * named_root  — the parsed `params.arguments` object, owned for the
+    //                  request's lifetime. Handlers migrated in Phase 2.1 read
+    //                  it via agents/shared/verbs/args.hpp. Carries nested /
+    //                  array / binary shapes losslessly.
+    //  * args        — best-effort positional flattening (unchanged behaviour
+    //                  for everything that flattened in Phase 1; nested/array/
+    //                  binary keys are now skipped instead of hard-rejecting).
+    //
+    // Previously-rejected nested/array (and content_b64) requests now reach
+    // the handler. A handler still on the positional path may then fail with
+    // its own invalid_args — that is the accepted transitional state; Phase
+    // 2.1 migrates exactly those handlers to the named view. No Phase-1
+    // positional path changes shape, so nothing that worked regresses.
     wire::Request req;
     req.verb = verb;
     const JsonValue* arguments = params->find("arguments");
-    JsonValue empty_obj = JsonValue::make_object({});
-    const ArgMapResult mapped =
-        map_arguments(arguments ? *arguments : empty_obj, req);
-
-    if (!mapped.ok) {
-        // Deferred arg shape (nested object/array or binary payload). Surface
-        // as a verb-level failure so the client stays usable, with a clear
-        // arh_error_code rather than a silent wrong-shape guess.
-        std::string detail = "{\"message\":";
-        append_json_string(detail, mapped.reject_reason);
-        detail += '}';
-        std::string result = "{\"content\":[{\"type\":\"text\",\"text\":";
-        append_json_string(result, detail);
-        result += "}],\"isError\":true,\"arh_error_code\":";
-        append_json_string(result, to_wire(ErrorCode::NotSupported));
-        result += '}';
-        send_result(id_json, result);
-        return;
+    if (arguments && !arguments->is_null()) {
+        // Own a copy: `arguments` is a sub-node of the per-frame parse tree
+        // that goes out of scope when this function returns. dispatch_mcp_verb
+        // runs synchronously below so a bounded lifetime would suffice, but an
+        // owned shared_ptr is the contract protocol.hpp declares and keeps the
+        // named view valid for the whole request without lifetime coupling to
+        // the codec frame.
+        req.named_root = std::make_shared<const JsonValue>(*arguments);
     }
+    JsonValue empty_obj = JsonValue::make_object({});
+    map_arguments(arguments ? *arguments : empty_obj, req);
 
     // Dispatch through the shared connection/verb policy in capture mode.
     auto& writer = conn_.writer();
