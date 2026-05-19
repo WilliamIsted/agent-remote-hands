@@ -14,18 +14,49 @@
 
 // `process.*` namespace verb handlers.
 //
-// Implements PROTOCOL.md §4.7:
-//   process.list   (read)
-//   process.start  (create)  -- CreateProcess, optional --stdin payload
-//   process.shell  (create)  -- ShellExecuteEx for paths with spaces / unicode
-//   process.kill   (delete)
-//   process.wait   (read)
+// Implements the verbs whose contracts are the spec JSON under
+// protocol/spec/verbs/common/process.*.json and
+// protocol/spec/verbs/windows/process.shell.json (the single source of
+// truth):
+//   process.list   (R)  input_schema {pattern,include_counters,limit,
+//                        include_system} -> {processes:[{pid,image,ppid,...}]}
+//   process.start  (C)  input_schema {argv (required, array),stdin,cwd}
+//                        -> {pid}
+//   process.shell  (C)  input_schema {path (required),args,verb,cwd}
+//                        -> {pid|null}
+//   process.kill   (D)  input_schema {pid (required),exit_code} -> null
+//   process.wait   (R)  input_schema {pid (required),timeout_ms} ->
+//                        {exit_code}
+//
+// PHASE 2.1 — NAMED-ARG MIGRATION. These handlers no longer index
+// `req.args` positionally with ad-hoc `--flag` scanning. Each handler
+// declares its input_schema property list (IN SCHEMA ORDER) and reads each
+// value by NAME through the shared SchemaArgs resolver (schema_args.hpp),
+// with the schema's property ORDER used as the positional fallback when the
+// caller invoked the verb positionally (the v2.2 reference client packs
+// positional calls as `{"_args":[...]}`). The `window.*` namespace was the
+// pattern-setter; this file follows it (and system.cpp) exactly. Validation
+// emits the same ErrorCode::InvalidArgs + {"message":...} ergonomics as
+// before.
+//
+// v2.2 fold-ins (per the spec JSON, not the old §4.7 wording):
+//   * process.start `argv` is an ARRAY of strings (argv[0] = executable,
+//     argv[1..] = arguments). The agent assembles a correctly-quoted Win32
+//     lpCommandLine. `stdin` is now an inline UTF-8 STRING arg (no separate
+//     length-prefixed wire payload), and `cwd` sets the child's working
+//     directory.
+//   * process.kill takes an optional `exit_code` (default 1).
+//   * process.wait `timeout_ms` is OPTIONAL — absent => wait indefinitely
+//     (INFINITE); present => the millisecond bound.
+//   * process.shell gains an optional `cwd`; `verb` is enum-validated.
 
 #include "../connection.hpp"
 #include "../errors.hpp"
 #include "../json.hpp"
 #include "../log.hpp"
 #include "../text_util.hpp"
+#include "args.hpp"
+#include "schema_args.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -33,6 +64,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -46,11 +78,18 @@
 
 namespace remote_hands::process_verbs {
 
+// The Phase-2.1 named-argument resolver and its invalid_args helper live in
+// the shared header (schema_args.hpp) so every namespace reads through one
+// definition. Pull them into this TU's unqualified name lookup; behaviour is
+// identical to window.cpp / system.cpp.
+using wire::SchemaArgs;
+using wire::invalid_args;
+
 namespace {
 
 // Track HANDLEs of agent-spawned processes so process.wait can query the
 // exit code even after the OS has reaped the process. Without this, the
-// caller gets `ERR target_gone` from `OpenProcess` rather than the cached
+// caller gets `ERR not_found` from `OpenProcess` rather than the cached
 // exit code.
 //
 // Bookkeeping is best-effort: a handle is leaked if process.start is called
@@ -95,43 +134,122 @@ bool contains_ci(std::string_view haystack, std::string_view needle) {
     return false;
 }
 
-bool parse_uint(std::string_view s, unsigned long long& out) {
-    const auto* end = s.data() + s.size();
-    const auto [p, ec] = std::from_chars(s.data(), end, out, 10);
-    return ec == std::errc{} && p == end;
+// Quote one argv element for a Win32 lpCommandLine per the CommandLineToArgvW
+// rules (the inverse of what CreateProcessW's CRT uses to split argv). An
+// element is wrapped in double quotes when it is empty or contains a space /
+// tab / quote; embedded backslashes are doubled only when they precede the
+// closing quote, and embedded quotes are backslash-escaped. The agent owning
+// this assembly is what makes process.start's argv[] free of shell-escape
+// hazards (process.start.json: "The agent quotes each element correctly when
+// assembling the Win32 lpCommandLine").
+void append_quoted_arg(std::wstring& cmdline, const std::wstring& arg) {
+    const bool needs_quote =
+        arg.empty() ||
+        arg.find_first_of(L" \t\"") != std::wstring::npos;
+
+    if (!needs_quote) {
+        cmdline += arg;
+        return;
+    }
+
+    cmdline += L'"';
+    for (std::size_t i = 0; i < arg.size(); ++i) {
+        std::size_t backslashes = 0;
+        while (i < arg.size() && arg[i] == L'\\') {
+            ++backslashes;
+            ++i;
+        }
+        if (i == arg.size()) {
+            // Escape all backslashes, but don't add a closing quote yet —
+            // the trailing `"` is appended after the loop.
+            cmdline.append(backslashes * 2, L'\\');
+            break;
+        }
+        if (arg[i] == L'"') {
+            // Escape every backslash AND the quote itself.
+            cmdline.append(backslashes * 2 + 1, L'\\');
+            cmdline += L'"';
+        } else {
+            // Backslashes not followed by a quote are literal.
+            cmdline.append(backslashes, L'\\');
+            cmdline += arg[i];
+        }
+    }
+    cmdline += L'"';
 }
 
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// process.list
+// process.list — input_schema {pattern, include_counters, limit,
+// include_system}; x-output-schema {processes:[{pid,image,ppid,...}]}.
+// x-errors: ["permission_denied","invalid_args"].
+//
+// `include_counters` is validated for shape here; the per-pid counter walk
+// (OpenProcess + GetProcessTimes + GetProcessMemoryInfo +
+// GetProcessHandleCount) is a separate, opt-in cost not part of this
+// arg-input refactor — a malformed value still surfaces as invalid_args
+// rather than being silently ignored. The required {pid,image,ppid} fields
+// are always emitted; the optional counter fields are added by the dedicated
+// counters task.
 
 void list(Connection& conn, const wire::Request& req) {
-    std::string filter;
-    int  limit          = 100;
-    bool include_system = false;
+    SchemaArgs args(req, {"pattern", "include_counters", "limit",
+                          "include_system"});
 
-    for (std::size_t i = 0; i < req.args.size(); ++i) {
-        if (req.args[i] == "--filter" && i + 1 < req.args.size()) {
-            filter = req.args[++i];
-        } else if (req.args[i] == "--limit" && i + 1 < req.args.size()) {
-            limit = static_cast<int>(
-                std::strtol(req.args[++i].c_str(), nullptr, 10));
-        } else if (req.args[i] == "--include-system") {
-            include_system = true;
-        } else if (req.args[i].size() >= 2 &&
-                   req.args[i].compare(0, 2, "--") == 0) {
-            std::string detail = "{\"unknown_flag\":\"";
-            detail += req.args[i];
-            detail += "\"}";
-            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+    std::string filter;
+    if (args.present("pattern")) {
+        auto p = args.str("pattern");
+        if (!p) {
+            invalid_args(conn, "process.list 'pattern' must be a string");
             return;
         }
+        filter = *p;
+    }
+
+    if (args.present("include_counters")) {
+        auto ic = args.boolean("include_counters");
+        if (!ic) {
+            invalid_args(conn,
+                         "process.list 'include_counters' must be a boolean");
+            return;
+        }
+        // Shape-validated; the counter walk is the dedicated counters task.
+    }
+
+    int limit = 100;   // schema default
+    if (args.present("limit")) {
+        // integer32 (not static_cast<int>(integer())): an out-of-int-range
+        // limit is treated identically to a non-integer — invalid_args, no
+        // silent narrowing wrap.
+        auto l = args.integer32("limit");
+        if (!l || *l < 1) {
+            invalid_args(conn,
+                         "process.list 'limit' must be a positive integer");
+            return;
+        }
+        limit = *l;
+    }
+
+    bool include_system = false;   // schema default
+    if (args.present("include_system")) {
+        auto is = args.boolean("include_system");
+        if (!is) {
+            invalid_args(conn,
+                         "process.list 'include_system' must be a boolean");
+            return;
+        }
+        include_system = *is;
     }
 
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) {
-        conn.writer().write_err(ErrorCode::NotSupported);
+        // process.list.json x-errors = ["permission_denied","invalid_args"].
+        // A snapshot failure is the agent lacking the rights to enumerate ->
+        // permission_denied (the spec-declared code; the pre-Phase-2.1
+        // handler emitted not_supported, which is outside this verb's
+        // declared error set — the spec is authoritative so corrected).
+        conn.writer().write_err(ErrorCode::PermissionDenied);
         return;
     }
 
@@ -195,61 +313,77 @@ void list(Connection& conn, const wire::Request& req) {
 }
 
 // ---------------------------------------------------------------------------
-// process.start
+// process.start — input_schema {argv (required, array of strings, minItems
+// 1), stdin (string), cwd (string)}; x-output-schema {pid (>=1)}. x-errors:
+// ["not_found","permission_denied","invalid_args"].
 //
-// `process.start <command-line> [--stdin <length>]`. Single command-line
-// string (passed verbatim to CreateProcessW); optional --stdin reads the
-// stated number of bytes from the wire and pipes them into the child's stdin.
+// `argv` is an ARRAY: argv[0] is the executable (resolved via PATH), argv[1..]
+// are arguments. The agent assembles a correctly-quoted Win32 lpCommandLine
+// from the elements (see append_quoted_arg) so the caller never has to
+// shell-escape. `stdin` is now an inline UTF-8 STRING arg (v2.2) — the
+// pre-Phase-2.1 `--stdin <length>` separate wire payload is gone. `cwd` sets
+// the child's working directory.
 
 void start(Connection& conn, const wire::Request& req) {
-    if (req.args.empty()) {
-        conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"process.start requires <command-line> [--stdin <length>]\"}");
+    SchemaArgs args(req, {"argv", "stdin", "cwd"});
+
+    const mcp::JsonValue* argv_node = args.node("argv");
+    if (argv_node == nullptr || !argv_node->is_array()) {
+        invalid_args(conn,
+                     "process.start requires 'argv' (non-empty array of "
+                     "strings)");
+        return;
+    }
+    const auto& argv = argv_node->as_array();
+    if (argv.empty()) {
+        // input_schema: minItems 1.
+        invalid_args(conn,
+                     "process.start 'argv' must contain at least one "
+                     "element (the executable)");
         return;
     }
 
-    // Reconstruct the command line by joining all positional args with spaces.
-    // The wire protocol (v2) tokenizes the header on whitespace and has no
-    // argument-quoting mechanism, so a caller's `cmd.exe /c exit 7` arrives as
-    // four separate args. The previous implementation took only `args[0]` and
-    // silently dropped the rest, producing a bare interactive cmd.exe.
-    // Forward-compatible with the planned protocol quoting in rc.9: a single
-    // quoted arg arrives as one element and joining a one-element list is a
-    // no-op.
-    std::string cmdline_utf8;
-    bool                   has_stdin = false;
-    std::size_t            stdin_bytes = 0;
-    for (std::size_t i = 0; i < req.args.size(); ++i) {
-        if (req.args[i] == "--stdin" && i + 1 < req.args.size()) {
-            unsigned long long v = 0;
-            if (!parse_uint(req.args[++i], v)) {
-                conn.writer().write_err(
-                    ErrorCode::InvalidArgs,
-                    "{\"message\":\"--stdin length must be a non-negative integer\"}");
-                return;
-            }
-            stdin_bytes = static_cast<std::size_t>(v);
-            has_stdin = true;
-            continue;
+    std::wstring cmdline;
+    for (std::size_t i = 0; i < argv.size(); ++i) {
+        const mcp::JsonValue& el = argv[i];
+        if (!el.is_string()) {
+            invalid_args(conn,
+                         "process.start 'argv' elements must all be strings");
+            return;
         }
-        if (!cmdline_utf8.empty()) cmdline_utf8 += ' ';
-        cmdline_utf8 += req.args[i];
+        if (i != 0) cmdline += L' ';
+        append_quoted_arg(cmdline, text::utf8_to_wide(el.as_string()));
     }
 
-    if (cmdline_utf8.empty()) {
-        conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"process.start requires <command-line> [--stdin <length>]\"}");
-        return;
+    // stdin (optional, inline UTF-8 string per the v2.2 input_schema).
+    bool        has_stdin = false;
+    std::string stdin_utf8;
+    if (args.present("stdin")) {
+        auto s = args.str("stdin");
+        if (!s) {
+            invalid_args(conn, "process.start 'stdin' must be a string");
+            return;
+        }
+        stdin_utf8 = std::move(*s);
+        has_stdin  = true;
     }
 
-    std::vector<std::byte> stdin_payload;
-    if (has_stdin) {
-        stdin_payload = conn.reader().read_payload(stdin_bytes);
+    // cwd (optional). Empty string is treated as "not supplied" (use the
+    // agent's cwd, per the spec default).
+    std::wstring cwd_w;
+    bool         have_cwd = false;
+    if (args.present("cwd")) {
+        auto c = args.str("cwd");
+        if (!c) {
+            invalid_args(conn, "process.start 'cwd' must be a string");
+            return;
+        }
+        if (!c->empty()) {
+            cwd_w    = text::utf8_to_wide(*c);
+            have_cwd = true;
+        }
     }
 
-    std::wstring cmdline = text::utf8_to_wide(cmdline_utf8);
     // CreateProcessW may write to lpCommandLine; ensure it's writable.
     cmdline.push_back(L'\0');
 
@@ -260,7 +394,16 @@ void start(Connection& conn, const wire::Request& req) {
         sa.nLength        = sizeof(sa);
         sa.bInheritHandle = TRUE;
         if (!CreatePipe(&pipe_read, &pipe_write, &sa, 0)) {
-            conn.writer().write_err(ErrorCode::NotSupported);
+            // Resource failure setting up the stdin pipe — the agent could
+            // not complete the spawn on the caller's behalf. permission_denied
+            // is the closest spec-declared code (process.start.json x-errors =
+            // ["not_found","permission_denied","invalid_args"]; not_supported
+            // is NOT declared so the pre-Phase-2.1 not_supported here is
+            // corrected).
+            char detail[64];
+            std::snprintf(detail, sizeof(detail),
+                          "{\"win32_error\":%lu}", GetLastError());
+            conn.writer().write_err(ErrorCode::PermissionDenied, detail);
             return;
         }
         // Don't let the child inherit the write end.
@@ -283,28 +426,47 @@ void start(Connection& conn, const wire::Request& req) {
         nullptr, nullptr,
         has_stdin ? TRUE : FALSE,
         0,
-        nullptr, nullptr,
+        nullptr,
+        have_cwd ? cwd_w.c_str() : nullptr,
         &si, &pi);
 
     if (pipe_read) CloseHandle(pipe_read);
 
     if (!ok) {
         if (pipe_write) CloseHandle(pipe_write);
+        const DWORD gle = GetLastError();
         char detail[64];
         std::snprintf(detail, sizeof(detail),
-                      "{\"win32_error\":%lu}", GetLastError());
-        conn.writer().write_err(ErrorCode::NotSupported, detail);
+                      "{\"win32_error\":%lu}", gle);
+        // process.start.json x-errors = ["not_found","permission_denied",
+        // "invalid_args"]. ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND map to
+        // not_found (argv[0] did not resolve); ERROR_ACCESS_DENIED /
+        // ERROR_ELEVATION_REQUIRED map to permission_denied; anything else is
+        // an unresolvable executable from the caller's point of view ->
+        // not_found (the pre-Phase-2.1 blanket not_supported is outside this
+        // verb's declared error set — corrected).
+        ErrorCode code;
+        if (gle == ERROR_FILE_NOT_FOUND || gle == ERROR_PATH_NOT_FOUND ||
+            gle == ERROR_INVALID_NAME) {
+            code = ErrorCode::NotFound;
+        } else if (gle == ERROR_ACCESS_DENIED ||
+                   gle == ERROR_ELEVATION_REQUIRED) {
+            code = ErrorCode::PermissionDenied;
+        } else {
+            code = ErrorCode::NotFound;
+        }
+        conn.writer().write_err(code, detail);
         return;
     }
 
     if (has_stdin && pipe_write) {
         std::size_t written_total = 0;
-        while (written_total < stdin_payload.size()) {
+        while (written_total < stdin_utf8.size()) {
             DWORD chunk = static_cast<DWORD>(
-                std::min<std::size_t>(stdin_payload.size() - written_total,
+                std::min<std::size_t>(stdin_utf8.size() - written_total,
                                       static_cast<std::size_t>(0x10000)));
             DWORD written = 0;
-            if (!WriteFile(pipe_write, stdin_payload.data() + written_total,
+            if (!WriteFile(pipe_write, stdin_utf8.data() + written_total,
                            chunk, &written, nullptr)) {
                 break;
             }
@@ -325,33 +487,86 @@ void start(Connection& conn, const wire::Request& req) {
 }
 
 // ---------------------------------------------------------------------------
-// process.shell
+// process.shell — input_schema {path (required), args, verb (enum), cwd};
+// x-output-schema {pid (integer|null)}. x-errors:
+// ["not_found","permission_denied","user_cancelled","no_handler",
+// "invalid_args"].
 //
-// ShellExecuteEx with the default verb. Suited to "open this file/URL in the
-// associated app" — paths with spaces / unicode are handled by the shell
-// without escape hazards.
+// ShellExecuteEx with the chosen Win32 verb. Suited to "open this file/URL in
+// the associated app" — paths with spaces / unicode are handled by the shell
+// without escape hazards. `pid` is null when no process spawns (e.g. `print`
+// to an existing handler instance).
+
+namespace {
+
+bool is_valid_shell_verb(std::string_view v) {
+    return v == "open" || v == "runas" || v == "print" ||
+           v == "edit" || v == "explore" || v == "find";
+}
+
+}  // namespace
 
 void shell(Connection& conn, const wire::Request& req) {
-    if (req.args.empty()) {
-        conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"process.shell requires <path> [--args <s>] [--verb <v>]\"}");
+    SchemaArgs args(req, {"path", "args", "verb", "cwd"});
+
+    std::optional<std::string> path = args.str("path");
+    if (!path || path->empty()) {
+        invalid_args(conn,
+                     "process.shell requires 'path' (non-empty string)");
         return;
     }
 
-    std::string verb_arg;
     std::string args_arg;
-    for (std::size_t i = 1; i < req.args.size(); ++i) {
-        if (req.args[i] == "--verb" && i + 1 < req.args.size()) {
-            verb_arg = req.args[++i];
-        } else if (req.args[i] == "--args" && i + 1 < req.args.size()) {
-            args_arg = req.args[++i];
+    if (args.present("args")) {
+        auto a = args.str("args");
+        if (!a) {
+            invalid_args(conn, "process.shell 'args' must be a string");
+            return;
         }
+        args_arg = std::move(*a);
     }
 
-    std::wstring target     = text::utf8_to_wide(req.args[0]);
-    std::wstring wide_args   = args_arg.empty() ? std::wstring{} : text::utf8_to_wide(args_arg);
-    std::wstring wide_verb   = verb_arg.empty() ? std::wstring{} : text::utf8_to_wide(verb_arg);
+    std::string verb_arg;   // schema default "open"
+    if (args.present("verb")) {
+        auto v = args.str("verb");
+        if (!v) {
+            invalid_args(conn, "process.shell 'verb' must be a string");
+            return;
+        }
+        if (!is_valid_shell_verb(*v)) {
+            std::string detail = "{";
+            json::append_kv_string(
+                detail, "message",
+                "process.shell 'verb' must be one of "
+                "open|runas|print|edit|explore|find");
+            detail += ',';
+            json::append_kv_string(detail, "verb", *v);
+            detail += '}';
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
+        }
+        // "open" is the ShellExecuteEx default (nullptr lpVerb); only set a
+        // non-default verb explicitly.
+        if (*v != "open") verb_arg = *v;
+    }
+
+    std::string cwd_arg;
+    if (args.present("cwd")) {
+        auto c = args.str("cwd");
+        if (!c) {
+            invalid_args(conn, "process.shell 'cwd' must be a string");
+            return;
+        }
+        cwd_arg = std::move(*c);
+    }
+
+    std::wstring target    = text::utf8_to_wide(*path);
+    std::wstring wide_args = args_arg.empty() ? std::wstring{}
+                                              : text::utf8_to_wide(args_arg);
+    std::wstring wide_verb = verb_arg.empty() ? std::wstring{}
+                                              : text::utf8_to_wide(verb_arg);
+    std::wstring wide_cwd  = cwd_arg.empty()  ? std::wstring{}
+                                              : text::utf8_to_wide(cwd_arg);
 
     SHELLEXECUTEINFOW sei{};
     sei.cbSize       = sizeof(sei);
@@ -359,60 +574,118 @@ void shell(Connection& conn, const wire::Request& req) {
     sei.lpVerb       = wide_verb.empty() ? nullptr : wide_verb.c_str();
     sei.lpFile       = target.c_str();
     sei.lpParameters = wide_args.empty() ? nullptr : wide_args.c_str();
+    sei.lpDirectory  = wide_cwd.empty()  ? nullptr : wide_cwd.c_str();
     sei.nShow        = SW_SHOWNORMAL;
 
     if (!ShellExecuteExW(&sei)) {
+        const DWORD gle = GetLastError();
         char detail[64];
         std::snprintf(detail, sizeof(detail),
-                      "{\"win32_error\":%lu}", GetLastError());
-        conn.writer().write_err(ErrorCode::NotSupported, detail);
+                      "{\"win32_error\":%lu}", gle);
+        // process.shell.json x-errors = ["not_found","permission_denied",
+        // "user_cancelled","no_handler","invalid_args"]. Every branch below
+        // emits a spec-declared code (errors.hpp gained UserCancelled /
+        // NoHandler so the faithful codes are now representable):
+        //   FILE/PATH_NOT_FOUND        -> not_found
+        //   ACCESS_DENIED              -> permission_denied
+        //   CANCELLED (UAC denied)     -> user_cancelled
+        //   NO_ASSOCIATION/DDE_FAIL    -> no_handler
+        //   anything else              -> not_found (unresolvable target)
+        ErrorCode code;
+        if (gle == ERROR_FILE_NOT_FOUND || gle == ERROR_PATH_NOT_FOUND) {
+            code = ErrorCode::NotFound;
+        } else if (gle == ERROR_ACCESS_DENIED) {
+            code = ErrorCode::PermissionDenied;
+        } else if (gle == ERROR_CANCELLED) {
+            // `runas` UAC consent denied by the user.
+            code = ErrorCode::UserCancelled;
+        } else if (gle == ERROR_NO_ASSOCIATION ||
+                   gle == ERROR_DDE_FAIL ||
+                   gle == ERROR_NO_PROC_SLOTS) {
+            // Nothing resolved to handle the target.
+            code = ErrorCode::NoHandler;
+        } else {
+            code = ErrorCode::NotFound;
+        }
+        conn.writer().write_err(code, detail);
         return;
     }
 
-    DWORD pid = 0;
+    // x-output-schema: pid is integer|null. null when no process spawned
+    // (e.g. `print` to an already-running handler instance).
+    std::string body = "{";
     if (sei.hProcess) {
-        pid = GetProcessId(sei.hProcess);
+        const DWORD pid = GetProcessId(sei.hProcess);
         CloseHandle(sei.hProcess);
+        // GetProcessId returns 0 on failure. Spec: pid is integer|null and a
+        // real pid is always >= 1 (callers null-check before kill/wait which
+        // require pid >= 1). Treat 0 as "no pid available" -> null.
+        if (pid != 0) {
+            json::append_kv_uint(body, "pid", pid);
+        } else {
+            json::append_kv_null(body, "pid");
+        }
+    } else {
+        json::append_kv_null(body, "pid");
     }
-
-    char body[64];
-    std::snprintf(body, sizeof(body), "{\"pid\":%lu}", pid);
+    body += '}';
     conn.writer().write_ok(body);
 }
 
 // ---------------------------------------------------------------------------
-// process.kill
+// process.kill — input_schema {pid (required, >=1), exit_code (default 1)};
+// x-output-schema null (empty body — wire response is the literal OK 0).
+// x-errors: ["not_found","permission_denied","invalid_args"].
 
 void kill(Connection& conn, const wire::Request& req) {
-    if (req.args.size() != 1) {
-        conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"process.kill requires <pid>\"}");
+    SchemaArgs args(req, {"pid", "exit_code"});
+
+    auto pid = args.integer32("pid");
+    if (!pid || *pid < 1) {
+        invalid_args(conn,
+                     "process.kill requires 'pid' (a positive integer)");
         return;
     }
 
-    unsigned long long pid_v = 0;
-    if (!parse_uint(req.args[0], pid_v)) {
-        conn.writer().write_err(ErrorCode::InvalidArgs,
-                                "{\"message\":\"pid must be a non-negative integer\"}");
-        return;
+    UINT exit_code = 1;   // schema default
+    if (args.present("exit_code")) {
+        auto ec = args.integer("exit_code");
+        if (!ec) {
+            invalid_args(conn,
+                         "process.kill 'exit_code' must be an integer");
+            return;
+        }
+        // TerminateProcess takes a UINT exit code; reduce modulo 2^32 the
+        // same way the OS would round-trip it through the process's wait
+        // value. Out-of-range is not a caller error here (any integer is a
+        // legal exit code on the wire).
+        exit_code = static_cast<UINT>(static_cast<unsigned long long>(*ec));
     }
 
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(pid_v));
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
+                           static_cast<DWORD>(*pid));
     if (!h) {
+        // OpenProcess failure: process exited, or pid was reused for an
+        // inaccessible process. process.kill.json: "ERR not_found when
+        // OpenProcess fails". (Pre-Phase-2.1 emitted target_gone, which is
+        // outside this verb's declared error set — corrected.)
         std::string detail = "{";
-        json::append_kv_uint(detail, "pid", pid_v);
+        json::append_kv_int(detail, "pid", *pid);
         detail += '}';
-        conn.writer().write_err(ErrorCode::TargetGone, detail);
+        conn.writer().write_err(ErrorCode::NotFound, detail);
         return;
     }
 
-    if (!TerminateProcess(h, 1)) {
+    if (!TerminateProcess(h, exit_code)) {
         CloseHandle(h);
+        // process.kill.json: "ERR permission_denied when TerminateProcess is
+        // denied (protected process, cross-account without SeDebugPrivilege)".
+        // (Pre-Phase-2.1 emitted insufficient_privilege, which is outside this
+        // verb's declared error set — corrected.)
         char detail[64];
         std::snprintf(detail, sizeof(detail),
                       "{\"win32_error\":%lu}", GetLastError());
-        conn.writer().write_err(ErrorCode::InsufficientPrivilege, detail);
+        conn.writer().write_err(ErrorCode::PermissionDenied, detail);
         return;
     }
     CloseHandle(h);
@@ -420,51 +693,84 @@ void kill(Connection& conn, const wire::Request& req) {
 }
 
 // ---------------------------------------------------------------------------
-// process.wait
+// process.wait — input_schema {pid (required, >=1), timeout_ms (optional,
+// >=0)}; x-output-schema {exit_code}. x-errors:
+// ["not_found","timeout","permission_denied","invalid_args"].
+//
+// timeout_ms ABSENT => wait indefinitely (INFINITE). PRESENT => the
+// millisecond bound; ERR timeout when it expires before exit. (The
+// connection-cancel event the spec describes for the indefinite case is a
+// framing-layer concern outside this arg-input refactor; a dropped
+// connection still tears the thread down via the existing socket path.)
 
 void wait(Connection& conn, const wire::Request& req) {
-    if (req.args.size() != 2) {
-        conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"process.wait requires <pid> <timeout-ms>\"}");
+    SchemaArgs args(req, {"pid", "timeout_ms"});
+
+    auto pid = args.integer32("pid");
+    if (!pid || *pid < 1) {
+        invalid_args(conn,
+                     "process.wait requires 'pid' (a positive integer)");
         return;
     }
 
-    unsigned long long pid_v = 0;
-    unsigned long long timeout_v = 0;
-    if (!parse_uint(req.args[0], pid_v) || !parse_uint(req.args[1], timeout_v)) {
-        conn.writer().write_err(ErrorCode::InvalidArgs,
-                                "{\"message\":\"pid and timeout-ms must be integers\"}");
-        return;
+    DWORD timeout = INFINITE;   // absent => wait indefinitely
+    if (args.present("timeout_ms")) {
+        auto t = args.integer("timeout_ms");
+        if (!t || *t < 0) {
+            invalid_args(conn,
+                         "process.wait 'timeout_ms' must be a non-negative "
+                         "integer");
+            return;
+        }
+        // Clamp at the WaitForSingleObject ceiling (INFINITE == 0xFFFFFFFF is
+        // the "no timeout" sentinel, so a finite caller value of exactly that
+        // would otherwise mean "forever"). Anything >= INFINITE-1 is treated
+        // as the maximum finite wait.
+        const unsigned long long ms = static_cast<unsigned long long>(*t);
+        timeout = (ms >= 0xFFFFFFFEull)
+                      ? 0xFFFFFFFEu
+                      : static_cast<DWORD>(ms);
     }
 
     // Prefer the tracked handle from process.start: GetExitCodeProcess on a
     // retained handle works whether the process is alive or already reaped,
-    // so callers get the cached exit code rather than ERR target_gone.
-    HANDLE h = take_spawned(static_cast<DWORD>(pid_v));
+    // so callers get the cached exit code rather than ERR not_found.
+    HANDLE h = take_spawned(static_cast<DWORD>(*pid));
     if (!h) {
         h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-                        FALSE, static_cast<DWORD>(pid_v));
+                        FALSE, static_cast<DWORD>(*pid));
         if (!h) {
+            // process.wait.json: "ERR not_found when OpenProcess fails
+            // (process exited and pid was recycled)". (Pre-Phase-2.1 emitted
+            // target_gone, outside this verb's declared error set —
+            // corrected.)
             std::string detail = "{";
-            json::append_kv_uint(detail, "pid", pid_v);
+            json::append_kv_int(detail, "pid", *pid);
             detail += '}';
-            conn.writer().write_err(ErrorCode::TargetGone, detail);
+            conn.writer().write_err(ErrorCode::NotFound, detail);
             return;
         }
     }
 
-    const DWORD wr = WaitForSingleObject(h, static_cast<DWORD>(timeout_v));
+    const DWORD wr = WaitForSingleObject(h, timeout);
     if (wr == WAIT_TIMEOUT) {
         // Re-track the handle so a subsequent wait can reuse it; otherwise
         // the next call falls back to OpenProcess and we lose the cache.
-        track_spawned(static_cast<DWORD>(pid_v), h);
+        track_spawned(static_cast<DWORD>(*pid), h);
+        // Declared in process.wait.json x-errors.
         conn.writer().write_err(ErrorCode::Timeout);
         return;
     }
     if (wr != WAIT_OBJECT_0) {
+        // WAIT_FAILED (e.g. the handle lost its rights): the process is no
+        // longer waitable from the agent's vantage point -> not_found (the
+        // only "object gone" code in this verb's declared error set; the
+        // pre-Phase-2.1 not_supported is outside it — corrected).
         CloseHandle(h);
-        conn.writer().write_err(ErrorCode::NotSupported);
+        std::string detail = "{";
+        json::append_kv_int(detail, "pid", *pid);
+        detail += '}';
+        conn.writer().write_err(ErrorCode::NotFound, detail);
         return;
     }
 
