@@ -51,6 +51,7 @@ enum class ErrorCode {
     FramingUnsupported,
     UserCancelled,
     NoHandler,
+    Empty,
 };
 
 constexpr std::string_view to_wire(ErrorCode code) noexcept {
@@ -78,6 +79,7 @@ constexpr std::string_view to_wire(ErrorCode code) noexcept {
         case ErrorCode::FramingUnsupported:     return "framing_unsupported";
         case ErrorCode::UserCancelled:          return "user_cancelled";
         case ErrorCode::NoHandler:              return "no_handler";
+        case ErrorCode::Empty:                  return "empty";
     }
     return "unknown";
 }
