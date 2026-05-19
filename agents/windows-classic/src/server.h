@@ -23,7 +23,16 @@
 
 /* Generates the elevation token, opens the listener, then serves
  * connections one at a time until a fatal error. Returns 0 on clean
- * shutdown, non-zero on a startup failure. */
-int rh_server_run(u16 port);
+ * shutdown, non-zero on a startup failure.
+ * token_ttl_hours: -1 = FOREVER, 0 = per-session, >0 = hours. */
+int rh_server_run(u16 port, int token_ttl_hours);
+
+/* Closes the current listen socket and re-binds a new one on the same port.
+ * Safe to call from any thread.  No-op if a rebind is already in progress. */
+void rh_server_rebind(u16 port);
+
+/* Called on PBT_APMSUSPEND: cleanly closes the listen socket before the OS
+ * tears it down during suspend. */
+void rh_server_suspend(void);
 
 #endif /* RH_SERVER_H */

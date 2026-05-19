@@ -15,19 +15,24 @@
 
 /* Elevation-token store (PROTOCOL.md 2.6), C89 port of agents/shared/token.cpp.
  *
- * A fresh 256-bit token is generated each start, hex-encoded, held in memory
- * for connection.tier_raise verification, and written best-effort to
- * %ProgramData%\AgentRemoteHands\token. ACL hardening is the installer's job
- * (see the note in shared/token.cpp); W8 only needs the in-memory value so
- * the auth_invalid path is exercised correctly. */
+ * ttl_hours semantics (mirrors shared/token.cpp):
+ *   -1  FOREVER: load existing file if valid, else generate + write.
+ *    0  Per-session: always generate fresh; delete token file on exit via
+ *       rh_token_cleanup() (call before ExitProcess / normal return).
+ *   >0  Hours: reload existing file if within TTL, else delete + write new.
+ *
+ * Default (720 h = 30 days) matches agents/shared/config.hpp. */
 
 #ifndef RH_TOKEN_H
 #define RH_TOKEN_H
 
-/* Generate the token and attempt to write the token file. Always succeeds
- * for the in-memory token (random source has a documented weak fallback);
- * file-write failure is non-fatal. */
-void rh_token_init(void);
+/* Initialise the token with the given TTL policy.  Generates or loads the
+ * in-memory token and writes/updates the token file accordingly. */
+void rh_token_init(int ttl_hours);
+
+/* Delete the token file when ttl_hours == 0 (per-session mode).
+ * No-op in all other modes.  Call before ExitProcess() on clean shutdown. */
+void rh_token_cleanup(void);
 
 /* Constant-time compare of a presented token against the live token. */
 int  rh_token_verify(const char* presented);

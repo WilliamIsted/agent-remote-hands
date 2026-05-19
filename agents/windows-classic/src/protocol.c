@@ -14,6 +14,7 @@
  */
 
 #include "protocol.h"
+#include "debug.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -238,6 +239,9 @@ int rh_read_payload(RhReader* r, char* out, int n)
 
 void rh_send_ok(SOCKET s)
 {
+#ifdef RH_DEBUG
+    rh_dbg("<< OK 0");
+#endif
     send_all(s, "OK 0\n", 5);
 }
 
@@ -255,6 +259,9 @@ void rh_send_ok_bytes(SOCKET s, const char* data, int len)
         rh_send_err(s, "wire_desync");
         return;
     }
+#ifdef RH_DEBUG
+    rh_dbg("<< OK %d bytes", len);
+#endif
     send_all(s, header, hn);
     send_all(s, data, len);
 }
@@ -275,6 +282,9 @@ void rh_send_ok_json(SOCKET s, const char* json)
         rh_send_err(s, "wire_desync");
         return;
     }
+#ifdef RH_DEBUG
+    rh_dbg("<< OK %d %s", body_len, json);
+#endif
     send_all(s, header, hn);
     send_all(s, json, body_len);
 }
@@ -284,6 +294,9 @@ void rh_send_err(SOCKET s, const char* code)
     char line[96];
     int  hn;
 
+#ifdef RH_DEBUG
+    rh_dbg("<< ERR %s", code);
+#endif
     hn = _snprintf(line, sizeof(line), "ERR %s 0\n", code);
     if (hn <= 0 || hn >= (int)sizeof(line)) {
         send_all(s, "ERR wire_desync 0\n", 18);
@@ -303,6 +316,9 @@ void rh_send_err_json(SOCKET s, const char* code, const char* json)
         return;
     }
     body_len = (int)strlen(json);
+#ifdef RH_DEBUG
+    rh_dbg("<< ERR %s %s", code, json);
+#endif
     hn = _snprintf(header, sizeof(header), "ERR %s %d\n", code, body_len);
     if (hn <= 0 || hn >= (int)sizeof(header)) {
         rh_send_err(s, code);

@@ -29,6 +29,16 @@ typedef unsigned __int64    u64;
 typedef int                 i32;
 typedef __int64             i64;
 
+/* ULONG_PTR is absent from bare VC98 basetsd.h (it was a Platform SDK
+ * addition).  wincrypt.h typedefs HCRYPTPROV as ULONG_PTR, and we use
+ * ULONG_PTR casts for HWND formatting.  The #define sentinel lets a PSDK
+ * basetsd.h that arrived later on the include path detect the prior
+ * definition via its own #ifndef and skip its copy. */
+#ifndef ULONG_PTR
+typedef unsigned long ULONG_PTR;
+#define ULONG_PTR ULONG_PTR
+#endif
+
 #define RH_TRUE   1
 #define RH_FALSE  0
 

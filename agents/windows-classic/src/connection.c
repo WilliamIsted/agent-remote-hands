@@ -14,6 +14,7 @@
  */
 
 #include "connection.h"
+#include "debug.h"
 #include "json.h"
 #include "token.h"
 #include "verbs/system.h"
@@ -26,7 +27,9 @@
 #include "verbs/registry.h"
 #include "verbs/clipboard.h"
 #include "verbs/watch.h"
+#include "verbs/system_power.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include <winsock.h>
@@ -169,10 +172,20 @@ typedef struct {
 } VerbEntry;
 
 static const VerbEntry kVerbs[] = {
-    /* system.* (W8) */
-    { "system.info",         RH_TIER_READ,        rh_verb_system_info         },
-    { "system.capabilities", RH_TIER_READ,        rh_verb_system_capabilities },
-    { "system.health",       RH_TIER_READ,        rh_verb_system_health       },
+    /* system.* */
+    { "system.info",               RH_TIER_READ,        rh_verb_system_info         },
+    { "system.capabilities",       RH_TIER_READ,        rh_verb_system_capabilities },
+    { "system.health",             RH_TIER_READ,        rh_verb_system_health       },
+
+    /* system.power.* */
+    { "system.power.blockers",     RH_TIER_READ,        rh_verb_power_blockers  },
+    { "system.power.lock",         RH_TIER_READ,        rh_verb_power_lock      },
+    { "system.power.reboot",       RH_TIER_EXTRA_RISKY, rh_verb_power_reboot    },
+    { "system.power.shutdown",     RH_TIER_EXTRA_RISKY, rh_verb_power_shutdown  },
+    { "system.power.logoff",       RH_TIER_EXTRA_RISKY, rh_verb_power_logoff    },
+    { "system.power.hibernate",    RH_TIER_EXTRA_RISKY, rh_verb_power_hibernate },
+    { "system.power.sleep",        RH_TIER_EXTRA_RISKY, rh_verb_power_sleep     },
+    { "system.power.cancel",       RH_TIER_EXTRA_RISKY, rh_verb_power_cancel    },
 
     /* screen.* */
     { "screen.capture",      RH_TIER_READ,        rh_verb_screen_capture      },
@@ -358,6 +371,23 @@ static void handle_close(RhConn* c)
 static void dispatch(RhConn* c, const RhRequest* req)
 {
     const VerbEntry* entry;
+
+#ifdef RH_DEBUG
+    {
+        char _dbg[512];
+        int  _pos;
+        int  _di;
+        int  _n;
+        _snprintf(_dbg, sizeof(_dbg), ">> %s", req->verb);
+        _pos = (int)strlen(_dbg);
+        for (_di = 0; _di < req->argc && _pos < (int)sizeof(_dbg) - 1; ++_di) {
+            _n = _snprintf(_dbg + _pos, (int)sizeof(_dbg) - _pos,
+                           " %s", req->args[_di]);
+            if (_n > 0) _pos += _n;
+        }
+        rh_dbg("%s", _dbg);
+    }
+#endif
 
     /* Header framed cleanly but args were malformed (PROTOCOL.md 1.2.5). */
     if (req->parse_error) {
