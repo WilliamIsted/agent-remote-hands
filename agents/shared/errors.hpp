@@ -57,6 +57,7 @@ enum class ErrorCode {
     NotADirectory,
     CrossDevice,
     UnsupportedFormat,
+    ImageTooLarge,
 };
 
 constexpr std::string_view to_wire(ErrorCode code) noexcept {
@@ -90,6 +91,7 @@ constexpr std::string_view to_wire(ErrorCode code) noexcept {
         case ErrorCode::NotADirectory:          return "not_a_directory";
         case ErrorCode::CrossDevice:            return "cross_device";
         case ErrorCode::UnsupportedFormat:      return "unsupported_format";
+        case ErrorCode::ImageTooLarge:          return "image_too_large";
     }
     return "unknown";
 }

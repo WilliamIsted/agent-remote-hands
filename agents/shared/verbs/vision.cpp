@@ -25,11 +25,15 @@
 #include "../log.hpp"
 #include "../platform.hpp"
 #include "../screen_capture.hpp"
+#include "args.hpp"
+#include "schema_args.hpp"
 
 #include <charconv>
 #include <cctype>
+#include <climits>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -40,29 +44,13 @@
 
 namespace remote_hands::vision_verbs {
 
+using wire::SchemaArgs;
+using wire::invalid_args;
+
 namespace {
 
 // ---------------------------------------------------------------------------
 // Helpers shared with screen.cpp (duplicated per D3 — no cross-verb headers)
-
-bool parse_region(std::string_view s, int& x, int& y, int& w, int& h) {
-    int values[4] = {};
-    std::size_t cursor = 0;
-    for (int i = 0; i < 4; ++i) {
-        const std::size_t comma = s.find(',', cursor);
-        const std::size_t end_pos = (comma == std::string_view::npos) ? s.size() : comma;
-        if (end_pos == cursor) return false;
-        const auto* p_end = s.data() + end_pos;
-        long parsed = 0;
-        const auto [p, ec] = std::from_chars(s.data() + cursor, p_end, parsed, 10);
-        if (ec != std::errc{} || p != p_end) return false;
-        values[i] = static_cast<int>(parsed);
-        if (comma == std::string_view::npos && i < 3) return false;
-        cursor = end_pos + 1;
-    }
-    x = values[0]; y = values[1]; w = values[2]; h = values[3];
-    return true;
-}
 
 HWND parse_hwnd(std::string_view s) {
     if (s.size() < 5 || s.substr(0, 4) != "win:") return nullptr;
@@ -75,15 +63,6 @@ HWND parse_hwnd(std::string_view s) {
     const auto [p, ec] = std::from_chars(s.data(), end, v, 16);
     if (ec != std::errc{} || p != end) return nullptr;
     return reinterpret_cast<HWND>(static_cast<uintptr_t>(v));
-}
-
-bool parse_nonneg_int(std::string_view s, int& out) {
-    int v = 0;
-    const auto* end = s.data() + s.size();
-    const auto [p, ec] = std::from_chars(s.data(), end, v, 10);
-    if (ec != std::errc{} || p != end || v < 0) return false;
-    out = v;
-    return true;
 }
 
 bool parse_float(std::string_view s, float& out) {
@@ -208,7 +187,18 @@ void append_kv_float(std::string& j, std::string_view key, float v) {
 // ---------------------------------------------------------------------------
 // vision.ocr handler
 
+// vision.ocr — input_schema (schema order):
+//   ["region","window","monitor","path","bytes","bytes_format",
+//    "language","min_confidence","include_word_bboxes"]
+// x-mutually-exclusive: ["region","window","monitor","path","bytes"].
+// x-conditional: bytes present => bytes_format present (invalid_args).
+// x-errors: ["not_supported","not_found","permission_denied",
+//            "unsupported_format","image_too_large","invalid_args"].
 void ocr(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"region", "window", "monitor", "path", "bytes",
+                          "bytes_format", "language", "min_confidence",
+                          "include_word_bboxes"});
+
     bool has_region  = false, has_window  = false, has_monitor = false;
     bool has_path    = false, has_bytes   = false;
     bool include_word_bboxes = false;
@@ -218,68 +208,168 @@ void ocr(Connection& conn, const wire::Request& req) {
     std::string path_str, bytes_b64, bytes_format_str, language_hint;
     float min_confidence = 0.0f;
 
-    for (std::size_t i = 0; i < req.args.size(); ++i) {
-        const auto& arg = req.args[i];
-        if (arg == "--region" && i + 1 < req.args.size()) {
-            if (!parse_region(req.args[++i], rx, ry, rw, rh)) {
-                conn.writer().write_err(ErrorCode::InvalidArgs,
-                    "{\"message\":\"--region must be x,y,w,h\"}");
+    // --- region: nested object {x,y,w,h}; w,h minimum 1 -------------------
+    if (args.present("region")) {
+        const mcp::JsonValue* rnode = args.node("region");
+        if (rnode == nullptr || !rnode->is_object()) {
+            invalid_args(conn,
+                         "vision.ocr 'region' must be an object {x,y,w,h}");
+            return;
+        }
+        struct Member { const char* key; int* out; bool min_one; };
+        const Member members[] = {
+            {"x", &rx, false}, {"y", &ry, false},
+            {"w", &rw, true},  {"h", &rh, true},
+        };
+        for (const Member& m : members) {
+            const mcp::JsonValue* v = rnode->find(m.key);
+            if (v == nullptr || v->is_null()) {
+                invalid_args(conn, "vision.ocr 'region' requires x,y,w,h");
                 return;
             }
-            has_region = true;
-        } else if (arg == "--window" && i + 1 < req.args.size()) {
-            hwnd = parse_hwnd(req.args[++i]);
-            if (!hwnd) {
-                conn.writer().write_err(ErrorCode::InvalidArgs,
-                    "{\"message\":\"--window must be win:0x<hex>\"}");
+            std::optional<std::string> lex;
+            if (v->is_number())      lex = v->num_lexeme();
+            else if (v->is_string()) lex = v->as_string();
+            if (!lex) {
+                invalid_args(conn,
+                             "vision.ocr 'region' x,y,w,h must be integers");
                 return;
             }
-            has_window = true;
-        } else if (arg == "--monitor" && i + 1 < req.args.size()) {
-            if (!parse_nonneg_int(req.args[++i], monitor_index)) {
-                conn.writer().write_err(ErrorCode::InvalidArgs,
-                    "{\"message\":\"--monitor must be a non-negative integer\"}");
+            const char* begin = lex->data();
+            const char* end   = begin + lex->size();
+            if (begin != end && *begin == '+') {
+                invalid_args(conn,
+                             "vision.ocr 'region' x,y,w,h must be integers");
                 return;
             }
-            has_monitor = true;
-        } else if (arg == "--path" && i + 1 < req.args.size()) {
-            path_str = req.args[++i];
-            has_path = true;
-        } else if (arg == "--bytes" && i + 1 < req.args.size()) {
-            bytes_b64 = req.args[++i];
-            has_bytes = true;
-        } else if (arg == "--bytes-format" && i + 1 < req.args.size()) {
-            bytes_format_str = req.args[++i];
-        } else if (arg == "--language" && i + 1 < req.args.size()) {
-            language_hint = req.args[++i];
-        } else if (arg == "--min-confidence" && i + 1 < req.args.size()) {
-            if (!parse_float(req.args[++i], min_confidence)) {
-                conn.writer().write_err(ErrorCode::InvalidArgs,
-                    "{\"message\":\"--min-confidence must be a float 0.0-1.0\"}");
+            long long parsed = 0;
+            const auto [p, ec] = std::from_chars(begin, end, parsed, 10);
+            if (ec != std::errc{} || p != end ||
+                parsed < INT_MIN || parsed > INT_MAX) {
+                invalid_args(conn,
+                             "vision.ocr 'region' x,y,w,h must be integers");
                 return;
             }
-        } else if (arg == "--include-word-bboxes") {
-            include_word_bboxes = true;
-        } else if (arg.size() >= 2 && arg.compare(0, 2, "--") == 0) {
-            std::string detail = "{\"unknown_flag\":\"";
-            detail += arg;
-            detail += "\"}";
-            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            if (m.min_one && parsed < 1) {
+                invalid_args(conn,
+                             "vision.ocr 'region' w and h must be >= 1");
+                return;
+            }
+            *m.out = static_cast<int>(parsed);
+        }
+        has_region = true;
+    }
+
+    // --- window: string handle "win:0x<hex>" ------------------------------
+    if (args.present("window")) {
+        auto w = args.str("window");
+        if (!w) {
+            invalid_args(conn,
+                         "vision.ocr 'window' must be a string (win:0x<hex>)");
+            return;
+        }
+        hwnd = parse_hwnd(*w);
+        if (!hwnd) {
+            invalid_args(conn,
+                         "vision.ocr 'window' must be win:0x<hex>");
+            return;
+        }
+        has_window = true;
+    }
+
+    // --- monitor: zero-based integer index --------------------------------
+    if (args.present("monitor")) {
+        auto m = args.integer32("monitor");
+        if (!m || *m < 0) {
+            invalid_args(conn,
+                         "vision.ocr 'monitor' must be a non-negative "
+                         "integer");
+            return;
+        }
+        monitor_index = *m;
+        has_monitor = true;
+    }
+
+    // --- path: absolute image-file path -----------------------------------
+    if (args.present("path")) {
+        auto p = args.str("path");
+        if (!p || p->empty()) {
+            invalid_args(conn, "vision.ocr 'path' must be a non-empty string");
+            return;
+        }
+        path_str = std::move(*p);
+        has_path = true;
+    }
+
+    // --- bytes: base64 image buffer ---------------------------------------
+    if (args.present("bytes")) {
+        auto b = args.str("bytes");
+        if (!b) {
+            invalid_args(conn, "vision.ocr 'bytes' must be a base64 string");
+            return;
+        }
+        bytes_b64 = std::move(*b);
+        has_bytes = true;
+    }
+
+    // --- bytes_format: codec of `bytes` (required iff bytes present) ------
+    if (args.present("bytes_format")) {
+        auto f = args.str("bytes_format");
+        if (!f) {
+            invalid_args(conn, "vision.ocr 'bytes_format' must be a string");
+            return;
+        }
+        bytes_format_str = std::move(*f);
+    }
+
+    // --- language: BCP-47 tag ---------------------------------------------
+    if (args.present("language")) {
+        auto l = args.str("language");
+        if (!l) {
+            invalid_args(conn, "vision.ocr 'language' must be a string");
+            return;
+        }
+        language_hint = std::move(*l);
+    }
+
+    // --- min_confidence: number 0.0-1.0, default 0.0 ----------------------
+    if (args.present("min_confidence")) {
+        auto c = args.str("min_confidence");
+        if (!c || !parse_float(*c, min_confidence) ||
+            min_confidence < 0.0f || min_confidence > 1.0f) {
+            invalid_args(conn,
+                         "vision.ocr 'min_confidence' must be a number "
+                         "0.0-1.0");
             return;
         }
     }
 
+    // --- include_word_bboxes: boolean, default false ----------------------
+    if (args.present("include_word_bboxes")) {
+        auto b = args.boolean("include_word_bboxes");
+        if (!b) {
+            invalid_args(conn,
+                         "vision.ocr 'include_word_bboxes' must be a "
+                         "boolean");
+            return;
+        }
+        include_word_bboxes = *b;
+    }
+
+    // x-mutually-exclusive: region / window / monitor / path / bytes.
     const int selector_count = (has_region  ? 1 : 0) + (has_window ? 1 : 0)
                              + (has_monitor ? 1 : 0) + (has_path   ? 1 : 0)
                              + (has_bytes   ? 1 : 0);
     if (selector_count > 1) {
-        conn.writer().write_err(ErrorCode::InvalidArgs,
-            "{\"message\":\"source selectors are mutually exclusive\"}");
+        invalid_args(conn,
+                     "vision.ocr source selectors are mutually exclusive");
         return;
     }
+    // x-conditional: bytes_format required when bytes is supplied.
     if (has_bytes && bytes_format_str.empty()) {
-        conn.writer().write_err(ErrorCode::InvalidArgs,
-            "{\"message\":\"--bytes-format is required when --bytes is supplied\"}");
+        invalid_args(conn,
+                     "vision.ocr 'bytes_format' is required when 'bytes' "
+                     "is supplied");
         return;
     }
 
@@ -303,7 +393,7 @@ void ocr(Connection& conn, const wire::Request& req) {
                     "{\"reason\":\"image_too_large\",\"max_dimension\":%d,"
                     "\"observed\":{\"w\":%d,\"h\":%d}}",
                     caps.max_dimension, frame.width, frame.height);
-                conn.writer().write_err(ErrorCode::NotSupported, detail);
+                conn.writer().write_err(ErrorCode::ImageTooLarge, detail);
                 return;
             }
             result = platform::ocr_from_frame(frame, 0, 0, language_hint,
@@ -315,7 +405,7 @@ void ocr(Connection& conn, const wire::Request& req) {
         } else if (has_region) {
             if (rw <= 0 || rh <= 0) {
                 conn.writer().write_err(ErrorCode::InvalidArgs,
-                    "{\"message\":\"--region w and h must be positive\"}");
+                    "{\"message\":\"'region' w and h must be positive\"}");
                 return;
             }
             screen::CapturedFrame frame = screen::capture_region(rx, ry, rw, rh, false);
@@ -325,7 +415,7 @@ void ocr(Connection& conn, const wire::Request& req) {
                     "{\"reason\":\"image_too_large\",\"max_dimension\":%d,"
                     "\"observed\":{\"w\":%d,\"h\":%d}}",
                     caps.max_dimension, frame.width, frame.height);
-                conn.writer().write_err(ErrorCode::NotSupported, detail);
+                conn.writer().write_err(ErrorCode::ImageTooLarge, detail);
                 return;
             }
             result = platform::ocr_from_frame(frame, rx, ry, language_hint,
@@ -358,7 +448,7 @@ void ocr(Connection& conn, const wire::Request& req) {
                     "{\"reason\":\"image_too_large\",\"max_dimension\":%d,"
                     "\"observed\":{\"w\":%d,\"h\":%d}}",
                     caps.max_dimension, frame.width, frame.height);
-                conn.writer().write_err(ErrorCode::NotSupported, detail);
+                conn.writer().write_err(ErrorCode::ImageTooLarge, detail);
                 return;
             }
             result = platform::ocr_from_frame(frame, mx, my, language_hint,
@@ -386,7 +476,7 @@ void ocr(Connection& conn, const wire::Request& req) {
             auto decoded = base64_decode(bytes_b64);
             if (decoded.empty()) {
                 conn.writer().write_err(ErrorCode::InvalidArgs,
-                    "{\"message\":\"--bytes: base64 decode produced empty buffer\"}");
+                    "{\"message\":\"'bytes': base64 decode produced empty buffer\"}");
                 return;
             }
             result = platform::ocr_from_bytes(decoded.data(), decoded.size(),
@@ -405,7 +495,7 @@ void ocr(Connection& conn, const wire::Request& req) {
                     "{\"reason\":\"image_too_large\",\"max_dimension\":%d,"
                     "\"observed\":{\"w\":%d,\"h\":%d}}",
                     caps.max_dimension, frame.width, frame.height);
-                conn.writer().write_err(ErrorCode::NotSupported, detail);
+                conn.writer().write_err(ErrorCode::ImageTooLarge, detail);
                 return;
             }
             result = platform::ocr_from_frame(frame, 0, 0, language_hint,
@@ -421,14 +511,14 @@ void ocr(Connection& conn, const wire::Request& req) {
             conn.writer().write_err(ErrorCode::NotSupported,
                 "{\"reason\":\"no OCR language pack installed\"}");
         } else if (msg == "unsupported_format") {
-            conn.writer().write_err(ErrorCode::NotSupported,
+            conn.writer().write_err(ErrorCode::UnsupportedFormat,
                 "{\"reason\":\"unsupported_format\"}");
         } else if (msg == "image_too_large") {
             char detail[80];
             std::snprintf(detail, sizeof(detail),
                 "{\"reason\":\"image_too_large\",\"max_dimension\":%d}",
                 caps.max_dimension);
-            conn.writer().write_err(ErrorCode::NotSupported, detail);
+            conn.writer().write_err(ErrorCode::ImageTooLarge, detail);
         } else {
             conn.writer().write_err(ErrorCode::NotSupported,
                 "{\"reason\":\"engine_error\"}");
