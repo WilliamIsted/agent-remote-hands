@@ -339,6 +339,34 @@ void McpSession::handle_tools_call(const std::string& id_json,
         return;
     }
 
+    if (cap.has_blob) {
+        // Binary side-channel — Protocol v3 PR1.d "Shape B". The JSON-RPC
+        // result object IS the verb's metadata plus a blob_size declaring how
+        // many raw opaque bytes follow the JSON's last byte (before the next
+        // frame's Content-Length). Content-Length counts ONLY the JSON. This
+        // path is reached exclusively by write_ok_blob() (screen.capture
+        // encoding:binary, modern family); every other response keeps the
+        // text-content path below byte-for-byte unchanged.
+        std::string frame = "{\"jsonrpc\":\"2.0\",\"id\":";
+        frame += id_json;
+        frame += ",\"result\":{";
+        if (!cap.blob_meta.empty()) {
+            frame += cap.blob_meta;   // pre-formatted JSON members, no braces
+            frame += ',';
+        }
+        frame += "\"blob_size\":";
+        char nbuf[32];
+        std::snprintf(nbuf, sizeof(nbuf), "%zu", cap.blob.size());
+        frame += nbuf;
+        frame += "}}";
+        codec_.write_frame(
+            frame,
+            wire::ByteView{
+                reinterpret_cast<const std::byte*>(cap.blob.data()),
+                cap.blob.size()});
+        return;
+    }
+
     std::string result = "{\"content\":[{\"type\":\"text\",\"text\":";
     if (cap.is_err) {
         const std::string detail =

@@ -30,6 +30,8 @@
 // hello header line. Construct the codec with those leftover bytes so the
 // first frame (typically `initialize`) is not lost.
 
+#include "../protocol.hpp"   // wire::ByteView
+
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -54,6 +56,16 @@ public:
     // Writes one MCP frame: a Content-Length header followed by `json`.
     // Throws std::runtime_error on socket error.
     void write_frame(const std::string& json);
+
+    // Writes one Content-Length-framed JSON object followed immediately by
+    // exactly `blob.size` raw opaque bytes (Protocol v3 PR1.d "Shape B"
+    // binary side-channel). `Content-Length` counts ONLY the JSON object
+    // bytes — framing for the JSON is identical to write_frame(json); the
+    // caller is responsible for having placed a matching `blob_size` field
+    // inside `json`. The blob bytes occupy the wire between this frame's
+    // JSON and the next frame's `Content-Length:` header. Throws
+    // std::runtime_error on socket error.
+    void write_frame(const std::string& json, wire::ByteView blob);
 
 private:
     SOCKET                 socket_;

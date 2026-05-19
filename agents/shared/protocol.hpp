@@ -164,6 +164,18 @@ public:
     void write_ok(ByteView payload);                                      // "OK <len>\n<bytes>"
     void write_ok(std::string_view payload);                            // utf-8 convenience
 
+    // Binary side-channel success (Protocol v3 PR1.d "Shape B"). `meta_json`
+    // is the verb's JSON result-metadata object body WITHOUT braces (e.g.
+    // `"width":1920,"height":1080,"format":"png"`); `blob` is the raw opaque
+    // payload (e.g. encoded image bytes). Under capture mode (the MCP path,
+    // §1.6) this records the metadata + blob so the session emits one
+    // Content-Length-framed JSON object carrying `blob_size` followed by the
+    // raw blob bytes. Outside capture mode (the retired direct-ARH path) it
+    // degrades to write_ok(blob) — raw payload only — so no non-MCP caller
+    // changes shape. Only screen.capture (encoding:binary, modern family)
+    // uses this today.
+    void write_ok_blob(std::string_view meta_json, ByteView blob);
+
     // Error responses. detail_json is the raw JSON body (caller-formatted).
     void write_err(ErrorCode code);
     void write_err(ErrorCode code, std::string_view detail_json);
@@ -193,6 +205,15 @@ public:
         std::string ok_body;          // OK payload bytes (UTF-8 JSON)
         ErrorCode   err_code  = ErrorCode::NotSupported;
         std::string err_detail;       // ERR detail JSON (may be empty)
+
+        // Binary side-channel (Protocol v3 PR1.d "Shape B"). Set only by
+        // write_ok_blob(); the default false/empty leaves every existing
+        // captured response byte-identical. When has_blob is true the session
+        // emits a Content-Length-framed metadata JSON object (carrying
+        // blob_size) followed by `blob`, instead of the text content path.
+        bool        has_blob  = false;
+        std::string blob_meta;        // result-metadata members, no braces
+        std::string blob;             // raw opaque payload bytes
     };
 
     void begin_capture() { std::lock_guard lock{mutex_}; capturing_ = true; captured_ = Captured{}; }

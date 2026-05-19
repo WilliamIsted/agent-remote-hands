@@ -230,6 +230,37 @@ void Writer::write_ok(std::string_view payload) {
         reinterpret_cast<const std::byte*>(payload.data()), payload.size()});
 }
 
+void Writer::write_ok_blob(std::string_view meta_json, ByteView blob) {
+    std::lock_guard lock{mutex_};
+    if (capturing_) {
+        captured_.responded = true;
+        captured_.is_err    = false;
+        captured_.has_blob  = true;
+        captured_.blob_meta.assign(meta_json);
+        captured_.blob.assign(
+            reinterpret_cast<const char*>(blob.data), blob.size);
+        // ok_body intentionally left empty: the Shape-B path serialises from
+        // blob_meta + blob, not ok_body.
+        return;
+    }
+    // Non-capture (the retired direct-ARH framing path): Shape B is an
+    // MCP/LSP-framing construct with no ARH-header-line equivalent. Degrade
+    // to the existing raw-payload primitive so a direct-ARH caller still
+    // receives the bytes and the wire never desyncs. v2.2 routes every verb
+    // through MCP, so this branch is defensive only.
+#ifdef RH_DEBUG
+    log::debug(L"<< OK (blob, non-capture fallback) %zu bytes", blob.size);
+#endif
+    char header[32];
+    const int n = std::snprintf(header, sizeof(header),
+                                "OK %zu\n", blob.size);
+    if (n <= 0) throw std::runtime_error("header format failed");
+    write_raw(std::string_view{header, static_cast<std::size_t>(n)});
+    if (!blob.empty()) {
+        write_raw(blob);
+    }
+}
+
 void Writer::write_err(ErrorCode code) {
     std::lock_guard lock{mutex_};
     if (capturing_) {

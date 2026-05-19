@@ -40,32 +40,36 @@
 //                           formats only (no spec-mandated default; passed
 //                           through where the encoder consumes it).
 //   #91 encoding (enum)  — base64|binary; parsed + validated. The default
-//                           `base64` legacy behaviour is preserved; the
-//                           `binary` side-channel OUTPUT pipeline is Phase 2b.
+//                           `base64` behaviour is preserved byte-for-byte.
+//                           `binary` is the Protocol v3 PR1.d "Shape B"
+//                           side-channel: modern family emits the raw image
+//                           bytes out-of-band (JSON result carries
+//                           width/height/format + a blob_size the framing
+//                           layer appends); non-modern families keep the
+//                           unsupported_format response (side-channel not
+//                           available on that family).
 //   region/window/monitor — selectors with x-mutually-exclusive; region is a
 //                           nested {x,y,w,h} object. FULLY APPLIED (drive the
 //                           existing capture_* dispatch).
 //
-// PHASE 2b OUTPUT BOUNDARY. This slice is the ARG-INPUT refactor only. The
-// image encoder set the binary currently produces is unchanged (PNG via WIC /
-// BMP). Selecting `format: webp|jpeg|heic` needs an encoder this build does
-// not ship, and `encoding: binary` needs the binary side-channel output
-// pipeline — both are Phase 2b. They are parsed + validated here, then the
-// not-yet-implemented OUTPUT cases are surfaced (see ERROR-CODE DISCIPLINE)
-// rather than implemented. The default/legacy path (png/bmp, base64-framed
-// by the writer) keeps its existing capture + encode behaviour byte-for-byte.
+// OUTPUT BOUNDARY. The image encoder set is PNG (via WIC) / BMP. Selecting
+// `format: webp|jpeg|heic` needs an encoder this build does not ship; that
+// is parsed + validated here then surfaced as unsupported_format (see
+// ERROR-CODE DISCIPLINE) rather than implemented. The default base64 path
+// (png/bmp, framed by the writer) keeps its existing capture + encode
+// behaviour byte-for-byte; the modern binary side-channel reuses the same
+// captured + encoded bytes, only the emission framing differs.
 //
 // ERROR-CODE DISCIPLINE. screen.capture.json x-errors is exactly
 // ["not_found","unsupported_format","permission_denied"].
 //   - not_found            -> ErrorCode::NotFound  (monitor index absent).
-//   - unsupported_format   -> ErrorCode::UnsupportedFormat (added to
-//                             errors.hpp this slice). Emitted for an unknown
-//                             format value, a not-bundled webp/jpeg/heic
-//                             encoder, and the Phase-2b encoding:binary
-//                             output (encoding:binary is a mild semantic
-//                             stretch — it is the only in-x-errors code that
-//                             fits a "this build can't produce that output
-//                             form" condition).
+//   - unsupported_format   -> ErrorCode::UnsupportedFormat. Emitted for an
+//                             unknown format value, a not-bundled
+//                             webp/jpeg/heic encoder, and (non-modern
+//                             families only) an encoding:binary request
+//                             (the side-channel is modern-only; this is the
+//                             only in-x-errors code that fits a "this build
+//                             can't produce that output form" condition).
 //   - permission_denied    -> ErrorCode::PermissionDenied exists; not naturally
 //                             reached by the current GDI capture path (no ACL
 //                             gate), so it is not emitted here.
@@ -363,15 +367,11 @@ void capture(Connection& conn, const wire::Request& req) {
         encoding_binary = (*e == "binary");
     }
 
-    // PHASE 2b OUTPUT BOUNDARY ---------------------------------------------
-    // `format: webp|jpeg|heic` needs an encoder not bundled in this build;
-    // `encoding: binary` needs the binary side-channel output pipeline.
-    // Both are Phase 2b. Args are fully parsed + validated above; the
-    // not-yet-implemented OUTPUT is surfaced here. unsupported_format is the
-    // spec-declared code for a build that cannot produce the requested
-    // output form (encoding:binary is a mild semantic stretch — it is the
-    // only in-x-errors code; the screen.capture x-errors set is itself
-    // incomplete, tracked for the protocol repo).
+    // OUTPUT BOUNDARY ------------------------------------------------------
+    // `format: webp|jpeg|heic` needs an encoder not bundled in this build.
+    // Args are fully parsed + validated above; the not-yet-implemented
+    // OUTPUT is surfaced here. unsupported_format is the spec-declared code
+    // for a build that cannot produce the requested output form.
     if (!format_has_encoder(format)) {
         conn.writer().write_err(
             ErrorCode::UnsupportedFormat,
@@ -380,13 +380,21 @@ void capture(Connection& conn, const wire::Request& req) {
             "(phase2b)\"}");
         return;
     }
+#ifndef RH_MODERN
+    // `encoding: binary` is the Protocol v3 PR1.d "Shape B" side-channel,
+    // scoped to the modern family only. Non-modern families (windows-legacy)
+    // keep their existing behaviour: the side-channel is unavailable, so a
+    // binary request is surfaced as unsupported_format exactly as before
+    // (the only in-x-errors code that fits "this build can't produce that
+    // output form"). The modern path is handled at the emission site below.
     if (encoding_binary) {
         conn.writer().write_err(
             ErrorCode::UnsupportedFormat,
-            "{\"reason\":\"encoding:binary output side-channel is deferred "
-            "to Phase 2b (phase2b)\"}");
+            "{\"reason\":\"encoding:binary output side-channel is not "
+            "available on this family (phase2b)\"}");
         return;
     }
+#endif
 
     // --- capture dispatch (unchanged resource model) ----------------------
     screen::CapturedFrame frame;
@@ -432,6 +440,32 @@ void capture(Connection& conn, const wire::Request& req) {
             "{\"reason\":\"encoder failed\"}");
         return;
     }
+
+#ifdef RH_MODERN
+    if (encoding_binary) {
+        // Protocol v3 PR1.d "Shape B" binary side-channel (modern family
+        // only). Hand the raw encoded image bytes to the codec as an
+        // out-of-band blob; the JSON result object carries width/height/
+        // format metadata and the framing layer appends a blob_size field.
+        // The default base64 path below is left byte-for-byte unchanged.
+        char meta[96];
+        const int mn = std::snprintf(
+            meta, sizeof(meta),
+            "\"width\":%d,\"height\":%d,\"format\":\"%s\"",
+            frame.width, frame.height,
+            (format == Format::Png) ? "png" : "bmp");
+        if (mn <= 0) {
+            conn.writer().write_err(
+                ErrorCode::NotSupported,
+                "{\"reason\":\"metadata format failed\"}");
+            return;
+        }
+        conn.writer().write_ok_blob(
+            std::string_view{meta, static_cast<std::size_t>(mn)},
+            wire::ByteView{encoded.data(), encoded.size()});
+        return;
+    }
+#endif
 
     conn.writer().write_ok(wire::ByteView{encoded.data(), encoded.size()});
 }

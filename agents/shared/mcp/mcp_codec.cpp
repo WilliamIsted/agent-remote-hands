@@ -145,6 +145,26 @@ std::optional<std::string> McpCodec::read_frame() {
     return read_exact(static_cast<std::size_t>(content_length));
 }
 
+namespace {
+
+// Drains `frame` to the socket, partial-send-safe. Shared by both
+// write_frame overloads so the single-arg path's on-wire behaviour is
+// byte-for-byte unchanged.
+void send_all(SOCKET socket, const char* p, std::size_t left) {
+    while (left > 0) {
+        const int chunk = static_cast<int>(
+            std::min<std::size_t>(left, 1 << 20));
+        const int sent = send(socket, p, chunk, 0);
+        if (sent <= 0) {
+            throw std::runtime_error("send() failed (mcp)");
+        }
+        p    += sent;
+        left -= static_cast<std::size_t>(sent);
+    }
+}
+
+}  // namespace
+
 void McpCodec::write_frame(const std::string& json) {
     char header[64];
     const int n = std::snprintf(header, sizeof(header),
@@ -160,18 +180,32 @@ void McpCodec::write_frame(const std::string& json) {
     frame.append(header, static_cast<std::size_t>(n));
     frame.append(json);
 
-    const char* p     = frame.data();
-    std::size_t left  = frame.size();
-    while (left > 0) {
-        const int chunk = static_cast<int>(
-            std::min<std::size_t>(left, 1 << 20));
-        const int sent = send(socket_, p, chunk, 0);
-        if (sent <= 0) {
-            throw std::runtime_error("send() failed (mcp)");
-        }
-        p    += sent;
-        left -= static_cast<std::size_t>(sent);
+    send_all(socket_, frame.data(), frame.size());
+}
+
+void McpCodec::write_frame(const std::string& json, wire::ByteView blob) {
+    // Content-Length counts ONLY the JSON object bytes — identical framing to
+    // the single-arg overload. The raw blob bytes follow the JSON's last byte
+    // with no separator and are NOT included in Content-Length (Protocol v3
+    // PR1.d "Shape B": the JSON's blob_size field declares the trailing count).
+    char header[64];
+    const int n = std::snprintf(header, sizeof(header),
+                                "Content-Length: %zu\r\n\r\n", json.size());
+    if (n <= 0) {
+        throw std::runtime_error("MCP header format failed");
     }
+
+    // Coalesce header + JSON + blob into one buffer (same anti-tiny-packet
+    // strategy the single-arg path uses) then drain via the shared sender.
+    std::string frame;
+    frame.reserve(static_cast<std::size_t>(n) + json.size() + blob.size);
+    frame.append(header, static_cast<std::size_t>(n));
+    frame.append(json);
+    if (!blob.empty()) {
+        frame.append(reinterpret_cast<const char*>(blob.data), blob.size);
+    }
+
+    send_all(socket_, frame.data(), frame.size());
 }
 
 }  // namespace remote_hands::mcp
