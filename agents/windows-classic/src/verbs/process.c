@@ -19,6 +19,7 @@
 #include "../protocol.h"
 
 #include <windows.h>
+#include <shellapi.h>
 #include <tlhelp32.h>
 #include <stdlib.h>
 #include <string.h>
