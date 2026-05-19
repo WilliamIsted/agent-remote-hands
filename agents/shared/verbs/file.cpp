@@ -408,7 +408,7 @@ void list(Connection& conn, const wire::Request& req) {
 
         entries.push_back({
             text::wide_to_utf8(fd.cFileName, std::wcslen(fd.cFileName)),
-            attribute_type(fd.dwFileAttributes),
+            std::string(attribute_type(fd.dwFileAttributes)),
             sz.QuadPart,
             filetime_to_unix(fd.ftLastWriteTime),
             filetime_to_unix(fd.ftCreationTime),
