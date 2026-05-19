@@ -98,6 +98,25 @@ public:
     // implement `connection.reset` recovery.
     void flush_buffer() noexcept { buffer_.clear(); }
 
+    // Moves out any bytes received-but-not-yet-consumed. After the bootstrap
+    // `connection.hello` header line is read, buffer_ may ALREADY hold
+    // pipelined MCP bytes (the client's `initialize` frame, etc.) that the
+    // socket-level read pulled in opportunistically. The post-hello MCP codec
+    // must consume these before reading more from the socket — discarding
+    // them loses the client's first frame intermittently. The Reader is left
+    // with an empty buffer; it is not used again on this connection once the
+    // MCP session takes over. See §1.6 framing handoff.
+    std::vector<std::byte> take_residual() noexcept {
+        std::vector<std::byte> out = std::move(buffer_);
+        buffer_.clear();
+        return out;
+    }
+
+    // Raw socket accessor — the MCP codec reads/writes directly on the same
+    // socket once framing switches. The Reader itself is no longer driven
+    // after handoff (run() returns once the MCP session ends).
+    SOCKET socket() const noexcept { return socket_; }
+
 private:
     SOCKET                  socket_;
     std::vector<std::byte>  buffer_;    // bytes received but not yet consumed
@@ -132,12 +151,41 @@ public:
     void write_event(std::string_view subscription_id,
                      std::string_view payload);
 
+    // -- Capture mode (MCP framing, §1.6) -----------------------------------
+    //
+    // The post-hello MCP session reuses the existing verb-dispatch path. The
+    // ~50 verb handlers all respond through write_ok()/write_err() expecting
+    // ARH framing on the socket. Rather than rewrite every handler, the MCP
+    // session puts the Writer in capture mode: write_ok()/write_err() then
+    // record the response in-memory instead of touching the socket, and the
+    // session reads it back to build the MCP `tools/call` result frame.
+    //
+    // Capture is single-shot per verb: one handler call produces exactly one
+    // captured response. write_event() under capture asserts/no-ops (events
+    // are Phase 2 — watch.* verbs do not function over MCP in Phase 1).
+
+    struct Captured {
+        bool        responded = false;
+        bool        is_err    = false;
+        std::string ok_body;          // OK payload bytes (UTF-8 JSON)
+        ErrorCode   err_code  = ErrorCode::NotSupported;
+        std::string err_detail;       // ERR detail JSON (may be empty)
+    };
+
+    void begin_capture() { std::lock_guard lock{mutex_}; capturing_ = true; captured_ = Captured{}; }
+    void end_capture()   { std::lock_guard lock{mutex_}; capturing_ = false; }
+    const Captured& captured() const noexcept { return captured_; }
+    bool capturing() const noexcept { return capturing_; }
+
 private:
     void write_raw(ByteView bytes);
     void write_raw(std::string_view sv);
 
     SOCKET      socket_;
     std::mutex  mutex_;
+
+    bool        capturing_ = false;
+    Captured    captured_;
 };
 
 }  // namespace remote_hands::wire

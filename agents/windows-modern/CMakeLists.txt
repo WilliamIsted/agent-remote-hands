@@ -103,6 +103,10 @@ target_sources(remote-hands-core PRIVATE
     ../shared/subscription.cpp
     ../shared/crash_check.cpp
     ../shared/mdns.cpp
+    # MCP framing (Protocol 2.2 §1.6) — modern-only in Phase 1
+    ../shared/mcp/json_parse.cpp
+    ../shared/mcp/mcp_codec.cpp
+    ../shared/mcp/mcp_session.cpp
     # verbs (one file per namespace)
     ../shared/verbs/system.cpp
     ../shared/verbs/window.cpp

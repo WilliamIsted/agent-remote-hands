@@ -1,0 +1,432 @@
+//   Copyright 2026 William Isted and contributors
+//
+//   Licensed under the Apache License, Version 2.0 (the "License");
+//   you may not use this file except in compliance with the License.
+//   You may obtain a copy of the License at
+//
+//       http://www.apache.org/licenses/LICENSE-2.0
+//
+//   Unless required by applicable law or agreed to in writing, software
+//   distributed under the License is distributed on an "AS IS" BASIS,
+//   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//   See the License for the specific language governing permissions and
+//   limitations under the License.
+
+#include "mcp_session.hpp"
+
+#include "json_parse.hpp"
+#include "../capabilities.hpp"
+#include "../connection.hpp"
+#include "../errors.hpp"
+#include "../log.hpp"
+#include "../protocol.hpp"
+#include "../verbs_blob.hpp"
+
+#include <cstdio>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace remote_hands::mcp {
+
+namespace {
+
+// JSON string escaper (RFC 8259). Mirrors json.hpp's append_string but lives
+// here so the builder-only json.hpp is not coupled to the MCP module.
+void append_json_string(std::string& out, std::string_view s) {
+    out += '"';
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char esc[8];
+                    std::snprintf(esc, sizeof(esc), "\\u%04x",
+                                  static_cast<unsigned>(
+                                      static_cast<unsigned char>(c)));
+                    out += esc;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    out += '"';
+}
+
+// Re-serialise a parsed JSON value as its compact JSON text. Used to echo the
+// request `id` faithfully (numbers keep their exact lexeme; strings are
+// re-escaped). Only the value kinds a JSON-RPC `id` can take are needed
+// (string / number / null) but objects/arrays are handled for completeness.
+std::string serialise(const JsonValue& v) {
+    switch (v.type()) {
+        case JsonType::Null:   return "null";
+        case JsonType::Bool:   return v.as_bool() ? "true" : "false";
+        case JsonType::Number: return v.num_lexeme();
+        case JsonType::String: {
+            std::string s;
+            append_json_string(s, v.as_string());
+            return s;
+        }
+        case JsonType::Array: {
+            std::string s = "[";
+            bool first = true;
+            for (const auto& e : v.as_array()) {
+                if (!first) s += ',';
+                first = false;
+                s += serialise(e);
+            }
+            s += ']';
+            return s;
+        }
+        case JsonType::Object: {
+            std::string s = "{";
+            bool first = true;
+            for (const auto& kv : v.as_object()) {
+                if (!first) s += ',';
+                first = false;
+                append_json_string(s, kv.first);
+                s += ':';
+                s += serialise(kv.second);
+            }
+            s += '}';
+            return s;
+        }
+    }
+    return "null";
+}
+
+// Result of mapping a JSON `arguments` object onto a flat wire::Request.
+struct ArgMapResult {
+    bool        ok = true;
+    std::string reject_reason;   // populated when ok == false
+};
+
+// Inverse of wire.py _args_to_dict (§1.6.3). Reconstructs the flat token
+// stream the existing verb handlers expect:
+//
+//   "_args": [a, b]   -> leading positional tokens a b (array order)
+//   "flag": true      -> --flag           (bare; no value token)
+//   "key": <scalar>   -> --key <value>    ('_'->'-' in the key)
+//
+// Scalars: string verbatim; number as its JSON lexeme; bool false -> "false".
+// Nested object / array values (other than _args) and the binary side-channel
+// key `content_b64` are Phase-1 non-functional — rejected with a reason so
+// the caller can surface a clean verb-level error rather than guess a shape.
+ArgMapResult map_arguments(const JsonValue& args, wire::Request& req) {
+    ArgMapResult r;
+    if (args.is_null()) {
+        return r;  // no arguments — valid (e.g. system.info)
+    }
+    if (!args.is_object()) {
+        r.ok = false;
+        r.reject_reason = "params.arguments must be a JSON object";
+        return r;
+    }
+
+    // Pass 1: positional _args (array order) become leading tokens.
+    if (const JsonValue* pos = args.find("_args")) {
+        if (!pos->is_array()) {
+            r.ok = false;
+            r.reject_reason = "_args must be an array";
+            return r;
+        }
+        for (const auto& e : pos->as_array()) {
+            if (e.is_string()) {
+                req.args.push_back(e.as_string());
+            } else if (e.is_number()) {
+                req.args.push_back(e.num_lexeme());
+            } else if (e.is_bool()) {
+                req.args.push_back(e.as_bool() ? "true" : "false");
+            } else {
+                r.ok = false;
+                r.reject_reason =
+                    "_args entries must be scalar (string/number/bool)";
+                return r;
+            }
+        }
+    }
+
+    // Pass 2: every other key becomes --key [value].
+    for (const auto& kv : args.as_object()) {
+        const std::string& key = kv.first;
+        if (key == "_args") continue;
+
+        if (key == "content_b64") {
+            // Binary side-channel: the existing handlers read payload bytes
+            // via reader_.read_payload(), which does not exist under MCP.
+            // Base64 content handling is Phase 2 (§1.6.6).
+            r.ok = false;
+            r.reject_reason =
+                "binary payload (content_b64) is not supported over MCP "
+                "framing in this build (Phase 2)";
+            return r;
+        }
+
+        const JsonValue& val = kv.second;
+
+        // Nested object / array argument shapes (region:{x,y,w,h},
+        // modifiers:[...], argv:[...], …) cannot be losslessly flattened to
+        // the comma/space token grammar the handlers parse without
+        // verb-specific knowledge. Reject explicitly — never guess.
+        if (val.is_object() || val.is_array()) {
+            r.ok = false;
+            r.reject_reason =
+                "argument '" + key + "' has a nested object/array shape not "
+                "supported over MCP framing in this build (Phase 2)";
+            return r;
+        }
+
+        std::string flag = "--";
+        for (char c : key) flag += (c == '_') ? '-' : c;
+        req.args.push_back(flag);
+
+        if (val.is_bool()) {
+            if (val.as_bool()) {
+                // Bare flag — no value token (matches _args_to_dict's
+                // `--flag` alone => {"flag": true}).
+                continue;
+            }
+            req.args.push_back("false");
+        } else if (val.is_string()) {
+            req.args.push_back(val.as_string());
+        } else if (val.is_number()) {
+            req.args.push_back(val.num_lexeme());
+        } else if (val.is_null()) {
+            // Null value: drop the flag we just pushed (treat as absent).
+            req.args.pop_back();
+        }
+    }
+    return r;
+}
+
+}  // namespace
+
+McpSession::McpSession(Connection& conn,
+                       McpCodec codec,
+                       std::string negotiated_version)
+    : conn_{conn},
+      codec_{std::move(codec)},
+      negotiated_version_{std::move(negotiated_version)} {}
+
+void McpSession::send_result(const std::string& id_json,
+                             const std::string& result_obj) {
+    std::string frame = "{\"jsonrpc\":\"2.0\",\"id\":";
+    frame += id_json;
+    frame += ",\"result\":";
+    frame += result_obj;
+    frame += '}';
+    codec_.write_frame(frame);
+}
+
+void McpSession::send_error(const std::string& id_json, int code,
+                            const std::string& message) {
+    std::string frame = "{\"jsonrpc\":\"2.0\",\"id\":";
+    frame += id_json.empty() ? "null" : id_json;
+    frame += ",\"error\":{\"code\":";
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%d", code);
+    frame += buf;
+    frame += ",\"message\":";
+    append_json_string(frame, message);
+    frame += "}}";
+    codec_.write_frame(frame);
+}
+
+void McpSession::handle_initialize(const std::string& id_json,
+                                   const JsonValue& /*msg*/) {
+    // Advertise tools + notifications; serverInfo.version echoes the
+    // negotiated ARH protocol version (§1.6.1).
+    std::string result =
+        "{\"protocolVersion\":\"2025-03-26\","
+        "\"capabilities\":{\"tools\":{\"listChanged\":false},"
+        "\"notifications\":{}},"
+        "\"serverInfo\":{\"name\":\"AgentRemoteHands\",\"version\":";
+    append_json_string(result, negotiated_version_);
+    result += "}}";
+    send_result(id_json, result);
+    initialized_ = true;
+}
+
+void McpSession::handle_tools_list(const std::string& id_json) {
+    // §1.6.2: ALL implemented verbs regardless of tier; each carries its
+    // pre-sliced description / inputSchema / x-crudx / x-tier fragment.
+    // §1.6.7 excludes are already absent from verb_tool_meta(). We further
+    // gate on find_verb() so connection-tier verbs (handled outside the verb
+    // table) and any family-disabled verbs are reflected accurately.
+    const auto& meta = system_verbs::verb_tool_meta();
+
+    std::string result = "{\"tools\":[";
+    bool first = true;
+    for (const auto& kv : meta) {
+        const std::string_view name = kv.first;
+        // connection.tier_raise / connection.tier_drop are MCP tools (§1.6.4)
+        // but are NOT in the verb table (handled by Connection directly), so
+        // find_verb() would reject them. Allow them through explicitly;
+        // everything else must be a live, family-enabled verb.
+        const bool is_tier_verb =
+            (name == "connection.tier_raise" ||
+             name == "connection.tier_drop");
+        if (!is_tier_verb && !find_verb(name)) {
+            continue;
+        }
+        if (!first) result += ',';
+        first = false;
+        result += "{\"name\":";
+        append_json_string(result, name);
+        result += kv.second;   // ,"description":...,"inputSchema":...,x-*
+        result += '}';
+    }
+    result += "]}";
+    send_result(id_json, result);
+}
+
+void McpSession::handle_tools_call(const std::string& id_json,
+                                   const JsonValue& msg) {
+    const JsonValue* params = msg.find("params");
+    if (!params || !params->is_object()) {
+        send_error(id_json, -32602, "tools/call missing params object");
+        return;
+    }
+    const JsonValue* name = params->find("name");
+    if (!name || !name->is_string() || name->as_string().empty()) {
+        send_error(id_json, -32602, "tools/call missing tool name");
+        return;
+    }
+    const std::string& verb = name->as_string();
+
+    // §1.6.7: these are never MCP tools. Naming one is a protocol-level
+    // "unknown tool" condition, not a verb-level failure.
+    if (verb == "connection.hello" || verb == "connection.close" ||
+        verb == "connection.reset" || verb == "system.verbs") {
+        send_error(id_json, -32601,
+                   "tool '" + verb + "' is not exposed over MCP");
+        return;
+    }
+
+    // Map params.arguments -> flat wire::Request (inverse of _args_to_dict).
+    wire::Request req;
+    req.verb = verb;
+    const JsonValue* arguments = params->find("arguments");
+    JsonValue empty_obj = JsonValue::make_object({});
+    const ArgMapResult mapped =
+        map_arguments(arguments ? *arguments : empty_obj, req);
+
+    if (!mapped.ok) {
+        // Deferred arg shape (nested object/array or binary payload). Surface
+        // as a verb-level failure so the client stays usable, with a clear
+        // arh_error_code rather than a silent wrong-shape guess.
+        std::string detail = "{\"message\":";
+        append_json_string(detail, mapped.reject_reason);
+        detail += '}';
+        std::string result = "{\"content\":[{\"type\":\"text\",\"text\":";
+        append_json_string(result, detail);
+        result += "}],\"isError\":true,\"arh_error_code\":";
+        append_json_string(result, to_wire(ErrorCode::NotSupported));
+        result += '}';
+        send_result(id_json, result);
+        return;
+    }
+
+    // Dispatch through the shared connection/verb policy in capture mode.
+    auto& writer = conn_.writer();
+    writer.begin_capture();
+    conn_.dispatch_mcp_verb(req);
+    const wire::Writer::Captured cap = writer.captured();
+    writer.end_capture();
+
+    if (!cap.responded) {
+        // A handler that returned without writing — should not happen; treat
+        // as an internal verb error rather than hang the client.
+        std::string result =
+            "{\"content\":[{\"type\":\"text\",\"text\":"
+            "\"{\\\"message\\\":\\\"verb produced no response\\\"}\"}],"
+            "\"isError\":true,\"arh_error_code\":\"not_supported\"}";
+        send_result(id_json, result);
+        return;
+    }
+
+    std::string result = "{\"content\":[{\"type\":\"text\",\"text\":";
+    if (cap.is_err) {
+        const std::string detail =
+            cap.err_detail.empty() ? std::string("{}") : cap.err_detail;
+        append_json_string(result, detail);
+        result += "}],\"isError\":true,\"arh_error_code\":";
+        append_json_string(result, to_wire(cap.err_code));
+        result += '}';
+    } else {
+        // OK body is the verb's response JSON (may be empty for bodyless OK;
+        // wire.py treats empty text as an empty payload, matching v2.1).
+        append_json_string(result, cap.ok_body);
+        result += "}],\"isError\":false}";
+    }
+    send_result(id_json, result);
+}
+
+void McpSession::run() {
+    while (true) {
+        std::optional<std::string> raw;
+        try {
+            raw = codec_.read_frame();
+        } catch (const std::exception& ex) {
+            // Malformed framing / truncation: log and end the session. The
+            // socket state is unknown so we cannot reliably reply.
+            log::warning(L"MCP framing error: %hs", ex.what());
+            return;
+        }
+        if (!raw.has_value()) {
+            // Clean EOF — client closed the transport (the MCP analogue of
+            // connection.close, §1.6.7).
+            return;
+        }
+
+        auto parsed = parse(*raw);
+        if (!parsed.has_value() || !parsed->is_object()) {
+            // JSON-RPC parse error. No reliable id — reply with null id.
+            send_error("", -32700, "parse error");
+            continue;
+        }
+        const JsonValue& msg = *parsed;
+
+        const JsonValue* method_v = msg.find("method");
+        const JsonValue* id_v     = msg.find("id");
+        const bool is_notification = (id_v == nullptr);
+        const std::string id_json = id_v ? serialise(*id_v) : std::string{};
+
+        if (!method_v || !method_v->is_string()) {
+            if (!is_notification) {
+                send_error(id_json, -32600, "invalid request: no method");
+            }
+            continue;
+        }
+        const std::string& method = method_v->as_string();
+
+        if (method == "initialize") {
+            handle_initialize(id_json, msg);
+        } else if (method == "notifications/initialized") {
+            // Notification — MUST NOT reply (§1.6.1 step 3).
+            initialized_ = true;
+        } else if (method == "tools/list") {
+            handle_tools_list(id_json);
+        } else if (method == "tools/call") {
+            handle_tools_call(id_json, msg);
+        } else if (method == "ping") {
+            // MCP utility ping — empty result. (Harmless to support; some
+            // clients send it. Notifications get no reply.)
+            if (!is_notification) send_result(id_json, "{}");
+        } else {
+            if (!is_notification) {
+                send_error(id_json, -32601,
+                           "method not found: " + method);
+            }
+            // Unknown notifications are silently ignored per JSON-RPC.
+        }
+    }
+}
+
+}  // namespace remote_hands::mcp

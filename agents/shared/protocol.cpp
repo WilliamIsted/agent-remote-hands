@@ -191,6 +191,12 @@ void Writer::write_raw(std::string_view sv) {
 
 void Writer::write_ok() {
     std::lock_guard lock{mutex_};
+    if (capturing_) {
+        captured_.responded = true;
+        captured_.is_err    = false;
+        captured_.ok_body.clear();
+        return;
+    }
 #ifdef RH_DEBUG
     log::debug(L"<< OK 0");
 #endif
@@ -199,6 +205,13 @@ void Writer::write_ok() {
 
 void Writer::write_ok(ByteView payload) {
     std::lock_guard lock{mutex_};
+    if (capturing_) {
+        captured_.responded = true;
+        captured_.is_err    = false;
+        captured_.ok_body.assign(
+            reinterpret_cast<const char*>(payload.data), payload.size);
+        return;
+    }
 #ifdef RH_DEBUG
     log::debug(L"<< OK %zu bytes", payload.size);
 #endif
@@ -219,6 +232,13 @@ void Writer::write_ok(std::string_view payload) {
 
 void Writer::write_err(ErrorCode code) {
     std::lock_guard lock{mutex_};
+    if (capturing_) {
+        captured_.responded = true;
+        captured_.is_err    = true;
+        captured_.err_code  = code;
+        captured_.err_detail.clear();
+        return;
+    }
 #ifdef RH_DEBUG
     log::debug(L"<< ERR %hs", to_wire(code).data());
 #endif
@@ -234,6 +254,13 @@ void Writer::write_err(ErrorCode code, std::string_view detail_json) {
         return;
     }
     std::lock_guard lock{mutex_};
+    if (capturing_) {
+        captured_.responded = true;
+        captured_.is_err    = true;
+        captured_.err_code  = code;
+        captured_.err_detail.assign(detail_json);
+        return;
+    }
 #ifdef RH_DEBUG
     log::debug(L"<< ERR %hs %.*hs",
                to_wire(code).data(),
@@ -253,6 +280,16 @@ void Writer::write_err(ErrorCode code, std::string_view detail_json) {
 void Writer::write_event(std::string_view subscription_id,
                          ByteView payload) {
     std::lock_guard lock{mutex_};
+    if (capturing_) {
+        // Events over MCP (notifications/arh/event) are Phase 2. No watch.*
+        // subscription should be active on an MCP connection in Phase 1
+        // (those verbs are in the deferred list). No-op rather than corrupt
+        // the MCP frame stream with a stray ARH EVENT.
+#ifdef RH_DEBUG
+        log::debug(L"<< (capture) EVENT suppressed (Phase 2)");
+#endif
+        return;
+    }
     char prefix[128];
     const int n = std::snprintf(prefix, sizeof(prefix),
                                 "EVENT %.*s %zu\n",

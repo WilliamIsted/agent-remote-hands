@@ -25,7 +25,16 @@
 
 namespace remote_hands::system_verbs {
 
+// Full per-verb spec corpus (entire spec JSON). Backs the system.verbs verb.
 const std::unordered_map<std::string_view, std::string_view>&
 verb_specs() noexcept;
+
+// Pre-sliced MCP tools/list fragments (PROTOCOL.md §1.6.2). The mapped value
+// is the JSON text that follows `"name":"<verb>"` inside a tool object —
+// i.e. `,"description":...,"inputSchema":...,"x-crudx":...,"x-tier":...`.
+// Excludes the §1.6.7 verbs (connection.hello/close/reset, system.verbs).
+// The MCP tools/list handler concatenates `{"name":"<v>"<fragment>}`.
+const std::unordered_map<std::string_view, std::string_view>&
+verb_tool_meta() noexcept;
 
 }  // namespace remote_hands::system_verbs

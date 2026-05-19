@@ -16,7 +16,9 @@
 
 #include "platform.hpp"
 
+#include <cwchar>
 #include <memory>
+#include <string>
 #include <vector>
 
 #define WIN32_LEAN_AND_MEAN
@@ -92,6 +94,50 @@ std::string hostname() {
     DWORD len = static_cast<DWORD>(std::size(buf));
     if (!GetComputerNameW(buf, &len)) return {};
     return narrow(buf, len);
+}
+
+namespace {
+
+// Read a REG_SZ value from HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion.
+// Returns empty string if absent / wrong type. KEY_WOW64_64KEY so a 32-bit
+// agent on 64-bit Windows still reads the real (non-redirected) hive.
+std::string read_cv_string(const wchar_t* value_name) {
+    HKEY hkey = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                      0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &hkey)
+            != ERROR_SUCCESS) {
+        return {};
+    }
+    wchar_t buf[256] = {};
+    DWORD   bytes = sizeof(buf) - sizeof(wchar_t);  // leave room for NUL
+    DWORD   type  = 0;
+    const LONG rc = RegQueryValueExW(hkey, value_name, nullptr, &type,
+                                     reinterpret_cast<LPBYTE>(buf), &bytes);
+    RegCloseKey(hkey);
+    if (rc != ERROR_SUCCESS || type != REG_SZ) return {};
+    return narrow(buf, std::wcslen(buf));
+}
+
+}  // namespace
+
+std::string os_name() {
+    std::string name = read_cv_string(L"ProductName");
+    return name.empty() ? std::string{"Windows"} : name;
+}
+
+std::string os_version() {
+    // Win10 2009+ exposes the marketing id (e.g. "22H2") in DisplayVersion.
+    std::string v = read_cv_string(L"DisplayVersion");
+    if (v.empty()) v = read_cv_string(L"ReleaseId");   // Win10 1507–2004
+    if (v.empty()) {
+        // Last resort: "10.0.<build>" from CurrentBuild(Number).
+        std::string build = read_cv_string(L"CurrentBuildNumber");
+        if (build.empty()) build = read_cv_string(L"CurrentBuild");
+        v = build.empty() ? std::string{"unknown"}
+                           : ("10.0." + build);
+    }
+    return v;
 }
 
 std::string current_user() {

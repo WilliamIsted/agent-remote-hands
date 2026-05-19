@@ -47,6 +47,7 @@ enum class ErrorCode {
     Readonly,
     NotSupportedByTarget,
     InsufficientPrivilege,
+    FramingUnsupported,
 };
 
 constexpr std::string_view to_wire(ErrorCode code) noexcept {
@@ -70,6 +71,7 @@ constexpr std::string_view to_wire(ErrorCode code) noexcept {
         case ErrorCode::Readonly:               return "readonly";
         case ErrorCode::NotSupportedByTarget:   return "not_supported_by_target";
         case ErrorCode::InsufficientPrivilege:  return "insufficient_privilege";
+        case ErrorCode::FramingUnsupported:     return "framing_unsupported";
     }
     return "unknown";
 }

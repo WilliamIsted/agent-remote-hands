@@ -40,6 +40,18 @@ std::string arch();
 // Computer name.
 std::string hostname();
 
+// Human-readable OS product name, e.g. "Windows 11 Pro" / "Windows 10 Pro".
+// Source: HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProductName.
+// Returns "Windows" if the value can't be read. Used by connection.hello's
+// `os_name` field (and the v2.2 system.info `os_name`).
+std::string os_name();
+
+// OS version designation, e.g. "22H2" / "23H2" or, when the marketing
+// release id is absent, the "10.0.<build>" fallback. Source:
+// CurrentVersion\DisplayVersion (Win10 2009+) → ReleaseId → CurrentBuild.
+// Used by connection.hello's `os_version` field.
+std::string os_version();
+
 // Account the agent is running as (e.g. "DOMAIN\\username" or "username").
 std::string current_user();
 

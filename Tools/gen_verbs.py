@@ -3,11 +3,18 @@
 
 Reads every verb JSON file under protocol/spec/verbs/**/*.json, filters to
 verbs whose x-families.windows-modern.implemented is not explicitly false, and
-writes a C++ source file that embeds each spec as a raw-string literal.
+writes a C++ source file embedding, per verb:
 
-The generated file is compiled only into the windows-modern build; it provides
-system_verbs::verb_specs() which the system.verbs verb handler uses to return
-the full spec corpus over the wire.
+  1. verb_specs()      — the ENTIRE spec JSON (raw-string literal). Backs the
+                          existing system.verbs verb.
+  2. verb_tool_meta()  — a pre-sliced MCP `tools/list` fragment: the verb's
+                          description, inputSchema (verbatim), x-crudx and a
+                          derived x-tier string, serialised as the JSON text
+                          that follows `"name":"<verb>"` in a tool object.
+                          The C++ tools/list handler concatenates these
+                          fragments with no runtime JSON parse of the specs.
+
+The generated file is compiled only into the windows-modern build.
 
 Usage:
     python Tools/gen_verbs.py
@@ -16,6 +23,15 @@ Usage:
 import json
 import pathlib
 import sys
+
+# CRUDX letter -> human-readable tier name (PROTOCOL.md §7, §1.6.2 x-tier).
+CRUDX_TO_TIER = {
+    "R": "read",
+    "C": "create",
+    "U": "update",
+    "D": "delete",
+    "X": "extra_risky",
+}
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 SPEC_DIR  = REPO_ROOT / "protocol" / "spec" / "verbs"
@@ -35,7 +51,17 @@ def main() -> None:
         print("       Run 'git submodule update --init' first.", file=sys.stderr)
         sys.exit(1)
 
+    # MCP tools/list verbs excluded per PROTOCOL.md §1.6.7 (semantics owned by
+    # the bootstrap / framing layer; never surfaced as MCP tools).
+    MCP_EXCLUDED = {
+        "connection.hello",
+        "connection.close",
+        "connection.reset",
+        "system.verbs",
+    }
+
     specs: dict[str, str] = {}
+    tool_meta: dict[str, str] = {}
     for path in sorted(SPEC_DIR.rglob("*.json")):
         try:
             with open(path, encoding="utf-8") as f:
@@ -56,6 +82,25 @@ def main() -> None:
         # recognise an x-* key MUST ignore it per spec §1.4).
         raw = json.dumps(spec, separators=(",", ":"), ensure_ascii=False)
         specs[name] = raw
+
+        # tools/list fragment. Emitted only for MCP-surfaced verbs. The
+        # fragment is the JSON text that follows `"name":"<verb>"` inside a
+        # tool object, so the C++ handler builds `{"name":"<v>"<fragment>}`.
+        if name in MCP_EXCLUDED:
+            continue
+        crudx = spec.get("x-crudx", "R")
+        tier  = CRUDX_TO_TIER.get(crudx, "read")
+        input_schema = spec.get("input_schema", {"type": "object"})
+        desc = spec.get("description", "")
+        frag = (
+            ',"description":' + json.dumps(desc, ensure_ascii=False) +
+            ',"inputSchema":' +
+            json.dumps(input_schema, separators=(",", ":"),
+                       ensure_ascii=False) +
+            ',"x-crudx":' + json.dumps(crudx, ensure_ascii=False) +
+            ',"x-tier":' + json.dumps(tier, ensure_ascii=False)
+        )
+        tool_meta[name] = frag
 
     # Use )SPEC" as the raw-string terminator sentinel.  JSON content cannot
     # contain this sequence because ) is plain text and SPEC" would require an
@@ -91,12 +136,34 @@ def main() -> None:
         "const std::unordered_map<std::string_view, std::string_view>&",
         "verb_specs() noexcept { return kVerbSpecs; }",
         "",
+        "// Pre-sliced MCP tools/list fragments (PROTOCOL.md §1.6.2). Each value",
+        "// is the JSON text following `\"name\":\"<verb>\"` inside a tool object",
+        "// — description, inputSchema, x-crudx, x-tier. The tools/list handler",
+        "// concatenates `{\"name\":\"<v>\"<fragment>}` with no runtime parse.",
+        "static const std::unordered_map<std::string_view, std::string_view> kVerbToolMeta{",
+    ]
+
+    for name, frag in sorted(tool_meta.items()):
+        if f"){DELIM}\"" in frag:
+            print(f"WARNING: {name}: tool-meta fragment contains raw-string "
+                  f"delimiter ')SPEC\"' — skipped", file=sys.stderr)
+            continue
+        lines.append(f'    {{"{name}", R"{DELIM}({frag}){DELIM}"}},')
+
+    lines += [
+        "};",
+        "",
+        "const std::unordered_map<std::string_view, std::string_view>&",
+        "verb_tool_meta() noexcept { return kVerbToolMeta; }",
+        "",
         "}  // namespace remote_hands::system_verbs",
         "",
     ]
 
     OUT_FILE.write_text("\n".join(lines), encoding="utf-8")
-    print(f"gen_verbs.py: wrote {len(specs)} verb specs to {OUT_FILE.relative_to(REPO_ROOT)}")
+    print(f"gen_verbs.py: wrote {len(specs)} verb specs "
+          f"({len(tool_meta)} tools/list fragments) "
+          f"to {OUT_FILE.relative_to(REPO_ROOT)}")
 
 
 if __name__ == "__main__":

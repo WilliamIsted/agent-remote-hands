@@ -52,6 +52,17 @@ public:
     // Drives the state machine until close. Closes the socket on return.
     void run();
 
+    // Post-hello verb dispatch entry point for the MCP framing session
+    // (PROTOCOL.md §1.6). Reuses the exact connection.* handlers + verb-table
+    // lookup + tier enforcement that the ARH dispatch() path uses, so MCP and
+    // ARH share one authorisation/dispatch policy. The caller (mcp_session)
+    // is responsible for putting writer() into capture mode before calling
+    // and reading writer().captured() afterwards; this method never touches
+    // the wire directly. Connection-lifecycle verbs excluded from MCP
+    // (connection.hello/close/reset, system.verbs) are NOT routed here — the
+    // session handles MCP shutdown itself and never forwards them.
+    void dispatch_mcp_verb(const wire::Request& req);
+
     // Public accessors for verb handlers (declared in capabilities.cpp /
     // implemented in verbs/<namespace>.cpp). Verbs read/write the wire via
     // these and consult tier() if they need it.
@@ -100,6 +111,14 @@ private:
 
     State           state_  = State::PreHello;
     Tier            tier_   = Tier::Read;
+
+    // Set by handle_hello() when the v2.2 bootstrap negotiates MCP framing.
+    // run() picks this up after the hello OK body is on the wire and hands
+    // the socket to the MCP session. Bootstrap framing (the hello exchange
+    // itself) stays ARH header-line regardless. windows-modern only in
+    // Phase 1; legacy/classic keep the v2.1 header-line path.
+    bool            switch_to_mcp_ = false;
+    std::string     negotiated_protocol_;   // e.g. "2.2"
 
     std::unique_ptr<ElementTable>          element_table_;
     std::unique_ptr<SubscriptionRegistry>  subscriptions_;

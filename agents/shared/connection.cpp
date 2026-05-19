@@ -16,8 +16,16 @@
 
 #include "capabilities.hpp"
 #include "element_table.hpp"
+#include "json.hpp"
 #include "log.hpp"
 #include "subscription.hpp"
+#include "sysinfo.hpp"
+
+#ifdef RH_MODERN
+#include "platform.hpp"
+#include "mcp/mcp_codec.hpp"
+#include "mcp/mcp_session.hpp"
+#endif
 
 #include <stdexcept>
 #include <string>
@@ -86,6 +94,25 @@ void Connection::run() {
                 writer_.write_err(ErrorCode::InvalidArgs,
                                   json_kv("message", ex.what()));
             }
+
+#ifdef RH_MODERN
+            // v2.2 framing handoff (§1.6). handle_hello() set this once the
+            // hello OK body has been written (ARH-framed) to the socket. From
+            // the next byte the connection speaks MCP-stdio. The bootstrap
+            // Reader may already hold pipelined MCP bytes (the client's
+            // `initialize` frame) — take_residual() moves them into the codec
+            // so they are not lost. The MCP session owns the socket until the
+            // transport closes; on return we fall through to the existing
+            // subscription teardown so cleanup is identical to the ARH path.
+            if (switch_to_mcp_) {
+                log::debug(L"Switching connection to MCP framing");
+                mcp::McpCodec codec(reader_.socket(), reader_.take_residual());
+                mcp::McpSession session(*this, std::move(codec),
+                                        negotiated_protocol_);
+                session.run();
+                break;
+            }
+#endif
         }
     } catch (const std::exception& ex) {
         log::warning(L"Connection terminated: %hs", ex.what());
@@ -164,8 +191,209 @@ void Connection::dispatch(const wire::Request& req) {
     handle_unimplemented(req);
 }
 
+void Connection::dispatch_mcp_verb(const wire::Request& req) {
+    // Mirrors the post-hello portion of dispatch(), minus the verbs §1.6.7
+    // excludes from MCP. The caller (mcp_session) has already put writer()
+    // in capture mode; every path below records into the captured response.
+
+    if (!req.parse_error.empty()) {
+        writer_.write_err(ErrorCode::InvalidArgs,
+                          json_kv("message", req.parse_error));
+        return;
+    }
+
+    // Tier transitions are exposed as MCP tools (§1.6.4). They are not in the
+    // verb table — route to the dedicated handlers, exactly as dispatch() does.
+    //
+    // The ARH bootstrap form is positional (`connection.tier_raise <tier>
+    // <token>`); the MCP arguments object is named per the spec input_schema
+    // (`{tier, token}`), so the inverse arg map produces flag tokens
+    // (`--tier <v> --token <v>`). Re-flatten to the positional shape the
+    // shared handlers parse — these args are flat scalars (fully Phase-1
+    // supported), this is purely a named↔positional bridge for the two
+    // connection-tier verbs whose schema is known and fixed.
+    if (req.verb == "connection.tier_raise" ||
+        req.verb == "connection.tier_drop") {
+        wire::Request adapted;
+        adapted.verb = req.verb;
+        std::string tier_val, token_val;
+        bool have_tier = false, have_token = false;
+        for (std::size_t i = 0; i < req.args.size(); ++i) {
+            const std::string& a = req.args[i];
+            if (a == "--tier" && i + 1 < req.args.size()) {
+                tier_val = req.args[++i]; have_tier = true;
+            } else if (a == "--token" && i + 1 < req.args.size()) {
+                token_val = req.args[++i]; have_token = true;
+            } else if (a.size() >= 2 && a.compare(0, 2, "--") == 0) {
+                // Unknown flag — let the handler's own arg-count check fire
+                // a clean invalid_args by passing args through unmodified.
+                have_tier = false;
+                break;
+            } else if (!have_tier) {
+                // Tolerate a positional form too (defensive).
+                tier_val = a; have_tier = true;
+            } else if (!have_token) {
+                token_val = a; have_token = true;
+            }
+        }
+        if (have_tier) {
+            adapted.args.push_back(tier_val);
+            if (have_token) adapted.args.push_back(token_val);
+            if (req.verb == "connection.tier_raise") handle_tier_raise(adapted);
+            else                                     handle_tier_drop(adapted);
+            return;
+        }
+        // Fall through with the original request so the handler emits its
+        // canonical invalid_args message.
+        if (req.verb == "connection.tier_raise") handle_tier_raise(req);
+        else                                     handle_tier_drop(req);
+        return;
+    }
+
+    // §1.6.7: these are never surfaced as MCP tools. tools/list excludes them
+    // and a tools/call naming them is an unknown tool — mcp_session maps that
+    // to an MCP protocol-level error before reaching here. Defensive guard.
+    if (req.verb == "connection.hello" ||
+        req.verb == "connection.close" ||
+        req.verb == "connection.reset" ||
+        req.verb == "system.verbs") {
+        writer_.write_err(ErrorCode::NotSupported,
+                          json_kv("message", "verb not available over MCP"));
+        return;
+    }
+
+    if (const auto* entry = find_verb(req.verb)) {
+        if (!tier_satisfies(entry->required_tier, tier_)) {
+            writer_.write_err(
+                ErrorCode::TierRequired,
+                json_kv2("required", to_wire(entry->required_tier),
+                         "current",  to_wire(tier_)));
+            return;
+        }
+        entry->handler(*this, req);
+        return;
+    }
+
+    handle_unimplemented(req);
+}
+
 // ---------------------------------------------------------------------------
 // connection.* handlers
+
+#ifdef RH_MODERN
+
+namespace {
+
+// Parse "<major>.<minor>" leniently. Returns false if not "2.<n>" / "2".
+bool parse_v2_minor(const std::string& v, int& minor_out) {
+    if (v == "2") { minor_out = 0; return true; }
+    if (v.rfind("2.", 0) != 0) return false;
+    const std::string rest = v.substr(2);
+    if (rest.empty()) return false;
+    int m = 0;
+    for (char c : rest) {
+        if (c == '.') break;          // ignore patch component
+        if (c < '0' || c > '9') return false;
+        if (m > 100000) { minor_out = m; return true; }
+        m = m * 10 + (c - '0');
+    }
+    minor_out = m;
+    return true;
+}
+
+// 128-bit hex session id (opaque per-connection correlation id). Reuses the
+// agent's existing CSPRNG seam (platform::generate_random_bytes), the same
+// source token.cpp uses — no new entropy primitive introduced.
+std::string make_session_id() {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    try {
+        const auto raw = platform::generate_random_bytes(16);
+        out.reserve(raw.size() * 2);
+        for (auto b : raw) {
+            out.push_back(kHex[(b >> 4) & 0x0f]);
+            out.push_back(kHex[b & 0x0f]);
+        }
+    } catch (...) {
+        out = "sess-unavailable";
+    }
+    return out;
+}
+
+}  // namespace
+
+void Connection::handle_hello(const wire::Request& req) {
+    // v2.2 bootstrap (PROTOCOL.md §1.2):
+    //   connection.hello <client-name> <client-version> [--framing mcp|ws]
+    // Bootstrap framing for the hello exchange itself stays ARH header-line;
+    // the negotiated framing takes over only after the OK body is consumed.
+    if (req.args.size() < 2) {
+        writer_.write_err(ErrorCode::InvalidArgs,
+                          json_kv("message",
+                                  "connection.hello requires <client-name> <client-version>"));
+        return;
+    }
+    const std::string& client_name = req.args[0];
+    const std::string& version     = req.args[1];
+
+    // Optional --framing mcp|ws (defaults to mcp on a v2.2 session).
+    std::string framing = "mcp";
+    for (std::size_t i = 2; i < req.args.size(); ++i) {
+        if (req.args[i] == "--framing" && i + 1 < req.args.size()) {
+            framing = req.args[++i];
+        } else if (req.args[i].size() >= 2 &&
+                   req.args[i].compare(0, 2, "--") == 0) {
+            writer_.write_err(ErrorCode::InvalidArgs,
+                              json_kv("unknown_flag", req.args[i]));
+            return;
+        }
+    }
+
+    // v2.2+ agents do NOT advertise v2.1: require negotiated minor >= 2.
+    int minor = 0;
+    if (!parse_v2_minor(version, minor) || minor < 2) {
+        writer_.write_err(
+            ErrorCode::ProtocolMismatch,
+            json_kv2("agent", "2.2", "client", version));
+        return;
+    }
+    negotiated_protocol_ = "2.2";
+
+    if (framing == "ws") {
+        // WS framing is Phase 3. windows-modern advertises it in the spec but
+        // does not implement it yet — reject explicitly (ARH-framed) so the
+        // client does not switch its parser. Empty-detail ERR per §1.2.
+        writer_.write_err(ErrorCode::FramingUnsupported);
+        state_ = State::Closed;
+        return;
+    }
+    if (framing != "mcp") {
+        writer_.write_err(ErrorCode::FramingUnsupported);
+        return;
+    }
+
+    // 7-field hello OK body (connection.hello.json x-output-schema;
+    // additionalProperties:false, all 7 required).
+    std::string body;
+    body += '{';
+    json::append_kv_string(body, "protocol", "arh");                 body += ',';
+    json::append_kv_string(body, "agent", "AgentRemoteHands");       body += ',';
+    json::append_kv_string(body, "agent_protocol", negotiated_protocol_); body += ',';
+    json::append_kv_string(body, "os_name", sysinfo::os_name());     body += ',';
+    json::append_kv_string(body, "os_version", sysinfo::os_version()); body += ',';
+    json::append_kv_string(body, "session_id", make_session_id());   body += ',';
+    json::append_kv_string(body, "framing", "mcp");
+    body += '}';
+
+    state_         = State::Connected;
+    switch_to_mcp_ = true;     // run() performs the handoff after the OK body
+    log::info(L"Hello from %hs (protocol %hs, framing mcp)",
+              client_name.c_str(), version.c_str());
+    writer_.write_ok(body);    // still ARH-framed (the hello response itself)
+}
+
+#else  // !RH_MODERN  — legacy / classic keep the v2.1 header-line behaviour
+       // unchanged (Phase 4 enables MCP on legacy).
 
 void Connection::handle_hello(const wire::Request& req) {
     // connection.hello <client-name> <protocol-version>
@@ -190,6 +418,8 @@ void Connection::handle_hello(const wire::Request& req) {
               req.args[0].c_str(), version.c_str());
     writer_.write_ok();
 }
+
+#endif  // RH_MODERN
 
 void Connection::handle_tier_raise(const wire::Request& req) {
     // connection.tier_raise <tier> <token>
