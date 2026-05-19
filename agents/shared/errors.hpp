@@ -56,6 +56,7 @@ enum class ErrorCode {
     NotEmpty,
     NotADirectory,
     CrossDevice,
+    UnsupportedFormat,
 };
 
 constexpr std::string_view to_wire(ErrorCode code) noexcept {
@@ -88,6 +89,7 @@ constexpr std::string_view to_wire(ErrorCode code) noexcept {
         case ErrorCode::NotEmpty:               return "not_empty";
         case ErrorCode::NotADirectory:          return "not_a_directory";
         case ErrorCode::CrossDevice:            return "cross_device";
+        case ErrorCode::UnsupportedFormat:      return "unsupported_format";
     }
     return "unknown";
 }

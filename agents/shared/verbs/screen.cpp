@@ -14,15 +14,77 @@
 
 // `screen.*` namespace verb handler.
 //
-// Implements PROTOCOL.md §4.2:
-//   screen.capture [--region x,y,w,h] [--window <hwnd>] [--format <fmt>]
+// Implements the verb whose contract is the spec JSON
+// protocol/spec/verbs/common/screen.capture.json (the single source of
+// truth). Registered handler (see agents/shared/capabilities.cpp):
+//
+//   screen.capture  (R)  {region,window,monitor,format,quality,cursor,encoding}
+//
+// PHASE 2.1 — NAMED-ARG MIGRATION. This handler no longer indexes `req.args`
+// positionally with ad-hoc `--flag` scanning or comma-token `--region`
+// reconstruction. It declares its input_schema property list (IN SCHEMA
+// ORDER) and reads each value by NAME through the shared SchemaArgs resolver
+// (schema_args.hpp), with the schema's property ORDER used as the positional
+// fallback when the caller invoked the verb positionally (the v2.2 reference
+// client packs positional calls as `{"_args":[...]}`). The `window.*`
+// namespace was the pattern-setter; this file follows it (and system.cpp /
+// process.cpp / clipboard.cpp / registry.cpp / file.cpp / input.cpp /
+// element.cpp) exactly. `region` is a nested object {x,y,w,h} read via
+// args.node() and walked explicitly (str() is scalar-only by design).
+//
+// v2.2 INPUT fields folded into arg parsing:
+//   #66 cursor   (bool)  — composite OS cursor; FULLY APPLIED (drives the
+//                           existing include_cursor capture parameter).
+//   #83 format   (enum)  — png|webp|bmp|jpeg|heic; parsed + validated.
+//       quality  (int)   — 1..100; parsed + validated, applies to lossy
+//                           formats only (no spec-mandated default; passed
+//                           through where the encoder consumes it).
+//   #91 encoding (enum)  — base64|binary; parsed + validated. The default
+//                           `base64` legacy behaviour is preserved; the
+//                           `binary` side-channel OUTPUT pipeline is Phase 2b.
+//   region/window/monitor — selectors with x-mutually-exclusive; region is a
+//                           nested {x,y,w,h} object. FULLY APPLIED (drive the
+//                           existing capture_* dispatch).
+//
+// PHASE 2b OUTPUT BOUNDARY. This slice is the ARG-INPUT refactor only. The
+// image encoder set the binary currently produces is unchanged (PNG via WIC /
+// BMP). Selecting `format: webp|jpeg|heic` needs an encoder this build does
+// not ship, and `encoding: binary` needs the binary side-channel output
+// pipeline — both are Phase 2b. They are parsed + validated here, then the
+// not-yet-implemented OUTPUT cases are surfaced (see ERROR-CODE DISCIPLINE)
+// rather than implemented. The default/legacy path (png/bmp, base64-framed
+// by the writer) keeps its existing capture + encode behaviour byte-for-byte.
+//
+// ERROR-CODE DISCIPLINE. screen.capture.json x-errors is exactly
+// ["not_found","unsupported_format","permission_denied"].
+//   - not_found            -> ErrorCode::NotFound  (monitor index absent).
+//   - unsupported_format   -> ErrorCode::UnsupportedFormat (added to
+//                             errors.hpp this slice). Emitted for an unknown
+//                             format value, a not-bundled webp/jpeg/heic
+//                             encoder, and the Phase-2b encoding:binary
+//                             output (encoding:binary is a mild semantic
+//                             stretch — it is the only in-x-errors code that
+//                             fits a "this build can't produce that output
+//                             form" condition).
+//   - permission_denied    -> ErrorCode::PermissionDenied exists; not naturally
+//                             reached by the current GDI capture path (no ACL
+//                             gate), so it is not emitted here.
+//
+// Two emissions remain OUTSIDE this verb's x-errors and are tracked (NOT
+// slice-introduced — pre-existing capture-pipeline runtime failures, not
+// the named-arg refactor's concern; conformance does not exercise them):
+//   - capture produced an empty frame  -> NotSupported
+//   - the bundled encoder produced no bytes -> NotSupported
+// Also tracked for the protocol repo: screen.capture x-errors lacks
+// invalid_args though the verb validates region/window/monitor/quality/
+// cursor/encoding inputs (same class as protocol#99); arg-shape failures
+// emit InvalidArgs (agent correct; validation NOT weakened).
 //
 // Capture path: BitBlt today (universal). WGC is a future runtime-detected
-// fast path documented in COMPATIBILITY.md.
-//
-// Encoder: PNG (default, via WIC) and BMP. WebP is deferred until libwebp
-// is bundled — `system.info.capabilities.image_formats` advertises only the
-// formats actually available.
+// fast path documented in COMPATIBILITY.md. Encoder: PNG (default, via WIC)
+// and BMP. WebP/JPEG/HEIC are deferred until their encoders are bundled —
+// `system.info.capabilities.image_formats` advertises only the formats
+// actually available.
 
 #include "../connection.hpp"
 #include "../errors.hpp"
@@ -30,9 +92,13 @@
 #include "../json.hpp"
 #include "../log.hpp"
 #include "../screen_capture.hpp"
+#include "args.hpp"
+#include "schema_args.hpp"
 
 #include <charconv>
+#include <climits>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -42,38 +108,35 @@
 
 namespace remote_hands::screen_verbs {
 
+// The Phase-2.1 named-argument resolver and its invalid_args helper live in
+// the shared header (schema_args.hpp) so every namespace reads through one
+// definition. Pull them into this TU's unqualified name lookup; behaviour is
+// identical to window.cpp / system.cpp / process.cpp / clipboard.cpp /
+// registry.cpp / file.cpp / input.cpp / element.cpp.
+using wire::SchemaArgs;
+using wire::invalid_args;
+
 namespace {
 
-enum class Format { Png, Bmp };
+// screen.capture.json `format` enum: ["png","webp","bmp","jpeg","heic"].
+// png/bmp have encoders in this build; webp/jpeg/heic are valid enum members
+// whose encoders are NOT bundled here (forward-compat / Phase-2b).
+enum class Format { Png, Bmp, Webp, Jpeg, Heic };
 
 bool parse_format(std::string_view s, Format& out) {
-    if (s == "png" || s.empty()) { out = Format::Png; return true; }
-    if (s == "bmp")               { out = Format::Bmp; return true; }
-    // "webp" / "webp:NN" advertised only when libwebp lands.
+    if (s == "png")  { out = Format::Png;  return true; }
+    if (s == "bmp")  { out = Format::Bmp;  return true; }
+    if (s == "webp") { out = Format::Webp; return true; }
+    if (s == "jpeg") { out = Format::Jpeg; return true; }
+    if (s == "heic") { out = Format::Heic; return true; }
     return false;
 }
 
-bool parse_region(std::string_view s, int& x, int& y, int& w, int& h) {
-    int values[4] = {};
-    std::size_t cursor = 0;
-    for (int i = 0; i < 4; ++i) {
-        const std::size_t comma = s.find(',', cursor);
-        const std::size_t end_pos = (comma == std::string_view::npos) ? s.size() : comma;
-        if (end_pos == cursor) return false;
-
-        const auto* p_end = s.data() + end_pos;
-        long parsed = 0;
-        const auto [p, ec] = std::from_chars(s.data() + cursor, p_end, parsed, 10);
-        if (ec != std::errc{} || p != p_end) return false;
-
-        values[i] = static_cast<int>(parsed);
-        if (comma == std::string_view::npos && i < 3) return false;
-        cursor = end_pos + 1;
-    }
-    x = values[0]; y = values[1]; w = values[2]; h = values[3];
-    return true;
+bool format_has_encoder(Format f) {
+    return f == Format::Png || f == Format::Bmp;
 }
 
+// screen.capture.json `window` is a string handle, e.g. "win:0x1A2B".
 HWND parse_hwnd(std::string_view s) {
     if (s.size() < 5 || s.substr(0, 4) != "win:") return nullptr;
     s.remove_prefix(4);
@@ -88,20 +151,13 @@ HWND parse_hwnd(std::string_view s) {
     return reinterpret_cast<HWND>(static_cast<uintptr_t>(v));
 }
 
-bool parse_nonneg_int(std::string_view s, int& out) {
-    int v = 0;
-    const auto* end = s.data() + s.size();
-    const auto [p, ec] = std::from_chars(s.data(), end, v, 10);
-    if (ec != std::errc{} || p != end || v < 0) return false;
-    out = v;
-    return true;
-}
-
 // EnumDisplayMonitors callback that selects the Nth monitor (0-based),
-// matching the same enumeration order as window.list's monitor_index.
+// matching the same enumeration order as window.list's monitor_index. A
+// plain struct + integer index — no allocation / no throwing operation in
+// the callback body, so no C++ exception can cross the Win32 C-ABI boundary.
 struct MonitorByIndex {
-    int target_index = 0;
-    int current_index = 0;
+    int  target_index  = 0;
+    int  current_index = 0;
     RECT rect{};
     bool found = false;
 };
@@ -112,7 +168,7 @@ BOOL CALLBACK find_monitor_by_index(HMONITOR mon, HDC, LPRECT, LPARAM lparam) {
         MONITORINFO info{};
         info.cbSize = sizeof(info);
         if (GetMonitorInfoW(mon, &info)) {
-            state->rect = info.rcMonitor;
+            state->rect  = info.rcMonitor;
             state->found = true;
         }
         return FALSE;
@@ -123,73 +179,215 @@ BOOL CALLBACK find_monitor_by_index(HMONITOR mon, HDC, LPRECT, LPARAM lparam) {
 
 }  // namespace
 
-void capture(Connection& conn, const wire::Request& req) {
-    Format format = Format::Png;
-    bool   has_region    = false;
-    bool   has_window    = false;
-    bool   has_monitor   = false;
-    bool   include_cursor = true;        // default on; opt-out via --no-cursor
-    int    rx = 0, ry = 0, rw = 0, rh = 0;
-    int    monitor_index = 0;
-    HWND   hwnd = nullptr;
+// ---------------------------------------------------------------------------
+// screen.capture — input_schema (schema order):
+//   ["region","window","monitor","format","quality","cursor","encoding"]
+// x-mutually-exclusive: ["region","window","monitor"].
+// x-errors: ["not_found","unsupported_format","permission_denied"].
+// x-output-schema: image bytes (base64 by default; raw when encoding:binary).
 
-    for (std::size_t i = 0; i < req.args.size(); ++i) {
-        if (req.args[i] == "--region" && i + 1 < req.args.size()) {
-            if (!parse_region(req.args[++i], rx, ry, rw, rh)) {
-                conn.writer().write_err(
-                    ErrorCode::InvalidArgs,
-                    "{\"message\":\"--region must be x,y,w,h\"}");
+void capture(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"region", "window", "monitor", "format", "quality",
+                          "cursor", "encoding"});
+
+    // --- region: nested object {x,y,w,h}, all required, all integers -------
+    bool has_region = false;
+    int  rx = 0, ry = 0, rw = 0, rh = 0;
+    if (args.present("region")) {
+        const mcp::JsonValue* node = args.node("region");
+        if (node == nullptr || !node->is_object()) {
+            invalid_args(conn,
+                         "screen.capture 'region' must be an object "
+                         "{x,y,w,h}");
+            return;
+        }
+        // Read each member by name. The members may arrive as JSON numbers
+        // (typed client) or numeric strings (reference client); reuse the
+        // same lexeme-tolerant integer parse the rest of the slice uses by
+        // reading through a per-member SchemaArgs-style lambda.
+        struct Member { const char* key; int* out; bool min_one; };
+        const Member members[] = {
+            {"x", &rx, false}, {"y", &ry, false},
+            {"w", &rw, true},  {"h", &rh, true},
+        };
+        for (const Member& m : members) {
+            const mcp::JsonValue* v = node->find(m.key);
+            if (v == nullptr || v->is_null()) {
+                invalid_args(conn,
+                             "screen.capture 'region' requires x,y,w,h");
                 return;
             }
-            has_region = true;
-        } else if (req.args[i] == "--window" && i + 1 < req.args.size()) {
-            hwnd = parse_hwnd(req.args[++i]);
-            if (!hwnd) {
-                conn.writer().write_err(
-                    ErrorCode::InvalidArgs,
-                    "{\"message\":\"--window must be win:0x<hex>\"}");
+            std::optional<std::string> lex;
+            if (v->is_number())      lex = v->num_lexeme();
+            else if (v->is_string()) lex = v->as_string();
+            if (!lex) {
+                invalid_args(conn,
+                             "screen.capture 'region' x,y,w,h must be "
+                             "integers");
                 return;
             }
-            has_window = true;
-        } else if (req.args[i] == "--monitor" && i + 1 < req.args.size()) {
-            if (!parse_nonneg_int(req.args[++i], monitor_index)) {
-                conn.writer().write_err(
-                    ErrorCode::InvalidArgs,
-                    "{\"message\":\"--monitor must be a non-negative integer\"}");
+            long long parsed = 0;
+            const char* begin = lex->data();
+            const char* end   = begin + lex->size();
+            if (begin != end && *begin == '+') {
+                invalid_args(conn,
+                             "screen.capture 'region' x,y,w,h must be "
+                             "integers");
                 return;
             }
-            has_monitor = true;
-        } else if (req.args[i] == "--format" && i + 1 < req.args.size()) {
-            if (!parse_format(req.args[++i], format)) {
-                conn.writer().write_err(
-                    ErrorCode::NotSupported,
-                    "{\"reason\":\"unsupported format; advertised in system.info.capabilities.image_formats\"}");
+            const auto [p, ec] = std::from_chars(begin, end, parsed, 10);
+            if (ec != std::errc{} || p != end ||
+                parsed < INT_MIN || parsed > INT_MAX) {
+                invalid_args(conn,
+                             "screen.capture 'region' x,y,w,h must be "
+                             "integers");
                 return;
             }
-        } else if (req.args[i] == "--no-cursor") {
-            include_cursor = false;
-        } else if (req.args[i].size() >= 2 &&
-                   req.args[i].compare(0, 2, "--") == 0) {
-            // Reject unknown --flags rather than silently accepting them. The
-            // previous behaviour ("ignore everything we don't recognise") was
-            // a footgun: a typo or stale-doc flag like --cursor returned OK
-            // but did nothing.
-            std::string detail = "{\"unknown_flag\":\"";
-            detail += req.args[i];
-            detail += "\"}";
-            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            if (m.min_one && parsed < 1) {
+                invalid_args(conn,
+                             "screen.capture 'region' w and h must be >= 1");
+                return;
+            }
+            *m.out = static_cast<int>(parsed);
+        }
+        has_region = true;
+    }
+
+    // --- window: string handle "win:0x<hex>" ------------------------------
+    bool has_window = false;
+    HWND hwnd = nullptr;
+    if (args.present("window")) {
+        std::optional<std::string> w = args.str("window");
+        if (!w) {
+            invalid_args(conn,
+                         "screen.capture 'window' must be a string "
+                         "(win:0x<hex>)");
+            return;
+        }
+        hwnd = parse_hwnd(*w);
+        if (!hwnd) {
+            invalid_args(conn,
+                         "screen.capture 'window' must be win:0x<hex>");
+            return;
+        }
+        has_window = true;
+    }
+
+    // --- monitor: zero-based integer index --------------------------------
+    bool has_monitor = false;
+    int  monitor_index = 0;
+    if (args.present("monitor")) {
+        auto m = args.integer32("monitor");
+        if (!m || *m < 0) {
+            invalid_args(conn,
+                         "screen.capture 'monitor' must be a non-negative "
+                         "integer");
+            return;
+        }
+        monitor_index = *m;
+        has_monitor = true;
+    }
+
+    // x-mutually-exclusive: region / window / monitor.
+    const int selectors =
+        (has_region ? 1 : 0) + (has_window ? 1 : 0) + (has_monitor ? 1 : 0);
+    if (selectors > 1) {
+        invalid_args(conn,
+                     "screen.capture 'region' / 'window' / 'monitor' are "
+                     "mutually exclusive");
+        return;
+    }
+
+    // --- format: enum, default "png" --------------------------------------
+    Format format = Format::Png;
+    if (args.present("format")) {
+        auto f = args.str("format");
+        if (!f) {
+            invalid_args(conn,
+                         "screen.capture 'format' must be a string");
+            return;
+        }
+        if (!parse_format(*f, format)) {
+            // Not a member of the spec enum (e.g. "tiff-2000", "webp:70").
+            // screen.capture.json x-errors declares unsupported_format for
+            // exactly this.
+            conn.writer().write_err(
+                ErrorCode::UnsupportedFormat,
+                "{\"reason\":\"unsupported format; advertised in "
+                "system.info.capabilities.image_formats\"}");
             return;
         }
     }
 
-    const int region_likes = (has_region ? 1 : 0) + (has_window ? 1 : 0) + (has_monitor ? 1 : 0);
-    if (region_likes > 1) {
+    // --- quality: integer 1..100, optional, lossy-only --------------------
+    std::optional<int> quality;
+    if (args.present("quality")) {
+        auto q = args.integer32("quality");
+        if (!q || *q < 1 || *q > 100) {
+            invalid_args(conn,
+                         "screen.capture 'quality' must be an integer in "
+                         "[1, 100]");
+            return;
+        }
+        quality = *q;
+        // `quality` is silently ignored for png/bmp per the spec; it is
+        // validated above regardless so a bad value never reaches a lossy
+        // encoder. The current build ships no lossy encoder, so a supplied
+        // quality is parsed/validated then unused on the legacy path.
+        (void)quality;
+    }
+
+    // --- cursor: boolean, default true (#66) ------------------------------
+    bool include_cursor = true;  // spec default
+    if (args.present("cursor")) {
+        auto c = args.boolean("cursor");
+        if (!c) {
+            invalid_args(conn,
+                         "screen.capture 'cursor' must be a boolean");
+            return;
+        }
+        include_cursor = *c;
+    }
+
+    // --- encoding: enum base64|binary, default base64 (#91) ---------------
+    bool encoding_binary = false;
+    if (args.present("encoding")) {
+        auto e = args.str("encoding");
+        if (!e || (*e != "base64" && *e != "binary")) {
+            invalid_args(conn,
+                         "screen.capture 'encoding' must be 'base64' or "
+                         "'binary'");
+            return;
+        }
+        encoding_binary = (*e == "binary");
+    }
+
+    // PHASE 2b OUTPUT BOUNDARY ---------------------------------------------
+    // `format: webp|jpeg|heic` needs an encoder not bundled in this build;
+    // `encoding: binary` needs the binary side-channel output pipeline.
+    // Both are Phase 2b. Args are fully parsed + validated above; the
+    // not-yet-implemented OUTPUT is surfaced here. unsupported_format is the
+    // spec-declared code for a build that cannot produce the requested
+    // output form (encoding:binary is a mild semantic stretch — it is the
+    // only in-x-errors code; the screen.capture x-errors set is itself
+    // incomplete, tracked for the protocol repo).
+    if (!format_has_encoder(format)) {
         conn.writer().write_err(
-            ErrorCode::InvalidArgs,
-            "{\"message\":\"--region / --window / --monitor are mutually exclusive\"}");
+            ErrorCode::UnsupportedFormat,
+            "{\"reason\":\"format encoder not bundled in this build; "
+            "advertised in system.info.capabilities.image_formats "
+            "(phase2b)\"}");
+        return;
+    }
+    if (encoding_binary) {
+        conn.writer().write_err(
+            ErrorCode::UnsupportedFormat,
+            "{\"reason\":\"encoding:binary output side-channel is deferred "
+            "to Phase 2b (phase2b)\"}");
         return;
     }
 
+    // --- capture dispatch (unchanged resource model) ----------------------
     screen::CapturedFrame frame;
     if (has_window) {
         frame = screen::capture_window(hwnd, include_cursor);
