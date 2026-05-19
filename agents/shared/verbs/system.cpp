@@ -35,6 +35,10 @@
 #include "../platform.hpp"
 #include "../sysinfo.hpp"
 
+#ifdef RH_MODERN
+#include "../verbs_blob.hpp"
+#endif
+
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -416,5 +420,44 @@ void power_cancel(Connection& conn, const wire::Request&) {
                                 "{\"message\":\"no pending shutdown\"}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// system.verbs — return the full spec corpus for every implemented verb.
+//
+// Only compiled when verbs_blob.cpp is linked (RH_MODERN builds).  For other
+// families the stub below satisfies the linker; verb_enabled() ensures it is
+// never actually dispatched.
+
+#ifdef RH_MODERN
+void verbs(Connection& conn, const wire::Request&) {
+    const auto& specs = verb_specs();
+
+    std::string j;
+    j.reserve(256 * 1024);   // typical payload ~220 KB
+    j += "{\"verbs\":{";
+
+    bool first = true;
+    // Iterate the spec map and include only verbs this agent actually
+    // implements (find_verb checks verb_enabled + dispatch table).
+    for (const auto& [name, blob] : specs) {
+        if (!find_verb(name)) continue;
+        if (!first) j += ',';
+        first = false;
+        j += '"';
+        j += name;
+        j += "\":";
+        j += blob;
+    }
+
+    j += "}}";
+    conn.writer().write_ok(j);
+}
+#else
+// Stub: system.verbs is gated off for non-modern families via verb_enabled().
+// This definition exists only to satisfy the linker.
+void verbs(Connection& conn, const wire::Request&) {
+    conn.writer().write_err(ErrorCode::NotSupported, "{}");
+}
+#endif
 
 }  // namespace remote_hands::system_verbs

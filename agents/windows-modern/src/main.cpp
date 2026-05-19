@@ -104,14 +104,14 @@ int wmain(int argc, wchar_t* argv[]) try {
     rh::platform::init_ocr();
     auto config = rh::Config::parse(argc, argv);
 
-    rh::log::info(L"Agent Remote Hands v2.1 starting on TCP port %u", config.port);
+    rh::log::info(L"Agent Remote Hands v0.3.0 starting on TCP port %u", config.port);
 
     WsaInit wsa;
     ComInit com;
 
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 
-    // Optional mDNS advertisement (`-Discoverable` / REMOTE_HANDS_DISCOVERABLE=1).
+    // mDNS advertisement (on by default; suppress with --no-discoverable / REMOTE_HANDS_DISCOVERABLE=0).
     std::unique_ptr<rh::mdns::Responder> mdns_responder;
     if (config.discoverable) {
         rh::mdns::Config mdns_cfg{};
