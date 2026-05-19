@@ -44,7 +44,7 @@ def main(argv: list[str]) -> int:
         "--host", host,
         "--port", port,
         "-v",
-    ] + argv[3:]          # forward --token, -k, -x, etc. directly to pytest
+    ]
     return pytest.main(args)
 
 

@@ -14,6 +14,8 @@
 
 """Tests for `screen.*`."""
 
+import pytest
+
 from conftest import needs_verb
 from wire import ErrResponse, OkResponse, WireClient
 
@@ -92,3 +94,33 @@ def test_screen_capture_unknown_flag_rejected(client: WireClient,
     assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
     assert r.code == "invalid_args"
     assert r.detail.get("unknown_flag") == "--bogus-flag"
+
+
+# ---------------------------------------------------------------------------
+# screen.capture — format/quality split (Protocol #83, landed v2.2)
+
+def test_screen_capture_webp_n_shorthand_rejected(
+        client: WireClient, capabilities: dict) -> None:
+    """v2.0 / v2.1 accepted `webp:N` as a combined format+quality shorthand.
+    v2.2 split that into separate `format` + `quality` fields (Protocol #83);
+    the shorthand is no longer in the format enum and must be rejected."""
+    needs_verb(capabilities, "screen.capture")
+    r = client.request("screen.capture", "--format", "webp:70")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args", \
+        f"expected invalid_args, got {r.code!r}"
+
+
+@pytest.mark.parametrize("fmt", ["jpeg", "heic"])
+def test_screen_capture_forward_compat_format_returns_unsupported(
+        client: WireClient, capabilities: dict, fmt: str) -> None:
+    """`jpeg` and `heic` are forward-compat enum entries reserved for future
+    macOS / Linux families. Current Windows families (`windows-modern`,
+    `windows-legacy`, `windows-classic`) accept the format value as a valid
+    enum entry but return `unsupported_format` because no Windows-side
+    encoder produces those formats today (Protocol #83)."""
+    needs_verb(capabilities, "screen.capture")
+    r = client.request("screen.capture", "--format", fmt)
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "unsupported_format", \
+        f"expected unsupported_format, got {r.code!r}"

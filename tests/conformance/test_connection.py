@@ -14,12 +14,31 @@
 
 """Tests for `connection.*` lifecycle verbs and the pre-hello state machine."""
 
+import json
+
+from conftest import needs_verb
 from wire import ErrResponse, OkResponse, WireClient
 
 
 def test_hello_succeeds(host: str, port: int) -> None:
     with WireClient(host, port) as c:
         c.hello()  # raises on failure
+
+
+def test_hello_returns_session_id(host: str, port: int) -> None:
+    """Per the post-#77 connection.hello response body, the body is a JSON
+    object with `protocol`, `agent`, `agent_protocol`, `os_name`, `os_version`,
+    `session_id` fields."""
+    with WireClient(host, port) as c:
+        r = c.request("connection.hello", "conformance", "2.1")
+        assert isinstance(r, OkResponse)
+        if r.payload:
+            body = json.loads(r.payload)
+            for field in ("protocol", "agent", "agent_protocol",
+                          "os_name", "os_version", "session_id"):
+                assert field in body, f"hello response missing {field}: {body}"
+            assert body["protocol"] == "arh", \
+                f"protocol identifier should be 'arh', got {body['protocol']!r}"
 
 
 def test_pre_hello_rejects_other_verbs(host: str, port: int) -> None:
@@ -36,21 +55,47 @@ def test_protocol_mismatch_on_wrong_major(host: str, port: int) -> None:
         assert r.code == "protocol_mismatch"
 
 
-def test_close_returns_ok(host: str, port: int) -> None:
+def test_close_returns_ok(host: str, port: int, capabilities: dict) -> None:
+    needs_verb(capabilities, "connection.close")
     with WireClient(host, port) as c:
         c.hello()
         r = c.request("connection.close")
         assert isinstance(r, OkResponse)
 
 
-def test_reset_returns_ok(client: WireClient) -> None:
+def test_reset_returns_ok(client: WireClient, capabilities: dict) -> None:
+    needs_verb(capabilities, "connection.reset")
     r = client.request("connection.reset")
     assert isinstance(r, OkResponse)
 
 
-def test_default_tier_is_read(client: WireClient) -> None:
-    info = client.info()
-    assert info["current_tier"] == "read"
+def test_tier_drop_to_read_at_default_succeeds(client: WireClient,
+                                                capabilities: dict) -> None:
+    """Fresh hello connections default to read tier. Dropping to read
+    (an idempotent same-tier no-op) should succeed and report new_tier=read."""
+    needs_verb(capabilities, "connection.tier_drop")
+    r = client.request("connection.tier_drop", "read")
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["new_tier"] == "read"
+
+
+def test_tier_drop_above_current_returns_invalid_args(
+        client: WireClient, capabilities: dict) -> None:
+    """tier_drop must reject targets above the current tier — it can only
+    lower the tier (raise requires connection.tier_raise + a token)."""
+    needs_verb(capabilities, "connection.tier_drop")
+    r = client.request("connection.tier_drop", "extra_risky")
+    assert isinstance(r, ErrResponse)
+    assert r.code == "invalid_args"
+
+
+def test_tier_drop_unknown_tier_returns_invalid_args(
+        client: WireClient, capabilities: dict) -> None:
+    needs_verb(capabilities, "connection.tier_drop")
+    r = client.request("connection.tier_drop", "superuser")
+    assert isinstance(r, ErrResponse)
+    assert r.code == "invalid_args"
 
 
 def test_tier_raise_invalid_token_fails(client: WireClient) -> None:

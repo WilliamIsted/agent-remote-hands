@@ -18,12 +18,11 @@ from __future__ import annotations
 
 import os
 import pathlib
-import tempfile
 from typing import Iterator
 
 import pytest
 
-from wire import ErrResponse, WireClient
+from wire import ErrResponse, WireClient, WsWireClient
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -39,24 +38,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Agent port (default: REMOTE_HANDS_PORT or 8765).",
     )
     parser.addoption(
-        "--token",
-        default=os.environ.get("REMOTE_HANDS_TOKEN", ""),
-        help="Agent elevation token value (overrides --token-path).",
-    )
-    parser.addoption(
         "--token-path",
         default=os.environ.get(
             "REMOTE_HANDS_TOKEN_PATH",
             r"C:\ProgramData\AgentRemoteHands\token",
         ),
         help="Path to the agent's elevation token file.",
-    )
-    parser.addoption(
-        "--scratch-dir",
-        default=os.environ.get("REMOTE_HANDS_SCRATCH_DIR", ""),
-        help="Writable temp directory ON THE AGENT HOST for round-trip tests "
-             "(e.g. C:\\Windows\\Temp). Defaults to the runner's tempdir, "
-             "which is wrong for remote agents.",
     )
 
 
@@ -72,15 +59,9 @@ def port(pytestconfig: pytest.Config) -> int:
 
 @pytest.fixture(scope="session")
 def token(pytestconfig: pytest.Config) -> str:
-    raw = pytestconfig.getoption("token")
-    if raw:
-        return raw.strip()
     p = pathlib.Path(pytestconfig.getoption("token_path"))
     if not p.exists():
-        pytest.skip(
-            f"token file not readable at {p} "
-            f"(hint: pass --token=<value> or --token-path=<path>)"
-        )
+        pytest.skip(f"token file not readable at {p}")
     return p.read_text(encoding="ascii").strip()
 
 
@@ -136,15 +117,21 @@ def extra_risky_client(client: WireClient, token: str) -> WireClient:
     return client
 
 
-@pytest.fixture(scope="session")
-def scratch_dir(pytestconfig: pytest.Config) -> str:
-    """A writable directory path that exists on the agent host.
+@pytest.fixture
+def ws_client(host: str, port: int) -> Iterator[WsWireClient]:
+    """Per-test connection using `--framing ws` (RFC 6455 binary frames).
 
-    Pass --scratch-dir when the agent is remote (e.g. --scratch-dir C:\\Windows\\Temp).
-    Without it the runner's local tempdir is used, which is wrong for remote agents.
-    """
-    d = pytestconfig.getoption("scratch_dir")
-    return d if d else tempfile.gettempdir()
+    Skips if `system.info.framings` does not advertise `"ws"` (probed via a
+    short-lived MCP `client` connection)."""
+    # Probe framings via the standard MCP client first.
+    with WireClient(host, port) as probe:
+        probe.hello()
+        info = probe.info()
+        if "ws" not in info.get("framings", []):
+            pytest.skip("agent does not advertise 'ws' framing")
+    with WsWireClient(host, port) as c:
+        c.hello()
+        yield c
 
 
 def needs_verb(capabilities: dict, verb: str) -> None:
