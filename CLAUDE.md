@@ -34,10 +34,10 @@ Binaries follow `rha-win.<family>.<arch>.exe` (e.g. `rha-win.modern.x64.exe`, `r
 
 ## Conformance suite
 
-The contract. Run against any host that speaks the protocol:
+The contract. Run against the **test VM** that speaks the protocol — **never the host PC / `127.0.0.1` / `localhost`** (see *Things not to do*):
 
 ```bash
-python tests/conformance/run.py <host> 8765
+python tests/conformance/run.py <vm-ip> 8765    # <vm-ip> = the Windows 11 VMware test VM, never 127.0.0.1
 ```
 
 One pytest module per namespace, with capability-gated skipping — verbs the agent doesn't advertise get the test skipped, not failed.
@@ -158,6 +158,7 @@ python tests/conformance/run.py 127.0.0.1 18765   # vagrant forwards 8765 -> 187
 
 ## Things not to do
 
+- **🚫 NEVER run the Agent or the conformance suite against the host PC.** The Agent performs real input/process/registry/file/power actions — running it on the host can disrupt or corrupt the developer's machine. It runs **only** on the dedicated test VM (Windows 11 on VMware Workstation). **A `pytest`/`run.py` invocation whose `--host`/address is `127.0.0.1`, `localhost`, or `::1` means this rule is being violated** — point it at the VM's IP instead. The binary may be *built* on the host; it must *run* on the VM. Enforced by a `PreToolUse` hook in `.claude/settings.json` (blocks host-targeted conformance for the agent and sub-agents). VM connection details are kept out of this committed file by design.
 - **Don't merge `benchmark` into `main`.** It's a fixture branch, not product.
 - **Don't `git add` from the repo root without confirming `.gitignore` is intact.** Build artefacts are noisy; staging unintentionally is easy.
 - **Don't skip pre-commit hooks** (`--no-verify`). If a hook fails, fix the cause.

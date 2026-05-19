@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": [
+              "-c",
+              "import sys,json;raw=sys.stdin.read();d=json.loads(raw) if raw.strip() else {};c=((d.get('tool_input') or {}).get('command') or '');cl=c.lower();hit=(('pytest' in cl) or ('run.py' in cl) or ('rha-win' in cl)) and (('127.0.0.1' in cl) or ('localhost' in cl) or ('::1' in cl));print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','permissionDecision':'deny','permissionDecisionReason':\"BLOCKED - HARD RULE: the Agent/conformance must NEVER run against the host PC (127.0.0.1/localhost). It runs ONLY on the VMware Windows 11 test VM. Point pytest --host at the VM IP. See memory feedback-never-test-agent-on-host and Agent/Tasks/rebuild-v0.3.0-finish/README.md.\"}}) if hit else '{}')"
+            ],
+            "statusMessage": "Checking conformance target is not the host PC",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
