@@ -191,6 +191,7 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
 
         // registry.*
         {"registry.key.read",          {Tier::Read,       &registry_verbs::read}},
+        {"registry.value.read",        {Tier::Read,       &registry_verbs::read}},
         {"registry.value.create",      {Tier::Create,     &registry_verbs::write}},
         {"registry.value.update",      {Tier::Update,     &registry_verbs::write}},
         {"registry.value.delete",      {Tier::Delete,     &registry_verbs::delete_}},

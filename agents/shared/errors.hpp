@@ -52,6 +52,8 @@ enum class ErrorCode {
     UserCancelled,
     NoHandler,
     Empty,
+    AlreadyExists,
+    NotEmpty,
 };
 
 constexpr std::string_view to_wire(ErrorCode code) noexcept {
@@ -80,6 +82,8 @@ constexpr std::string_view to_wire(ErrorCode code) noexcept {
         case ErrorCode::UserCancelled:          return "user_cancelled";
         case ErrorCode::NoHandler:              return "no_handler";
         case ErrorCode::Empty:                  return "empty";
+        case ErrorCode::AlreadyExists:          return "already_exists";
+        case ErrorCode::NotEmpty:               return "not_empty";
     }
     return "unknown";
 }
