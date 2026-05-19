@@ -24,8 +24,9 @@ from conftest import needs_verb
 from wire import ErrResponse, OkResponse, WireClient
 
 
-def _scratch_dir() -> str:
-    return str(pathlib.Path(tempfile.gettempdir()) /
+def _scratch_dir(base: str = "") -> str:
+    root = base if base else tempfile.gettempdir()
+    return str(pathlib.Path(root) /
                f"remote-hands-conformance-dir-{uuid.uuid4().hex}")
 
 
@@ -127,11 +128,12 @@ def test_directory_remove_requires_delete_tier(update_client: WireClient,
 # Round-trips
 
 def test_directory_create_round_trip(create_client: WireClient,
-                                     capabilities: dict) -> None:
+                                     capabilities: dict,
+                                     scratch_dir: str) -> None:
     needs_verb(capabilities, "directory.create")
     needs_verb(capabilities, "directory.list")
 
-    path = _scratch_dir()
+    path = _scratch_dir(scratch_dir)
     r = create_client.request("directory.create", path)
     assert isinstance(r, OkResponse)
 
@@ -143,12 +145,13 @@ def test_directory_create_round_trip(create_client: WireClient,
 
 
 def test_directory_create_then_remove(delete_client: WireClient,
-                                      capabilities: dict) -> None:
+                                      capabilities: dict,
+                                      scratch_dir: str) -> None:
     needs_verb(capabilities, "directory.create")
     needs_verb(capabilities, "directory.exists")
     needs_verb(capabilities, "directory.remove")
 
-    path = _scratch_dir()
+    path = _scratch_dir(scratch_dir)
     r = delete_client.request("directory.create", path)
     assert isinstance(r, OkResponse)
 
@@ -165,13 +168,14 @@ def test_directory_create_then_remove(delete_client: WireClient,
 
 
 def test_directory_remove_non_empty_requires_recursive(
-        delete_client: WireClient, capabilities: dict) -> None:
+        delete_client: WireClient, capabilities: dict,
+        scratch_dir: str) -> None:
     """Without --recursive, removing a non-empty directory should fail."""
     needs_verb(capabilities, "directory.create")
     needs_verb(capabilities, "directory.remove")
     needs_verb(capabilities, "file.write")
 
-    parent = _scratch_dir()
+    parent = _scratch_dir(scratch_dir)
     r = delete_client.request("directory.create", parent)
     assert isinstance(r, OkResponse)
 
@@ -195,14 +199,15 @@ def test_directory_remove_non_empty_requires_recursive(
 
 
 def test_directory_rename_round_trip(update_client: WireClient,
-                                     capabilities: dict) -> None:
+                                     capabilities: dict,
+                                     scratch_dir: str) -> None:
     """Rename a directory; verify both old and new paths reflect the move."""
     needs_verb(capabilities, "directory.create")
     needs_verb(capabilities, "directory.rename")
     needs_verb(capabilities, "directory.exists")
 
-    src = _scratch_dir()
-    dst = _scratch_dir()
+    src = _scratch_dir(scratch_dir)
+    dst = _scratch_dir(scratch_dir)
     r = update_client.request("directory.create", src)
     assert isinstance(r, OkResponse)
 
@@ -224,7 +229,8 @@ def test_directory_rename_round_trip(update_client: WireClient,
 # Header-quoting (PROTOCOL.md §1.2.5)
 
 def test_directory_path_with_spaces(delete_client: WireClient,
-                                    capabilities: dict) -> None:
+                                    capabilities: dict,
+                                    scratch_dir: str) -> None:
     """A path containing spaces round-trips end-to-end through the wire's
     double-quote grouping. The WireClient auto-quotes args containing
     spaces; the agent's tokeniser strips the quotes and dispatches with the
@@ -233,7 +239,7 @@ def test_directory_path_with_spaces(delete_client: WireClient,
     needs_verb(capabilities, "directory.exists")
     needs_verb(capabilities, "directory.remove")
 
-    path = _scratch_dir() + " with spaces"
+    path = _scratch_dir(scratch_dir) + " with spaces"
 
     r = delete_client.request("directory.create", path)
     assert isinstance(r, OkResponse)
@@ -247,7 +253,8 @@ def test_directory_path_with_spaces(delete_client: WireClient,
 
 
 def test_directory_rename_paths_with_spaces(update_client: WireClient,
-                                            capabilities: dict) -> None:
+                                            capabilities: dict,
+                                            scratch_dir: str) -> None:
     """Two-positional verb (directory.rename) with spaces in both args.
     Validates that the auto-quoting on the send side and the tokeniser on
     the agent side together preserve arg boundaries."""
@@ -255,8 +262,8 @@ def test_directory_rename_paths_with_spaces(update_client: WireClient,
     needs_verb(capabilities, "directory.rename")
     needs_verb(capabilities, "directory.exists")
 
-    src = _scratch_dir() + " src dir"
-    dst = _scratch_dir() + " dst dir"
+    src = _scratch_dir(scratch_dir) + " src dir"
+    dst = _scratch_dir(scratch_dir) + " dst dir"
 
     r = update_client.request("directory.create", src)
     assert isinstance(r, OkResponse)

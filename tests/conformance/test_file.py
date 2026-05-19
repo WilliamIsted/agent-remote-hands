@@ -26,8 +26,9 @@ from conftest import needs_verb
 from wire import ErrResponse, OkResponse, WireClient
 
 
-def _scratch_path() -> str:
-    return str(pathlib.Path(tempfile.gettempdir()) /
+def _scratch_path(base: str = "") -> str:
+    root = base if base else tempfile.gettempdir()
+    return str(pathlib.Path(root) /
                f"remote-hands-conformance-{uuid.uuid4().hex}.txt")
 
 
@@ -59,12 +60,13 @@ def test_file_write_requires_update_tier(client: WireClient,
 
 
 def test_file_round_trip(update_client: WireClient,
-                         capabilities: dict) -> None:
+                         capabilities: dict,
+                         scratch_dir: str) -> None:
     needs_verb(capabilities, "file.write")
     needs_verb(capabilities, "file.read")
     needs_verb(capabilities, "file.delete")
 
-    path = _scratch_path()
+    path = _scratch_path(scratch_dir)
     payload = b"agent-remote-hands conformance round-trip"
 
     # write

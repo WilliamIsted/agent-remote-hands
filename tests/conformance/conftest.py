@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import tempfile
 from typing import Iterator
 
 import pytest
@@ -38,12 +39,24 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Agent port (default: REMOTE_HANDS_PORT or 8765).",
     )
     parser.addoption(
+        "--token",
+        default=os.environ.get("REMOTE_HANDS_TOKEN", ""),
+        help="Agent elevation token value (overrides --token-path).",
+    )
+    parser.addoption(
         "--token-path",
         default=os.environ.get(
             "REMOTE_HANDS_TOKEN_PATH",
             r"C:\ProgramData\AgentRemoteHands\token",
         ),
         help="Path to the agent's elevation token file.",
+    )
+    parser.addoption(
+        "--scratch-dir",
+        default=os.environ.get("REMOTE_HANDS_SCRATCH_DIR", ""),
+        help="Writable temp directory ON THE AGENT HOST for round-trip tests "
+             "(e.g. C:\\Windows\\Temp). Defaults to the runner's tempdir, "
+             "which is wrong for remote agents.",
     )
 
 
@@ -59,9 +72,15 @@ def port(pytestconfig: pytest.Config) -> int:
 
 @pytest.fixture(scope="session")
 def token(pytestconfig: pytest.Config) -> str:
+    raw = pytestconfig.getoption("token")
+    if raw:
+        return raw.strip()
     p = pathlib.Path(pytestconfig.getoption("token_path"))
     if not p.exists():
-        pytest.skip(f"token file not readable at {p}")
+        pytest.skip(
+            f"token file not readable at {p} "
+            f"(hint: pass --token=<value> or --token-path=<path>)"
+        )
     return p.read_text(encoding="ascii").strip()
 
 
@@ -115,6 +134,17 @@ def extra_risky_client(client: WireClient, token: str) -> WireClient:
     if isinstance(r, ErrResponse):
         pytest.skip(f"could not elevate to extra_risky: {r.code} {r.detail}")
     return client
+
+
+@pytest.fixture(scope="session")
+def scratch_dir(pytestconfig: pytest.Config) -> str:
+    """A writable directory path that exists on the agent host.
+
+    Pass --scratch-dir when the agent is remote (e.g. --scratch-dir C:\\Windows\\Temp).
+    Without it the runner's local tempdir is used, which is wrong for remote agents.
+    """
+    d = pytestconfig.getoption("scratch_dir")
+    return d if d else tempfile.gettempdir()
 
 
 def needs_verb(capabilities: dict, verb: str) -> None:
