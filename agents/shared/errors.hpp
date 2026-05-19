@@ -42,6 +42,7 @@ enum class ErrorCode {
     TargetGone,
     UipiBlocked,
     NotFound,
+    PermissionDenied,
     UiaBlind,
     LockHeld,
     Readonly,
@@ -66,6 +67,7 @@ constexpr std::string_view to_wire(ErrorCode code) noexcept {
         case ErrorCode::TargetGone:             return "target_gone";
         case ErrorCode::UipiBlocked:            return "uipi_blocked";
         case ErrorCode::NotFound:               return "not_found";
+        case ErrorCode::PermissionDenied:       return "permission_denied";
         case ErrorCode::UiaBlind:               return "uia_blind";
         case ErrorCode::LockHeld:               return "lock_held";
         case ErrorCode::Readonly:               return "readonly";
