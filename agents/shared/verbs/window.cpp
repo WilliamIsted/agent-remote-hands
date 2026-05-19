@@ -159,23 +159,28 @@ MonitorIndexMap build_monitor_index_map() {
     return m;
 }
 
+// Default (full=true) emits all 8 fields; compact (full=false) emits
+// hwnd + title + pid only. window.list uses compact by default; window.find
+// always returns full since it's a targeted single-window lookup.
 void append_window_object(std::string& out, HWND hwnd,
-                          const MonitorIndexMap& monitors) {
-    RECT r{};
-    GetWindowRect(hwnd, &r);
-
-    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    const int monitor_index = mon ? monitors.index_of(mon) : -1;
-
+                          const MonitorIndexMap& monitors,
+                          bool full = true) {
     out += '{';
     json::append_kv_string(out, "hwnd", hwnd_to_string(hwnd));         out += ',';
-    json::append_kv_int(out, "x", r.left);                             out += ',';
-    json::append_kv_int(out, "y", r.top);                              out += ',';
-    json::append_kv_int(out, "w", r.right - r.left);                   out += ',';
-    json::append_kv_int(out, "h", r.bottom - r.top);                   out += ',';
     json::append_kv_string(out, "title", get_window_title_utf8(hwnd)); out += ',';
-    json::append_kv_uint(out, "pid", get_window_pid(hwnd));            out += ',';
-    json::append_kv_int(out, "monitor_index", monitor_index);
+    json::append_kv_uint(out, "pid", get_window_pid(hwnd));
+    if (full) {
+        RECT r{};
+        GetWindowRect(hwnd, &r);
+        HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        const int monitor_index = mon ? monitors.index_of(mon) : -1;
+        out += ',';
+        json::append_kv_int(out, "x", r.left);                         out += ',';
+        json::append_kv_int(out, "y", r.top);                          out += ',';
+        json::append_kv_int(out, "w", r.right - r.left);               out += ',';
+        json::append_kv_int(out, "h", r.bottom - r.top);               out += ',';
+        json::append_kv_int(out, "monitor_index", monitor_index);
+    }
     out += '}';
 }
 
@@ -208,11 +213,14 @@ HWND require_target(Connection& conn, std::string_view raw) {
 // EnumWindows callbacks
 
 struct ListContext {
-    bool             include_all = false;
+    bool             include_all   = false;
     std::string      filter_prefix;
     std::string      out;
-    bool             first = true;
+    bool             first         = true;
     MonitorIndexMap  monitors;
+    bool             full          = false;
+    int              limit         = 50;
+    int              count         = 0;
 };
 
 BOOL CALLBACK enum_for_list(HWND hwnd, LPARAM lparam) {
@@ -226,9 +234,12 @@ BOOL CALLBACK enum_for_list(HWND hwnd, LPARAM lparam) {
         }
     }
 
+    if (ctx->count >= ctx->limit) return FALSE;
+
     if (!ctx->first) ctx->out += ',';
     ctx->first = false;
-    append_window_object(ctx->out, hwnd, ctx->monitors);
+    append_window_object(ctx->out, hwnd, ctx->monitors, ctx->full);
+    ++ctx->count;
 
     return TRUE;
 }
@@ -262,6 +273,11 @@ void list(Connection& conn, const wire::Request& req) {
             ctx.include_all = true;
         } else if (req.args[i] == "--filter" && i + 1 < req.args.size()) {
             ctx.filter_prefix = req.args[++i];
+        } else if (req.args[i] == "--full") {
+            ctx.full = true;
+        } else if (req.args[i] == "--limit" && i + 1 < req.args.size()) {
+            ctx.limit = static_cast<int>(
+                std::strtol(req.args[++i].c_str(), nullptr, 10));
         } else if (req.args[i].size() >= 2 &&
                    req.args[i].compare(0, 2, "--") == 0) {
             std::string detail = "{\"unknown_flag\":\"";

@@ -236,6 +236,35 @@ void append_element_object(std::string& out,
     out += '}';
 }
 
+// Compact variant: id, role, name, bounds only.
+// Skips value (ValuePattern QI) and flags (6+ property reads per element).
+// Both are available via --full.
+void append_element_compact(std::string& out,
+                            const std::string& id,
+                            IUIAutomationElement* elem) {
+    CONTROLTYPEID ctype = UIA_CustomControlTypeId;
+    elem->get_CurrentControlType(&ctype);
+
+    BSTR name_bstr = nullptr;
+    elem->get_CurrentName(&name_bstr);
+    const std::string name = bstr_to_utf8(name_bstr);
+    if (name_bstr) SysFreeString(name_bstr);
+
+    RECT rc{};
+    elem->get_CurrentBoundingRectangle(&rc);
+
+    out += '{';
+    json::append_kv_string(out, "id", id);                       out += ',';
+    json::append_kv_string(out, "role", role_token(ctype));      out += ',';
+    json::append_kv_string(out, "name", name);                   out += ',';
+    json::append_string(out, "bounds");
+    char bbuf[64];
+    std::snprintf(bbuf, sizeof(bbuf), ":[%ld,%ld,%ld,%ld]",
+                  rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+    out += bbuf;
+    out += '}';
+}
+
 // ---------------------------------------------------------------------------
 // Tree-walk plumbing
 
@@ -256,18 +285,24 @@ ComPtr<IUIAutomationCondition> build_visible_condition(IUIAutomation* uia) {
     return combined;
 }
 
-void walk_subtree(IUIAutomationTreeWalker* walker,
+// Returns true if count_cap was reached (tree was truncated).
+bool walk_subtree(IUIAutomationTreeWalker* walker,
                   IUIAutomationElement* parent,
                   ElementTable& table,
                   std::string& out,
                   bool& first,
                   int depth,
-                  int max_depth) {
-    if (depth > max_depth) return;
+                  int max_depth,
+                  bool full,
+                  int& count,
+                  int count_cap) {
+    if (depth > max_depth) return false;
 
     ComPtr<IUIAutomationElement> child;
     walker->GetFirstChildElement(parent, &child);
     while (child) {
+        if (count >= count_cap) return true;
+
         const auto id = table.register_element(child.Get());
 
         if (!first) out += ',';
@@ -275,20 +310,26 @@ void walk_subtree(IUIAutomationTreeWalker* walker,
         out += '{';
         json::append_kv_int(out, "depth", depth);
         out += ',';
-        // The element object body without the leading `{` and trailing `}`.
-        // append_element_object writes a complete object — embed by stripping braces.
         std::string per_elem;
-        append_element_object(per_elem, id, child.Get());
-        // Drop leading '{' and trailing '}' from per_elem.
+        if (full) {
+            append_element_object(per_elem, id, child.Get());
+        } else {
+            append_element_compact(per_elem, id, child.Get());
+        }
         out.append(per_elem.data() + 1, per_elem.size() - 2);
         out += '}';
+        ++count;
 
-        walk_subtree(walker, child.Get(), table, out, first, depth + 1, max_depth);
+        if (walk_subtree(walker, child.Get(), table, out, first,
+                         depth + 1, max_depth, full, count, count_cap)) {
+            return true;
+        }
 
         ComPtr<IUIAutomationElement> sibling;
         walker->GetNextSiblingElement(child.Get(), &sibling);
         child = std::move(sibling);
     }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +368,10 @@ void list(Connection& conn, const wire::Request& req) {
 
     RECT region{};
     bool has_region = false;
+    int  limit      = 100;
+    int  offset     = 0;
+    bool full       = false;
+
     for (std::size_t i = 0; i < req.args.size(); ++i) {
         if (req.args[i] == "--region" && i + 1 < req.args.size()) {
             if (!parse_region(req.args[++i], region)) {
@@ -336,6 +381,21 @@ void list(Connection& conn, const wire::Request& req) {
                 return;
             }
             has_region = true;
+        } else if (req.args[i] == "--limit" && i + 1 < req.args.size()) {
+            if (!parse_int(req.args[++i], limit) || limit < 0) {
+                conn.writer().write_err(ErrorCode::InvalidArgs,
+                    "{\"message\":\"--limit must be a non-negative integer\"}");
+                return;
+            }
+        } else if (req.args[i] == "--offset" && i + 1 < req.args.size()) {
+            if (!parse_int(req.args[++i], offset) || offset < 0) {
+                conn.writer().write_err(ErrorCode::InvalidArgs,
+                    "{\"message\":\"--offset must be a non-negative integer\"}");
+                return;
+            }
+        } else if (req.args[i] == "--full") {
+            full  = true;
+            limit = INT_MAX;
         } else if (req.args[i].size() >= 2 &&
                    req.args[i].compare(0, 2, "--") == 0) {
             std::string detail = "{\"unknown_flag\":\"";
@@ -364,29 +424,40 @@ void list(Connection& conn, const wire::Request& req) {
         return;
     }
 
-    int count = 0;
-    arr->get_Length(&count);
+    int total = 0;
+    arr->get_Length(&total);
 
     std::string body = "{\"elements\":[";
-    bool first = true;
-    for (int i = 0; i < count; ++i) {
+    bool first   = true;
+    int  skipped = 0;
+    int  emitted = 0;
+
+    for (int i = 0; i < total; ++i) {
+        if (emitted >= limit) break;
+
         ComPtr<IUIAutomationElement> elem;
         if (FAILED(arr->GetElement(i, &elem)) || !elem) continue;
 
         if (has_region) {
             RECT rc{};
             if (FAILED(elem->get_CurrentBoundingRectangle(&rc))) continue;
-            // Reject if entirely outside region.
             if (rc.right <= region.left || rc.left >= region.right ||
                 rc.bottom <= region.top || rc.top >= region.bottom) {
                 continue;
             }
         }
 
+        if (skipped < offset) { ++skipped; continue; }
+
         const auto id = conn.element_table().register_element(elem.Get());
         if (!first) body += ',';
         first = false;
-        append_element_object(body, id, elem.Get());
+        if (full) {
+            append_element_object(body, id, elem.Get());
+        } else {
+            append_element_compact(body, id, elem.Get());
+        }
+        ++emitted;
     }
     body += "]}";
     conn.writer().write_ok(body);
@@ -396,15 +467,46 @@ void list(Connection& conn, const wire::Request& req) {
 // element.tree
 
 void tree(Connection& conn, const wire::Request& req) {
-    if (req.args.size() != 1) {
+    std::string elt_id;
+    int  max_depth = 5;
+    int  count_cap = 200;
+    bool full      = false;
+
+    for (std::size_t i = 0; i < req.args.size(); ++i) {
+        const auto& arg = req.args[i];
+        if (arg == "--full") {
+            full      = true;
+            max_depth = 12;
+            count_cap = INT_MAX;
+        } else if (arg == "--depth" && i + 1 < req.args.size()) {
+            int d = 0;
+            if (!parse_int(req.args[++i], d) || d < 0) {
+                conn.writer().write_err(ErrorCode::InvalidArgs,
+                    "{\"message\":\"--depth must be a non-negative integer\"}");
+                return;
+            }
+            max_depth = d;
+        } else if (arg.size() >= 2 && arg.compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += arg;
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
+        } else {
+            elt_id = arg;
+        }
+    }
+
+    if (elt_id.empty()) {
         conn.writer().write_err(
             ErrorCode::InvalidArgs,
             "{\"message\":\"element.tree requires <elt-id>\"}");
         return;
     }
+
     IUIAutomation* uia = require_uia(conn);
     if (!uia) return;
-    IUIAutomationElement* root = require_element(conn, req.args[0]);
+    IUIAutomationElement* root = require_element(conn, elt_id);
     if (!root) return;
 
     ComPtr<IUIAutomationTreeWalker> walker;
@@ -415,6 +517,9 @@ void tree(Connection& conn, const wire::Request& req) {
     }
 
     std::string body = "{\"elements\":[";
+    int  count     = 0;
+    bool truncated = false;
+
     // Include the root itself at depth 0.
     {
         const auto id = conn.element_table().register_element(root);
@@ -422,14 +527,22 @@ void tree(Connection& conn, const wire::Request& req) {
         json::append_kv_int(body, "depth", 0);
         body += ',';
         std::string per_elem;
-        append_element_object(per_elem, id, root);
+        if (full) {
+            append_element_object(per_elem, id, root);
+        } else {
+            append_element_compact(per_elem, id, root);
+        }
         body.append(per_elem.data() + 1, per_elem.size() - 2);
         body += '}';
+        ++count;
     }
     bool first = false;
-    walk_subtree(walker.Get(), root, conn.element_table(),
-                 body, first, /*depth=*/1, /*max_depth=*/12);
-    body += "]}";
+    truncated = walk_subtree(walker.Get(), root, conn.element_table(),
+                             body, first, /*depth=*/1, max_depth,
+                             full, count, count_cap);
+    body += ']';
+    if (truncated) body += ",\"truncated\":true";
+    body += '}';
     conn.writer().write_ok(body);
 }
 

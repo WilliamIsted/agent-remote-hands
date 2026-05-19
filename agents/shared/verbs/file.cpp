@@ -42,6 +42,8 @@
 #include "../log.hpp"
 #include "../text_util.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
@@ -325,7 +327,7 @@ void write_at(Connection& conn, const wire::Request& req) {
 // header — the wire-namespace split is in capabilities.cpp).
 
 void list(Connection& conn, const wire::Request& req) {
-    if (req.args.size() != 1) {
+    if (req.args.empty()) {
         conn.writer().write_err(
             ErrorCode::InvalidArgs,
             "{\"message\":\"directory.list requires <path>\"}");
@@ -333,6 +335,41 @@ void list(Connection& conn, const wire::Request& req) {
     }
 
     std::wstring pattern = text::utf8_to_wide(req.args[0]);
+
+    // Parse optional flags from remaining args.
+    int         limit    = 200;
+    int         offset   = 0;
+    std::string sort_key = "name"; // name | mtime | size | ctime
+    bool        reverse  = false;
+
+    for (std::size_t i = 1; i < req.args.size(); ++i) {
+        if (req.args[i] == "--limit" && i + 1 < req.args.size()) {
+            limit = static_cast<int>(
+                std::strtol(req.args[++i].c_str(), nullptr, 10));
+        } else if (req.args[i] == "--offset" && i + 1 < req.args.size()) {
+            offset = static_cast<int>(
+                std::strtol(req.args[++i].c_str(), nullptr, 10));
+        } else if (req.args[i] == "--sort" && i + 1 < req.args.size()) {
+            sort_key = req.args[++i];
+            if (sort_key != "name" && sort_key != "mtime" &&
+                sort_key != "size" && sort_key != "ctime") {
+                conn.writer().write_err(ErrorCode::InvalidArgs,
+                    "{\"message\":\"--sort must be name|mtime|size|ctime\"}");
+                return;
+            }
+        } else if (req.args[i] == "--reverse") {
+            reverse = true;
+        } else if (req.args[i] == "--full") {
+            limit = INT_MAX;
+        } else if (req.args[i].size() >= 2 &&
+                   req.args[i].compare(0, 2, "--") == 0) {
+            std::string detail = "{\"unknown_flag\":\"";
+            detail += req.args[i];
+            detail += "\"}";
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
+        }
+    }
 
     // If the pattern has no wildcard, treat it as a directory and append \\*.
     if (pattern.find_first_of(L"*?") == std::wstring::npos) {
@@ -342,6 +379,16 @@ void list(Connection& conn, const wire::Request& req) {
         pattern += L'*';
     }
 
+    struct Entry {
+        std::string name;
+        std::string type;
+        uint64_t    size;
+        int64_t     mtime_unix;
+        int64_t     ctime_unix;
+        bool        is_dir;
+    };
+    std::vector<Entry> entries;
+
     WIN32_FIND_DATAW fd{};
     HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) {
@@ -349,35 +396,65 @@ void list(Connection& conn, const wire::Request& req) {
         return;
     }
 
-    std::string body = "{\"entries\":[";
-    bool first = true;
     do {
         if (std::wcscmp(fd.cFileName, L".") == 0 ||
             std::wcscmp(fd.cFileName, L"..") == 0) {
             continue;
         }
 
-        if (!first) body += ',';
-        first = false;
-
         ULARGE_INTEGER sz{};
         sz.LowPart  = fd.nFileSizeLow;
         sz.HighPart = fd.nFileSizeHigh;
 
-        body += '{';
-        json::append_kv_string(body, "name",
-            text::wide_to_utf8(fd.cFileName, std::wcslen(fd.cFileName)));
-        body += ',';
-        json::append_kv_string(body, "type", attribute_type(fd.dwFileAttributes));
-        body += ',';
-        json::append_kv_uint(body, "size", sz.QuadPart);
-        body += ',';
-        json::append_kv_int(body, "mtime_unix",
-                            filetime_to_unix(fd.ftLastWriteTime));
-        body += '}';
+        entries.push_back({
+            text::wide_to_utf8(fd.cFileName, std::wcslen(fd.cFileName)),
+            attribute_type(fd.dwFileAttributes),
+            sz.QuadPart,
+            filetime_to_unix(fd.ftLastWriteTime),
+            filetime_to_unix(fd.ftCreationTime),
+            (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0
+        });
     } while (FindNextFileW(h, &fd));
 
     FindClose(h);
+
+    // Sort. Default (name): directories before files, then case-insensitive.
+    // mtime/size/ctime: highest-first (newest / largest), mixed dirs+files.
+    auto cmp = [&](const Entry& a, const Entry& b) -> bool {
+        if (sort_key == "name") {
+            if (a.is_dir != b.is_dir) return a.is_dir > b.is_dir;
+            for (std::size_t k = 0; k < a.name.size() && k < b.name.size(); ++k) {
+                const auto ca = std::tolower(static_cast<unsigned char>(a.name[k]));
+                const auto cb = std::tolower(static_cast<unsigned char>(b.name[k]));
+                if (ca != cb) return ca < cb;
+            }
+            return a.name.size() < b.name.size();
+        }
+        if (sort_key == "mtime") return a.mtime_unix > b.mtime_unix;
+        if (sort_key == "size")  return a.size        > b.size;
+        if (sort_key == "ctime") return a.ctime_unix  > b.ctime_unix;
+        return false;
+    };
+    std::sort(entries.begin(), entries.end(), cmp);
+    if (reverse) std::reverse(entries.begin(), entries.end());
+
+    // Apply offset + limit and emit.
+    const auto start = static_cast<std::size_t>(offset > 0 ? offset : 0);
+    std::string body = "{\"entries\":[";
+    bool first   = true;
+    int  emitted = 0;
+    for (std::size_t i = start; i < entries.size() && emitted < limit; ++i) {
+        const auto& e = entries[i];
+        if (!first) body += ',';
+        first = false;
+        body += '{';
+        json::append_kv_string(body, "name", e.name);  body += ',';
+        json::append_kv_string(body, "type", e.type);  body += ',';
+        json::append_kv_uint(body, "size", e.size);    body += ',';
+        json::append_kv_int(body, "mtime_unix", e.mtime_unix);
+        body += '}';
+        ++emitted;
+    }
     body += "]}";
     conn.writer().write_ok(body);
 }

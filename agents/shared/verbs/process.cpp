@@ -27,6 +27,7 @@
 #include "../log.hpp"
 #include "../text_util.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <cctype>
 #include <cstdio>
@@ -107,9 +108,17 @@ bool parse_uint(std::string_view s, unsigned long long& out) {
 
 void list(Connection& conn, const wire::Request& req) {
     std::string filter;
+    int  limit          = 100;
+    bool include_system = false;
+
     for (std::size_t i = 0; i < req.args.size(); ++i) {
         if (req.args[i] == "--filter" && i + 1 < req.args.size()) {
             filter = req.args[++i];
+        } else if (req.args[i] == "--limit" && i + 1 < req.args.size()) {
+            limit = static_cast<int>(
+                std::strtol(req.args[++i].c_str(), nullptr, 10));
+        } else if (req.args[i] == "--include-system") {
+            include_system = true;
         } else if (req.args[i].size() >= 2 &&
                    req.args[i].compare(0, 2, "--") == 0) {
             std::string detail = "{\"unknown_flag\":\"";
@@ -126,8 +135,12 @@ void list(Connection& conn, const wire::Request& req) {
         return;
     }
 
-    std::string body = "{\"processes\":[";
-    bool first = true;
+    struct Entry {
+        DWORD       pid;
+        DWORD       ppid;
+        std::string image;
+    };
+    std::vector<Entry> entries;
 
     PROCESSENTRY32W pe{};
     pe.dwSize = sizeof(pe);
@@ -137,17 +150,46 @@ void list(Connection& conn, const wire::Request& req) {
                 pe.szExeFile, std::wcslen(pe.szExeFile));
             if (!filter.empty() && !contains_ci(image, filter)) continue;
 
-            if (!first) body += ',';
-            first = false;
-            body += '{';
-            json::append_kv_uint(body, "pid",  pe.th32ProcessID);        body += ',';
-            json::append_kv_uint(body, "ppid", pe.th32ParentProcessID);  body += ',';
-            json::append_kv_string(body, "image", image);
-            body += '}';
+            if (!include_system) {
+                DWORD session_id = 0;
+                // If the call fails (process already gone), include the entry
+                // rather than silently dropping it.
+                if (ProcessIdToSessionId(pe.th32ProcessID, &session_id) &&
+                    session_id == 0) continue;
+            }
+
+            entries.push_back({pe.th32ProcessID, pe.th32ParentProcessID, image});
         } while (Process32NextW(snap, &pe));
     }
     CloseHandle(snap);
 
+    // Sort alphabetically by image name (case-insensitive).
+    std::sort(entries.begin(), entries.end(),
+        [](const Entry& a, const Entry& b) {
+            for (std::size_t i = 0; i < a.image.size() && i < b.image.size(); ++i) {
+                const auto ca = static_cast<unsigned char>(
+                    std::tolower(static_cast<unsigned char>(a.image[i])));
+                const auto cb = static_cast<unsigned char>(
+                    std::tolower(static_cast<unsigned char>(b.image[i])));
+                if (ca != cb) return ca < cb;
+            }
+            return a.image.size() < b.image.size();
+        });
+
+    std::string body = "{\"processes\":[";
+    bool first   = true;
+    int  emitted = 0;
+    for (const auto& e : entries) {
+        if (emitted >= limit) break;
+        if (!first) body += ',';
+        first = false;
+        body += '{';
+        json::append_kv_uint(body, "pid",   e.pid);   body += ',';
+        json::append_kv_uint(body, "ppid",  e.ppid);  body += ',';
+        json::append_kv_string(body, "image", e.image);
+        body += '}';
+        ++emitted;
+    }
     body += "]}";
     conn.writer().write_ok(body);
 }
