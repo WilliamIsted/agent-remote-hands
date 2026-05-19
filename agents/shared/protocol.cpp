@@ -261,6 +261,38 @@ void Writer::write_ok_blob(std::string_view meta_json, ByteView blob) {
     }
 }
 
+void Writer::write_ok_image(std::string_view mime, ByteView bytes) {
+    std::lock_guard lock{mutex_};
+    if (capturing_) {
+        captured_.responded  = true;
+        captured_.is_err     = false;
+        captured_.is_image   = true;
+        captured_.image_mime.assign(mime);
+        // ok_body holds the raw image bytes exactly as write_ok(ByteView)
+        // stores its payload; the session base64-encodes them into the
+        // image content item. No new buffer — reuse the existing one.
+        captured_.ok_body.assign(
+            reinterpret_cast<const char*>(bytes.data), bytes.size);
+        return;
+    }
+    // Non-capture (the retired direct-ARH framing path): the MCP image
+    // content item has no ARH-header-line equivalent. Degrade to the
+    // existing raw-payload primitive so a direct-ARH caller still receives
+    // the bytes and the wire never desyncs. v2.2 routes every verb through
+    // MCP, so this branch is defensive only.
+#ifdef RH_DEBUG
+    log::debug(L"<< OK (image, non-capture fallback) %zu bytes", bytes.size);
+#endif
+    char header[32];
+    const int n = std::snprintf(header, sizeof(header),
+                                "OK %zu\n", bytes.size);
+    if (n <= 0) throw std::runtime_error("header format failed");
+    write_raw(std::string_view{header, static_cast<std::size_t>(n)});
+    if (!bytes.empty()) {
+        write_raw(bytes);
+    }
+}
+
 void Writer::write_err(ErrorCode code) {
     std::lock_guard lock{mutex_};
     if (capturing_) {

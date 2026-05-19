@@ -418,6 +418,19 @@ void read(Connection& conn, const wire::Request& req) {
         }
     }
 
+    // Existence probe BEFORE the Phase-2b deferral: a missing path is
+    // not_found (in file.read.json x-errors), not the generic phase2b
+    // invalid_args. write_open_err maps INVALID_FILE_ATTRIBUTES via
+    // GetLastError() to NotFound ({"path":...}) / permission_denied exactly
+    // as the open path does (file.cpp:199). A path that EXISTS keeps the
+    // unchanged Phase-2b deferral below (content delivery is genuinely
+    // deferred).
+    if (GetFileAttributesW(text::utf8_to_wide(path).c_str())
+        == INVALID_FILE_ATTRIBUTES) {
+        write_open_err(conn, path);
+        return;
+    }
+
     // PHASE 2b — content read/encode is the binary side-channel; deferred.
     invalid_args(conn,
                  "file.read content side-channel is deferred to Phase 2b "
@@ -455,6 +468,19 @@ void write(Connection& conn, const wire::Request& req) {
     }
     if (args.present("atomic") && !args.boolean("atomic")) {
         invalid_args(conn, "file.write 'atomic' must be a boolean");
+        return;
+    }
+
+    // Existence probe BEFORE the Phase-2b deferral: a missing path is
+    // not_found (in file.write.json x-errors), not the generic phase2b
+    // invalid_args. write_open_err maps INVALID_FILE_ATTRIBUTES via
+    // GetLastError() to NotFound ({"path":...}) / permission_denied exactly
+    // as the open path does (file.cpp:199). A path that EXISTS keeps the
+    // unchanged Phase-2b deferral below (content delivery is genuinely
+    // deferred).
+    if (GetFileAttributesW(text::utf8_to_wide(path).c_str())
+        == INVALID_FILE_ATTRIBUTES) {
+        write_open_err(conn, path);
         return;
     }
 
@@ -522,6 +548,19 @@ void write_at(Connection& conn, const wire::Request& req) {
     if (truncate && *offset != 0) {
         invalid_args(conn,
                      "file.write_at 'truncate: true' requires 'offset: 0'");
+        return;
+    }
+
+    // Existence probe BEFORE the Phase-2b deferral: a missing path is
+    // not_found (in file.write_at.json x-errors), not the generic phase2b
+    // invalid_args. write_open_err maps INVALID_FILE_ATTRIBUTES via
+    // GetLastError() to NotFound ({"path":...}) / permission_denied exactly
+    // as the open path does (file.cpp:199). A path that EXISTS keeps the
+    // unchanged Phase-2b deferral below (content delivery is genuinely
+    // deferred).
+    if (GetFileAttributesW(text::utf8_to_wide(path).c_str())
+        == INVALID_FILE_ATTRIBUTES) {
+        write_open_err(conn, path);
         return;
     }
 

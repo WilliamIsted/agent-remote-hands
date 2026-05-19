@@ -176,6 +176,18 @@ public:
     // uses this today.
     void write_ok_blob(std::string_view meta_json, ByteView blob);
 
+    // Image success (MCP image content item, framing §1.6). `mime` is the
+    // image MIME type (e.g. "image/png", "image/bmp"); `bytes` is the raw
+    // encoded image payload. Under capture mode (the MCP path, §1.6) this
+    // records the bytes + MIME so the session base64-encodes them into a
+    // `{"type":"image","data":"<b64>","mimeType":"<mime>"}` content item
+    // rather than escaping the raw bytes into a text content item. Outside
+    // capture mode (the retired direct-ARH path) it degrades to
+    // write_ok(bytes) — raw payload only — so no non-MCP caller changes
+    // shape. Only screen.capture (default base64 path, every RH_MCP family)
+    // uses this today.
+    void write_ok_image(std::string_view mime, ByteView bytes);
+
     // Error responses. detail_json is the raw JSON body (caller-formatted).
     void write_err(ErrorCode code);
     void write_err(ErrorCode code, std::string_view detail_json);
@@ -214,6 +226,16 @@ public:
         bool        has_blob  = false;
         std::string blob_meta;        // result-metadata members, no braces
         std::string blob;             // raw opaque payload bytes
+
+        // Image content item (MCP image content item, framing §1.6). Set
+        // only by write_ok_image(); the default false/empty leaves every
+        // existing captured response byte-identical. When is_image is true
+        // the session base64-encodes ok_body (the raw image bytes, stored
+        // there exactly as write_ok(ByteView) does) into a
+        // `{"type":"image","data":...,"mimeType":image_mime}` content item
+        // instead of the text content path.
+        bool        is_image  = false;
+        std::string image_mime;       // e.g. "image/png", "image/bmp"
     };
 
     void begin_capture() { std::lock_guard lock{mutex_}; capturing_ = true; captured_ = Captured{}; }

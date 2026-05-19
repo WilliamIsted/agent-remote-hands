@@ -467,7 +467,15 @@ void capture(Connection& conn, const wire::Request& req) {
     }
 #endif
 
-    conn.writer().write_ok(wire::ByteView{encoded.data(), encoded.size()});
+    // Default base64 path (every RH_MCP family). screen.capture returns its
+    // frame as an MCP image content item — `{"type":"image","data":
+    // "<base64>","mimeType":"image/png"|"image/bmp"}` (framing §1.6) — not a
+    // text content item with raw bytes escaped in. write_ok_image records
+    // the raw encoded bytes + MIME; the session base64-encodes them. Only
+    // png/bmp reach here (format_has_encoder gates the rest above).
+    conn.writer().write_ok_image(
+        (format == Format::Png) ? "image/png" : "image/bmp",
+        wire::ByteView{encoded.data(), encoded.size()});
 }
 
 }  // namespace remote_hands::screen_verbs

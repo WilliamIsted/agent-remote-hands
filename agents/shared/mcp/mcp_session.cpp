@@ -22,6 +22,8 @@
 #include "../protocol.hpp"
 #include "../verbs_blob.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <string_view>
@@ -99,6 +101,45 @@ std::string serialise(const JsonValue& v) {
         }
     }
     return "null";
+}
+
+// Standard base64 encoder (RFC 4648). screen.capture's default-path image
+// bytes are emitted as an MCP image content item with base64 `data` (framing
+// §1.6). File-local — the shared layer has no base64 helper and the scope is
+// mcp_session.cpp only (same rationale as registry.cpp's local base64_encode
+// and vision.cpp's local base64_decode).
+std::string base64_encode(const char* data, std::size_t len) {
+    static constexpr char kTbl[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const auto* p = reinterpret_cast<const unsigned char*>(data);
+    std::string out;
+    out.reserve(((len + 2) / 3) * 4);
+    std::size_t i = 0;
+    for (; i + 3 <= len; i += 3) {
+        const std::uint32_t n = (static_cast<std::uint32_t>(p[i]) << 16) |
+                                (static_cast<std::uint32_t>(p[i + 1]) << 8) |
+                                 static_cast<std::uint32_t>(p[i + 2]);
+        out += kTbl[(n >> 18) & 0x3f];
+        out += kTbl[(n >> 12) & 0x3f];
+        out += kTbl[(n >> 6) & 0x3f];
+        out += kTbl[n & 0x3f];
+    }
+    const std::size_t rem = len - i;
+    if (rem == 1) {
+        const std::uint32_t n = static_cast<std::uint32_t>(p[i]) << 16;
+        out += kTbl[(n >> 18) & 0x3f];
+        out += kTbl[(n >> 12) & 0x3f];
+        out += '=';
+        out += '=';
+    } else if (rem == 2) {
+        const std::uint32_t n = (static_cast<std::uint32_t>(p[i]) << 16) |
+                                (static_cast<std::uint32_t>(p[i + 1]) << 8);
+        out += kTbl[(n >> 18) & 0x3f];
+        out += kTbl[(n >> 12) & 0x3f];
+        out += kTbl[(n >> 6) & 0x3f];
+        out += '=';
+    }
+    return out;
 }
 
 // Best-effort positional flattening — the inverse of wire.py _args_to_dict
@@ -364,6 +405,26 @@ void McpSession::handle_tools_call(const std::string& id_json,
             wire::ByteView{
                 reinterpret_cast<const std::byte*>(cap.blob.data()),
                 cap.blob.size()});
+        return;
+    }
+
+    if (cap.is_image) {
+        // MCP image content item (framing §1.6): screen.capture returns its
+        // frame as `{"type":"image","data":"<base64>","mimeType":"<mime>"}`
+        // rather than escaping the raw image bytes into a text content item.
+        // Reached only by write_ok_image() (screen.capture default base64
+        // path, every RH_MCP family); every other response keeps the
+        // text-content path below byte-for-byte unchanged. cap.ok_body holds
+        // the raw image bytes (stored there by write_ok_image exactly as
+        // write_ok(ByteView) stores its payload).
+        std::string result =
+            "{\"content\":[{\"type\":\"image\",\"data\":";
+        append_json_string(
+            result, base64_encode(cap.ok_body.data(), cap.ok_body.size()));
+        result += ",\"mimeType\":";
+        append_json_string(result, cap.image_mime);
+        result += "}],\"isError\":false}";
+        send_result(id_json, result);
         return;
     }
 
