@@ -69,6 +69,31 @@
     via Group Policy or you want Defender to keep scanning the binary
     (it will quarantine it).
 
+.PARAMETER Watchdog
+    Self-exit-on-idle threshold, in seconds. When > 0, the registered
+    scheduled-task command line gains `--watchdog <s>` so the agent
+    exits if no connection activity occurs for that many seconds. The
+    task's RestartCount = 3 will bring it back up. NOTE: this is an
+    *idle-timeout* self-exit, NOT hang detection — a wedged accept loop
+    won't reach the self-exit code path. For real hang detection use
+    -InstallWatchdog (external liveness probe). Default 0 (off).
+
+.PARAMETER InstallWatchdog
+    Register an external liveness-probe scheduled task
+    (AgentRemoteHandsWatchdog) that runs as SYSTEM every 60 seconds.
+    The probe TCP-connects to the agent and sends an MCP `initialize`
+    handshake with a tight timeout; if either probe step fails it
+    force-kills the agent process so the main task's RestartCount = 3
+    can respawn a fresh instance.
+
+    Catches both failure modes -Watchdog can't:
+      * TCP listener wedged (accept loop dead but process alive)
+      * Verb processor wedged (process alive + listening, no responses)
+
+    Deploys Tools\watchdog-probe.ps1 (must sit alongside this script)
+    to the install directory and registers the second scheduled task.
+    Logs each probe outcome to %ProgramData%\AgentRemoteHands\watchdog.log.
+
 .PARAMETER Uninstall
     Reverse the install: unregister the task, remove firewall rules,
     delete the installed binary, remove the Defender exclusion.
@@ -94,6 +119,8 @@ param(
     [string]$Source,
     [string]$SourceUrl,
     [int]$Port = 8765,
+    [int]$Watchdog = 0,
+    [switch]$InstallWatchdog,
     [switch]$Discoverable,
     [switch]$PrepareDefender,
     [switch]$SkipDefenderExclusion,
@@ -107,6 +134,8 @@ $InstallDir    = Join-Path $env:ProgramFiles 'AgentRemoteHands'
 $BinaryName    = 'rha-win.modern.x64.exe'
 $BinaryPath    = Join-Path $InstallDir $BinaryName
 $TaskName      = 'AgentRemoteHands'
+$WatchdogTask  = 'AgentRemoteHandsWatchdog'
+$WatchdogProbe = 'watchdog-probe.ps1'
 $RuleName      = 'Agent Remote Hands'
 # BUILTIN\Users SID — task fires for any logged-on Users-group member,
 # matching the prior C++ XML's <GroupId>S-1-5-32-545</GroupId>.
@@ -272,9 +301,16 @@ function Install-Agent {
     # the prior C++-generated XML (LogonTrigger, BUILTIN\Users principal,
     # HighestAvailable elevation, restart 3x at 1 minute intervals).
     Write-Host "Registering scheduled task ..."
+    # Agent's mDNS responder is ON by default; the only flag is
+    # --no-discoverable to suppress it. So -Discoverable on this script
+    # is "the default" (no flag), and absence of -Discoverable means
+    # "explicitly suppress" (--no-discoverable). Earlier versions emitted
+    # a non-existent --discoverable flag, which the agent rejected with
+    # `Fatal: Unknown argument` -> exit 1 -> task failure.
     $taskArgs = @()
-    if ($Discoverable)   { $taskArgs += '--discoverable' }
-    if ($Port -ne 8765)  { $taskArgs += '--port'; $taskArgs += "$Port" }
+    if (-not $Discoverable) { $taskArgs += '--no-discoverable' }
+    if ($Port -ne 8765)     { $taskArgs += '--port'; $taskArgs += "$Port" }
+    if ($Watchdog -gt 0)    { $taskArgs += '--watchdog'; $taskArgs += "$Watchdog" }
 
     $action = New-ScheduledTaskAction -Execute $BinaryPath `
         -Argument ($taskArgs -join ' ')
@@ -296,19 +332,71 @@ function Install-Agent {
         -Force | Out-Null
     Write-Host "  '$TaskName' registered (restart 3x at 1 minute on non-zero exit)"
 
+    if ($InstallWatchdog) {
+        Install-Watchdog
+    }
+
     Write-Host ""
     Write-Host "Install complete."
     Write-Host "The agent will autostart on the next user logon."
     Write-Host "Run it now for this session:"
-    if ($Discoverable) {
-        Write-Host "  & '$BinaryPath' --discoverable"
-    } else {
-        Write-Host "  & '$BinaryPath'"
+    Write-Host "  & '$BinaryPath'"
+}
+
+function Install-Watchdog {
+    # External liveness probe. Runs as SYSTEM every 60s, TCP-connects to
+    # the agent and sends an MCP initialize handshake. Force-kills the
+    # agent on probe failure so the main AgentRemoteHands task's
+    # RestartCount = 3 brings up a fresh instance. The probe and the
+    # watched process are in separate scheduled-task contexts so a hang
+    # in one cannot wedge the other.
+    Write-Host "Registering watchdog task ..."
+
+    # Locate + deploy the probe script.
+    $probeSrc = Join-Path $PSScriptRoot $WatchdogProbe
+    if (-not (Test-Path $probeSrc)) {
+        throw "Watchdog probe script not found alongside installer: $probeSrc"
     }
+    $probeDest = Join-Path $InstallDir $WatchdogProbe
+    Copy-Item -Path $probeSrc -Destination $probeDest -Force
+    Write-Host "  probe script deployed -> $probeDest"
+
+    # Register the watchdog task. SYSTEM principal lets the probe
+    # Stop-Process the elevated agent regardless of integrity level.
+    # Trigger: starts ~1 minute after install and repeats every minute
+    # indefinitely (Task Scheduler's minimum recurrence; the only way
+    # to get sub-minute cadence is a Volatile event-driven trigger,
+    # which adds complexity we don't need).
+    $wdAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        -Argument ("-NoProfile -ExecutionPolicy Bypass -File `"" + $probeDest + "`"")
+    $wdTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+        -RepetitionInterval (New-TimeSpan -Minutes 1)
+    $wdPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' `
+        -LogonType ServiceAccount -RunLevel Highest
+    $wdSettings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable `
+        -ExecutionTimeLimit (New-TimeSpan -Seconds 30)
+
+    Register-ScheduledTask -TaskName $WatchdogTask `
+        -Action $wdAction -Trigger $wdTrigger `
+        -Principal $wdPrincipal -Settings $wdSettings `
+        -Force | Out-Null
+    Write-Host "  '$WatchdogTask' registered (SYSTEM, every 60s, 30s exec cap)"
+    Write-Host "  probe log: $(Join-Path $env:ProgramData 'AgentRemoteHands\watchdog.log')"
 }
 
 function Uninstall-Agent {
     Assert-Admin
+
+    Write-Host "Removing watchdog task ..."
+    if (Get-ScheduledTask -TaskName $WatchdogTask -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $WatchdogTask -Confirm:$false
+        Write-Host "  '$WatchdogTask' removed"
+    } else {
+        Write-Host "  '$WatchdogTask' was not present"
+    }
 
     Write-Host "Removing scheduled task ..."
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
@@ -327,12 +415,17 @@ function Uninstall-Agent {
         Write-Host "  no rules with display name '$RuleName' found"
     }
 
-    Write-Host "Removing binary ..."
+    Write-Host "Removing binary + watchdog probe ..."
     if (Test-Path $BinaryPath) {
         Remove-Item -Path $BinaryPath -Force
         Write-Host "  removed $BinaryPath"
     } else {
         Write-Host "  $BinaryPath was not present"
+    }
+    $probeDest = Join-Path $InstallDir $WatchdogProbe
+    if (Test-Path $probeDest) {
+        Remove-Item -Path $probeDest -Force
+        Write-Host "  removed $probeDest"
     }
     if (Test-Path $InstallDir) {
         # only succeeds if empty — leaves user data alone
