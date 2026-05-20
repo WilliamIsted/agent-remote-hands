@@ -83,17 +83,21 @@
 #include "args.hpp"
 #include "schema_args.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <initializer_list>
 #include <optional>
+#include <regex>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 #include <vector>
 
 #define WIN32_LEAN_AND_MEAN
@@ -1408,6 +1412,498 @@ void at_invoke(Connection& conn, const wire::Request& req) {
         return;
     }
     invoke_on_element(conn, elem.Get());
+}
+
+// ---------------------------------------------------------------------------
+// element.range_value (R8) — input_schema {handle (required)};
+// x-output-schema {min, max, value, small_change?, large_change?, readonly?}.
+// Reads UIA RangeValuePattern. Returns ERR not_supported_by_target
+// {"pattern":"RangeValuePattern"} when the element doesn't implement it.
+// Tier::Read. Agent-ahead-of-spec; tracks protocol issue #95.
+
+void range_value(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"handle"});
+    if (args.reject_unknown(conn)) return;
+
+    IUIAutomationElement* elem = require_handle(conn, args, "element.range_value");
+    if (!elem) return;
+
+    ComPtr<IUIAutomationRangeValuePattern> rvp;
+    if (FAILED(elem->GetCurrentPatternAs(
+            UIA_RangeValuePatternId, IID_PPV_ARGS(&rvp))) || !rvp) {
+        conn.writer().write_err(
+            ErrorCode::NotSupportedByTarget,
+            "{\"pattern\":\"RangeValuePattern\"}");
+        return;
+    }
+
+    double v_min = 0.0, v_max = 0.0, v_val = 0.0;
+    double v_small = 0.0, v_large = 0.0;
+    BOOL readonly = FALSE;
+    // min/max/value are required by the spec; if any of those fail we error.
+    if (FAILED(rvp->get_CurrentMinimum(&v_min)) ||
+        FAILED(rvp->get_CurrentMaximum(&v_max)) ||
+        FAILED(rvp->get_CurrentValue(&v_val))) {
+        conn.writer().write_err(
+            ErrorCode::NotSupportedByTarget,
+            "{\"pattern\":\"RangeValuePattern\","
+             "\"detail\":\"required range properties unavailable\"}");
+        return;
+    }
+    const bool have_small = SUCCEEDED(rvp->get_CurrentSmallChange(&v_small));
+    const bool have_large = SUCCEEDED(rvp->get_CurrentLargeChange(&v_large));
+    const bool have_ro    = SUCCEEDED(rvp->get_CurrentIsReadOnly(&readonly));
+
+    std::string body = "{";
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.17g", v_min);
+    body += "\"min\":";   body += buf;
+    std::snprintf(buf, sizeof(buf), "%.17g", v_max);
+    body += ",\"max\":";  body += buf;
+    std::snprintf(buf, sizeof(buf), "%.17g", v_val);
+    body += ",\"value\":"; body += buf;
+    if (have_small) {
+        std::snprintf(buf, sizeof(buf), "%.17g", v_small);
+        body += ",\"small_change\":"; body += buf;
+    }
+    if (have_large) {
+        std::snprintf(buf, sizeof(buf), "%.17g", v_large);
+        body += ",\"large_change\":"; body += buf;
+    }
+    if (have_ro) {
+        body += ",\"readonly\":";
+        body += readonly ? "true" : "false";
+    }
+    body += '}';
+    conn.writer().write_ok(body);
+}
+
+// ---------------------------------------------------------------------------
+// element.get_text (R9) — input_schema {handle (required), max_length, offset};
+// x-output-schema {text, length, truncated, offset}.
+// Reads UIA TextPattern with fallback ladder (TextPattern -> ValuePattern ->
+// Name). Caps the returned slice via max_length (default 16 KiB, max 256 KiB)
+// and supports `offset` for paginated reads of long content. `length` is the
+// FULL underlying length so callers can decide to paginate or narrow.
+// Tier::Read. Agent-ahead-of-spec; addresses session-1 synthesis 10x finding.
+
+void get_text(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"handle", "max_length", "offset"});
+    if (args.reject_unknown(conn)) return;
+
+    IUIAutomationElement* elem = require_handle(conn, args, "element.get_text");
+    if (!elem) return;
+
+    int max_length = 16384;
+    if (args.present("max_length")) {
+        auto v = args.integer32("max_length");
+        if (!v || *v < 1 || *v > 262144) {
+            invalid_args(conn,
+                "element.get_text 'max_length' must be an integer 1..262144");
+            return;
+        }
+        max_length = *v;
+    }
+    int offset = 0;
+    if (args.present("offset")) {
+        auto v = args.integer32("offset");
+        if (!v || *v < 0) {
+            invalid_args(conn,
+                "element.get_text 'offset' must be an integer >= 0");
+            return;
+        }
+        offset = *v;
+    }
+
+    std::string full_text;
+    bool resolved = false;
+
+    // 1. TextPattern.DocumentRange().GetText(-1) — full content
+    {
+        ComPtr<IUIAutomationTextPattern> tp;
+        if (SUCCEEDED(elem->GetCurrentPatternAs(
+                UIA_TextPatternId, IID_PPV_ARGS(&tp))) && tp) {
+            ComPtr<IUIAutomationTextRange> range;
+            if (SUCCEEDED(tp->get_DocumentRange(&range)) && range) {
+                BSTR txt = nullptr;
+                if (SUCCEEDED(range->GetText(-1, &txt)) && txt) {
+                    full_text = bstr_to_utf8(txt);
+                    SysFreeString(txt);
+                    resolved = true;
+                }
+            }
+        }
+    }
+    // 2. ValuePattern.CurrentValue
+    if (!resolved) {
+        ComPtr<IUIAutomationValuePattern> vp;
+        if (SUCCEEDED(elem->GetCurrentPatternAs(
+                UIA_ValuePatternId, IID_PPV_ARGS(&vp))) && vp) {
+            BSTR v = nullptr;
+            if (SUCCEEDED(vp->get_CurrentValue(&v)) && v) {
+                full_text = bstr_to_utf8(v);
+                SysFreeString(v);
+                resolved = true;
+            }
+        }
+    }
+    // 3. Name fallback
+    if (!resolved) full_text = element_name(elem);
+
+    const long long total_length = static_cast<long long>(full_text.size());
+    long long slice_offset = offset;
+    if (slice_offset > total_length) slice_offset = total_length;
+    long long take = total_length - slice_offset;
+    if (take > max_length) take = max_length;
+    std::string slice = full_text.substr(
+        static_cast<std::size_t>(slice_offset),
+        static_cast<std::size_t>(take));
+    const bool truncated = (slice_offset + take) < total_length;
+
+    std::string body = "{";
+    json::append_kv_string(body, "text", slice);
+    body += ",\"length\":";
+    body += std::to_string(total_length);
+    body += ",\"truncated\":";
+    body += truncated ? "true" : "false";
+    body += ",\"offset\":";
+    body += std::to_string(slice_offset);
+    body += '}';
+    conn.writer().write_ok(body);
+}
+
+// ---------------------------------------------------------------------------
+// element.search (R10) — input_schema {root (required), patterns (required
+// array of 1..16 strings), match (substring|regex, default substring),
+// case_sensitive (bool, default false), context_chars (int, default 80),
+// max_hits_per_pattern (int, default 5), include_bounds (bool, default
+// false)}.
+// x-output-schema {hits[], patterns_unmatched[], total_text_searched,
+// truncated}. Each hit: {pattern, excerpt, offset, match_start, match_length,
+// handle, enclosing_role, bounds[]?}.
+//
+// Server-side multi-pattern search over the `root` element's TextPattern
+// document range. Returns excerpts (not full text), so a 300 KB Wikipedia
+// article search returns a ~5 KB wire response. Per-hit handle +
+// enclosing_role always; bounds[] only when include_bounds:true.
+// Tier::Read. Agent-ahead-of-spec.
+
+void search(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {"root", "patterns", "match", "case_sensitive",
+                          "context_chars", "max_hits_per_pattern",
+                          "include_bounds"});
+    if (args.reject_unknown(conn)) return;
+
+    // root: required element handle (custom arg name; require_handle is
+    // hardcoded to "handle", so inline the lookup here).
+    IUIAutomationElement* root_elem = nullptr;
+    {
+        auto h = args.str("root");
+        if (!h) {
+            invalid_args(conn, "element.search requires 'root' handle");
+            return;
+        }
+        root_elem = require_element(conn, *h);
+        if (!root_elem) return;
+    }
+
+    // patterns: required JSON array of 1..16 non-empty strings. SchemaArgs
+    // has no string_array helper; walk the node directly.
+    std::vector<std::string> patterns;
+    {
+        const mcp::JsonValue* pnode = args.node("patterns");
+        if (pnode == nullptr || !pnode->is_array()) {
+            invalid_args(conn,
+                "element.search 'patterns' must be a non-empty array of strings");
+            return;
+        }
+        const auto& arr = pnode->as_array();
+        if (arr.empty()) {
+            invalid_args(conn,
+                "element.search 'patterns' must be a non-empty array of strings");
+            return;
+        }
+        if (arr.size() > 16) {
+            invalid_args(conn,
+                "element.search 'patterns' max 16 entries");
+            return;
+        }
+        for (const auto& p : arr) {
+            if (!p.is_string() || p.as_string().empty()) {
+                invalid_args(conn,
+                    "element.search 'patterns' entries must be non-empty strings");
+                return;
+            }
+            patterns.push_back(p.as_string());
+        }
+    }
+
+    // match: substring (default) or regex. NOTE: regex is std::regex ECMA syntax.
+    std::string match_mode = "substring";
+    if (args.present("match")) {
+        auto m = args.str("match");
+        if (!m || (*m != "substring" && *m != "regex")) {
+            invalid_args(conn,
+                "element.search 'match' must be 'substring' or 'regex'");
+            return;
+        }
+        match_mode = *m;
+    }
+    bool case_sensitive = false;
+    if (args.present("case_sensitive")) {
+        auto v = args.boolean("case_sensitive");
+        if (!v) {
+            invalid_args(conn,
+                "element.search 'case_sensitive' must be a boolean");
+            return;
+        }
+        case_sensitive = *v;
+    }
+    int context_chars = 80;
+    if (args.present("context_chars")) {
+        auto v = args.integer32("context_chars");
+        if (!v || *v < 0 || *v > 4096) {
+            invalid_args(conn,
+                "element.search 'context_chars' must be 0..4096");
+            return;
+        }
+        context_chars = *v;
+    }
+    int max_hits_per_pattern = 5;
+    if (args.present("max_hits_per_pattern")) {
+        auto v = args.integer32("max_hits_per_pattern");
+        if (!v || *v < 1 || *v > 100) {
+            invalid_args(conn,
+                "element.search 'max_hits_per_pattern' must be 1..100");
+            return;
+        }
+        max_hits_per_pattern = *v;
+    }
+    bool include_bounds = false;
+    if (args.present("include_bounds")) {
+        auto v = args.boolean("include_bounds");
+        if (!v) {
+            invalid_args(conn,
+                "element.search 'include_bounds' must be a boolean");
+            return;
+        }
+        include_bounds = *v;
+    }
+
+    // ---- Fetch the root's full text via TextPattern ----
+    ComPtr<IUIAutomationTextPattern> tp;
+    ComPtr<IUIAutomationTextRange> doc_range;
+    std::string full_text;
+    if (SUCCEEDED(root_elem->GetCurrentPatternAs(
+            UIA_TextPatternId, IID_PPV_ARGS(&tp))) && tp &&
+        SUCCEEDED(tp->get_DocumentRange(&doc_range)) && doc_range) {
+        BSTR txt = nullptr;
+        if (SUCCEEDED(doc_range->GetText(-1, &txt)) && txt) {
+            full_text = bstr_to_utf8(txt);
+            SysFreeString(txt);
+        }
+    }
+    if (full_text.empty() && !tp) {
+        // Root has no TextPattern — search has nothing to scan.
+        conn.writer().write_err(
+            ErrorCode::NotSupportedByTarget,
+            "{\"pattern\":\"TextPattern\"}");
+        return;
+    }
+
+    // Working text for case-insensitive matching (lower-cased copy when needed).
+    std::string haystack = full_text;
+    if (!case_sensitive) {
+        std::transform(haystack.begin(), haystack.end(), haystack.begin(),
+                       [](unsigned char c) {
+                           return static_cast<char>(std::tolower(c));
+                       });
+    }
+
+    struct Hit {
+        std::string pattern;
+        long long   offset;       // byte offset within full_text
+        long long   match_length;
+    };
+    std::vector<Hit> hits;
+    std::vector<std::string> unmatched;
+    bool any_truncated = false;
+
+    for (auto const& orig_pattern : patterns) {
+        std::string needle = orig_pattern;
+        if (!case_sensitive) {
+            std::transform(needle.begin(), needle.end(), needle.begin(),
+                           [](unsigned char c) {
+                               return static_cast<char>(std::tolower(c));
+                           });
+        }
+        int matches_for_this = 0;
+        bool found_any = false;
+
+        if (match_mode == "substring") {
+            std::size_t pos = 0;
+            while (pos < haystack.size() &&
+                   matches_for_this < max_hits_per_pattern) {
+                const auto found = haystack.find(needle, pos);
+                if (found == std::string::npos) break;
+                hits.push_back({orig_pattern,
+                                static_cast<long long>(found),
+                                static_cast<long long>(needle.size())});
+                matches_for_this++;
+                found_any = true;
+                pos = found + needle.size();
+            }
+            // truncation: there might be more hits but we hit the cap
+            if (matches_for_this >= max_hits_per_pattern &&
+                haystack.find(needle, hits.back().offset +
+                              hits.back().match_length) != std::string::npos) {
+                any_truncated = true;
+            }
+        } else {
+            // regex
+            try {
+                auto flags = std::regex::ECMAScript;
+                if (!case_sensitive) flags = flags | std::regex::icase;
+                std::regex re(orig_pattern, flags);
+                auto begin = std::sregex_iterator(
+                    full_text.begin(), full_text.end(), re);
+                auto end   = std::sregex_iterator();
+                for (auto it = begin; it != end; ++it) {
+                    if (matches_for_this >= max_hits_per_pattern) {
+                        any_truncated = true;
+                        break;
+                    }
+                    hits.push_back({orig_pattern,
+                                    static_cast<long long>(it->position()),
+                                    static_cast<long long>(it->length())});
+                    matches_for_this++;
+                    found_any = true;
+                }
+            } catch (std::regex_error const&) {
+                invalid_args(conn,
+                    "element.search 'patterns' contains an invalid regex");
+                return;
+            }
+        }
+        if (!found_any) unmatched.push_back(orig_pattern);
+    }
+
+    // ---- Build hits JSON ----
+    std::string body = "{";
+    body += "\"hits\":[";
+    bool first_hit = true;
+    for (auto const& h : hits) {
+        if (!first_hit) body += ',';
+        first_hit = false;
+        // excerpt around the hit
+        long long ex_start = h.offset - context_chars;
+        if (ex_start < 0) ex_start = 0;
+        long long ex_end = h.offset + h.match_length + context_chars;
+        if (ex_end > static_cast<long long>(full_text.size())) {
+            ex_end = static_cast<long long>(full_text.size());
+        }
+        std::string excerpt = full_text.substr(
+            static_cast<std::size_t>(ex_start),
+            static_cast<std::size_t>(ex_end - ex_start));
+        const long long match_start_in_excerpt = h.offset - ex_start;
+
+        body += '{';
+        json::append_kv_string(body, "pattern", h.pattern);
+        body += ',';
+        json::append_kv_string(body, "excerpt", excerpt);
+        body += ",\"offset\":"; body += std::to_string(h.offset);
+        body += ",\"match_start\":"; body += std::to_string(match_start_in_excerpt);
+        body += ",\"match_length\":"; body += std::to_string(h.match_length);
+
+        // ---- Resolve enclosing element handle + role for this hit ----
+        // Use FindText on the doc_range with the exact matched substring.
+        // For case-insensitive, we ask UIA to also do case-insensitive match.
+        ComPtr<IUIAutomationTextRange> hit_range;
+        if (doc_range) {
+            const std::string& match_text = full_text.substr(
+                static_cast<std::size_t>(h.offset),
+                static_cast<std::size_t>(h.match_length));
+            BSTR needle_bstr = SysAllocStringLen(nullptr,
+                static_cast<UINT>(text::utf8_to_wide(match_text).size()));
+            if (needle_bstr) {
+                std::wstring wneedle = text::utf8_to_wide(match_text);
+                std::memcpy(needle_bstr, wneedle.c_str(),
+                            wneedle.size() * sizeof(wchar_t));
+                doc_range->FindText(needle_bstr,
+                                    FALSE,
+                                    case_sensitive ? FALSE : TRUE,
+                                    &hit_range);
+                SysFreeString(needle_bstr);
+            }
+        }
+        std::string hit_handle;
+        std::string hit_role;
+        if (hit_range) {
+            ComPtr<IUIAutomationElement> encl;
+            if (SUCCEEDED(hit_range->GetEnclosingElement(&encl)) && encl) {
+                // ElementTable::register_element returns "elt:N" directly.
+                hit_handle = conn.element_table().register_element(encl.Get());
+                CONTROLTYPEID ct = 0;
+                if (SUCCEEDED(encl->get_CurrentControlType(&ct))) {
+                    const char* r = role_token(static_cast<LONG>(ct));
+                    if (r != nullptr) hit_role = r;
+                }
+            }
+        }
+        body += ',';
+        json::append_kv_string(body, "handle", hit_handle);
+        body += ',';
+        json::append_kv_string(body, "enclosing_role", hit_role);
+
+        if (include_bounds && hit_range) {
+            SAFEARRAY* rects_sa = nullptr;
+            if (SUCCEEDED(hit_range->GetBoundingRectangles(&rects_sa)) &&
+                    rects_sa) {
+                LONG lbound = 0, ubound = 0;
+                SafeArrayGetLBound(rects_sa, 1, &lbound);
+                SafeArrayGetUBound(rects_sa, 1, &ubound);
+                double* rect_data = nullptr;
+                if (SUCCEEDED(SafeArrayAccessData(rects_sa,
+                        reinterpret_cast<void**>(&rect_data)))) {
+                    // Each rect is 4 doubles: left, top, width, height.
+                    body += ",\"bounds\":[";
+                    const long count = (ubound - lbound + 1) / 4;
+                    for (long ri = 0; ri < count; ++ri) {
+                        if (ri > 0) body += ',';
+                        const double rx = rect_data[ri * 4 + 0];
+                        const double ry = rect_data[ri * 4 + 1];
+                        const double rw = rect_data[ri * 4 + 2];
+                        const double rh = rect_data[ri * 4 + 3];
+                        body += '{';
+                        body += "\"x\":"; body += std::to_string(
+                            static_cast<int>(rx));
+                        body += ",\"y\":"; body += std::to_string(
+                            static_cast<int>(ry));
+                        body += ",\"w\":"; body += std::to_string(
+                            static_cast<int>(rw));
+                        body += ",\"h\":"; body += std::to_string(
+                            static_cast<int>(rh));
+                        body += '}';
+                    }
+                    body += ']';
+                    SafeArrayUnaccessData(rects_sa);
+                }
+                SafeArrayDestroy(rects_sa);
+            }
+        }
+        body += '}';
+    }
+    body += "],\"patterns_unmatched\":[";
+    for (std::size_t i = 0; i < unmatched.size(); ++i) {
+        if (i > 0) body += ',';
+        json::append_string(body, unmatched[i]);
+    }
+    body += "],\"total_text_searched\":";
+    body += std::to_string(full_text.size());
+    body += ",\"truncated\":";
+    body += any_truncated ? "true" : "false";
+    body += '}';
+    conn.writer().write_ok(body);
 }
 
 }  // namespace remote_hands::element_verbs

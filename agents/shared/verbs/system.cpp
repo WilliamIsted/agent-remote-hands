@@ -300,6 +300,23 @@ void health(Connection& conn, const wire::Request& req) {
 }
 
 // ---------------------------------------------------------------------------
+// system.ping — input_schema {} (no properties). x-output-schema: null
+// (empty body — wire response is the literal OK 0).
+//
+// Companion to system.health intended specifically for liveness probes that
+// want a small, named, log-suppressible identity. The on-VM watchdog uses
+// the loopback PING\n -> PONG\n sub-MCP fast-path in server.cpp's accept
+// loop; that fast-path is behaviourally equivalent to invoking this verb
+// (empty OK) but bypasses framing and logging. External clients that
+// don't speak the fast-path use this verb via the standard wire.
+
+void ping(Connection& conn, const wire::Request& req) {
+    SchemaArgs args(req, {});
+    if (args.reject_unknown(conn)) return;
+    conn.writer().write_ok();
+}
+
+// ---------------------------------------------------------------------------
 // system.power.lock — input_schema {} (no properties). x-output-schema: null
 // (empty body). x-errors: ["not_supported"].
 

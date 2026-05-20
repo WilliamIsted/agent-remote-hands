@@ -25,6 +25,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -248,6 +249,76 @@ struct Server::Impl {
             const auto& ab = client_addr.sin_addr.S_un.S_un_b;
             std::snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u",
                           ab.s_b1, ab.s_b2, ab.s_b3, ab.s_b4);
+
+            // Loopback PING/PONG sub-MCP fast-path. Equivalent in semantic
+            // intent to invoking system.ping (see verbs/system.cpp) but
+            // bypasses framing and skips the "Accepted connection from"
+            // log entry, keeping per-minute watchdog probes off the agent
+            // log. Loopback-only: remote callers always fall through to
+            // standard framing.
+            //
+            // Wire shape: client connects, sends exactly the 5 bytes
+            // "PING\n", reads back exactly 5 bytes "PONG\n", closes. Total
+            // 10 wire bytes per probe. We MSG_PEEK the first 5 bytes so a
+            // mismatch falls through to normal framing without consuming.
+            //
+            // No token / tier required — the loopback boundary is the
+            // trust gate. A non-loopback peer cannot reach this branch.
+            const bool is_loopback =
+                (ab.s_b1 == 127 && ab.s_b2 == 0 && ab.s_b3 == 0 && ab.s_b4 == 1);
+            if (is_loopback) {
+                // Loop the peek until we've seen 5 bytes or the deadline
+                // fires. MSG_PEEK doesn't consume; the bytes stay queued
+                // for the normal framing path if this isn't a PING. The
+                // loop is necessary because a fast loopback client can
+                // finish TCP handshake (and the agent's accept) BEFORE
+                // sending the first write — a single peek would return 0
+                // or a short read and miss the PING. 500ms total budget
+                // is generous against any plausible scheduler hiccup but
+                // still bounded so a stalled non-PING client doesn't
+                // wedge the accept loop.
+                char peek[5] = {};
+                int peeked = 0;
+                const auto peek_start = std::chrono::steady_clock::now();
+                const auto peek_deadline =
+                    peek_start + std::chrono::milliseconds(500);
+                DWORD peek_timeout_ms = 50;
+                setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                           reinterpret_cast<const char*>(&peek_timeout_ms),
+                           sizeof(peek_timeout_ms));
+                while (peeked < 5 &&
+                       std::chrono::steady_clock::now() < peek_deadline) {
+                    const int n = recv(client, peek, 5, MSG_PEEK);
+                    if (n > peeked) {
+                        peeked = n;
+                        if (peeked >= 5) break;
+                    } else if (n == 0) {
+                        // peer closed during peek — bail to framing path
+                        // which will see the half-open socket and error
+                        // out cleanly.
+                        break;
+                    }
+                    // recv timed out OR returned <= prev: brief sleep, retry
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(20));
+                }
+                if (peeked >= 5 &&
+                    std::memcmp(peek, "PING\n", 5) == 0) {
+                    // Consume the 5 bytes, write the reply, close. No log.
+                    char drain[5];
+                    recv(client, drain, 5, 0);
+                    send(client, "PONG\n", 5, 0);
+                    closesocket(client);
+                    poke_activity();
+                    continue;
+                }
+                // Restore default recv timeout for the framing path.
+                DWORD restore_timeout_ms = 0;
+                setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                           reinterpret_cast<const char*>(&restore_timeout_ms),
+                           sizeof(restore_timeout_ms));
+            }
+
             log::info(L"Accepted connection from %hs:%u",
                       ipbuf, static_cast<unsigned>(ntohs(client_addr.sin_port)));
 

@@ -42,6 +42,7 @@ namespace system_verbs {
     void info(Connection&, const wire::Request&);
     void capabilities(Connection&, const wire::Request&);
     void health(Connection&, const wire::Request&);
+    void ping(Connection&, const wire::Request&);
     void verbs(Connection&, const wire::Request&);
     void lock(Connection&, const wire::Request&);
     void shutdown_blockers(Connection&, const wire::Request&);
@@ -133,6 +134,9 @@ namespace element_verbs {
     void focus(Connection&, const wire::Request&);
     void text(Connection&, const wire::Request&);
     void set_text(Connection&, const wire::Request&);
+    void range_value(Connection&, const wire::Request&);
+    void get_text(Connection&, const wire::Request&);
+    void search(Connection&, const wire::Request&);
 }  // namespace element_verbs
 
 namespace screen_verbs {
@@ -169,6 +173,7 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"system.info",                {Tier::Read,       &system_verbs::info}},
         {"system.capabilities",        {Tier::Read,       &system_verbs::capabilities}},
         {"system.health",              {Tier::Read,       &system_verbs::health}},
+        {"system.ping",                {Tier::Read,       &system_verbs::ping}},
         {"system.verbs",               {Tier::Read,       &system_verbs::verbs}},
         {"system.power.lock",          {Tier::ExtraRisky, &system_verbs::lock}},
         {"system.power.blockers",      {Tier::Read,       &system_verbs::shutdown_blockers}},
@@ -256,6 +261,9 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         {"element.focus",              {Tier::Update,     &element_verbs::focus}},
         {"element.text",               {Tier::Read,       &element_verbs::text}},
         {"element.set_text",           {Tier::Update,     &element_verbs::set_text}},
+        {"element.range_value",        {Tier::Read,       &element_verbs::range_value}},
+        {"element.get_text",           {Tier::Read,       &element_verbs::get_text}},
+        {"element.search",             {Tier::Read,       &element_verbs::search}},
 
         // screen.*
         {"screen.capture",             {Tier::Read,       &screen_verbs::capture}},
