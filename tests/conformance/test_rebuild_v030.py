@@ -45,6 +45,8 @@ mirrors the sibling tests (e.g. `test_system.py`)."""
 import base64
 import json
 import socket
+import struct
+import zlib
 
 import pytest
 
@@ -793,3 +795,217 @@ def test_r6_vision_describe_live(
         f"elapsed_ms must be an int, got {body.get('elapsed_ms')!r}"
     assert body["elapsed_ms"] > 0, \
         f"elapsed_ms must be > 0, got {body['elapsed_ms']!r}"
+
+
+# ===========================================================================
+# R7 — vision.calibrate (OCR + vision-LLM composite on caller-supplied image)
+#
+# Calibration verb: the orchestrating LLM sends a known image (ground truth
+# already known to it) plus an optional prompt; the agent OCRs the bytes
+# locally via Windows.Media.Ocr AND (when an endpoint is configured/provided)
+# posts them to the vision-LLM. Both results return in one OK body so the
+# caller can compare each against ground truth and decide which backend to
+# trust for the task at hand.
+#
+# Partial-failure rule:
+#   (ocr_ok, vision_ok) -> shape
+#     (T, T) -> OK { ocr, vision, prompt?, elapsed_ms }
+#     (T, F) -> OK { ocr, vision: null, ... }            <-- OCR-only mode
+#     (F, T) -> OK { ocr: null, vision, ... }            <-- no OCR pack
+#     (F, F) -> ERR not_supported{reason:calibration_unavailable}
+#
+# All Update-tier; reuses R6's _VISION_LIVE_HOST / _llm_reachable probe.
+
+
+def _make_test_png(width: int, height: int, fill_byte: int = 0xFF) -> bytes:
+    """Generate a minimal valid PNG of the given size, filled with one byte.
+
+    Uses only the Python stdlib (zlib + struct) — the conformance runner
+    must not depend on Pillow / OpenCV / anything outside `pip install
+    pytest`. The output is a single-channel grayscale PNG with one filter
+    byte (0 = None) per scanline. Output ranges from ~70 bytes (1x1) to
+    ~150 bytes (64x64 white) — well under any wire-size concern.
+
+    `fill_byte=0xFF` (white) is the default; pass another byte for a
+    different uniform colour. Tests don't need a meaningful image — they
+    only need a valid one that the OCR engine accepts."""
+    def _chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + \
+            struct.pack(">I", crc)
+
+    sig = b'\x89PNG\r\n\x1a\n'
+    # IHDR: width, height, bit_depth=8, colour_type=0 (grayscale), three zeros
+    # for compression/filter/interlace methods.
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    # Each scanline = filter byte (0 = None) + width raw bytes.
+    raw = b''.join(b'\x00' + bytes([fill_byte] * width) for _ in range(height))
+    idat = zlib.compress(raw)
+    return sig + _chunk(b'IHDR', ihdr) + _chunk(b'IDAT', idat) + \
+        _chunk(b'IEND', b'')
+
+
+def test_r7_vision_calibrate_image_required(
+        update_client: WireClient, capabilities: dict) -> None:
+    """vision.calibrate with no image arg returns ERR invalid_args. The image
+    is the only argument the verb cannot synthesise a default for."""
+    needs_verb(capabilities, "vision.calibrate")
+    r = update_client.request("vision.calibrate")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args", \
+        f"expected invalid_args, got {r.code!r} ({r.detail!r})"
+
+
+def test_r7_vision_calibrate_bad_base64(
+        update_client: WireClient, capabilities: dict) -> None:
+    """vision.calibrate with malformed base64 returns ERR invalid_args. The
+    `@@` characters are outside the RFC 4648 alphabet, so base64_decode()
+    must reject them with std::nullopt and the handler surfaces invalid_args
+    {reason:'bad_base64'}."""
+    needs_verb(capabilities, "vision.calibrate")
+    r = update_client.request(
+        "vision.calibrate",
+        "--image", "not-base64@@")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args", \
+        f"expected invalid_args, got {r.code!r} ({r.detail!r})"
+    # detail.reason discriminator — defensive: accept either the explicit
+    # 'bad_base64' or a generic 'message' shape; the spec is reason-keyed
+    # but older clients may only check the code.
+    reason = r.detail.get("reason")
+    if reason is not None:
+        assert reason == "bad_base64", \
+            f"expected detail.reason=='bad_base64', got {r.detail!r}"
+
+
+def test_r7_vision_calibrate_unsupported_format(
+        update_client: WireClient, capabilities: dict) -> None:
+    """vision.calibrate with valid base64 but garbage bytes (no PNG/JPEG/BMP
+    magic) returns ERR invalid_args with reason 'unsupported_image_format'.
+    The handler must refuse before any expensive decode / OCR call."""
+    needs_verb(capabilities, "vision.calibrate")
+    # 32 bytes of 'Z' — base64-encodes cleanly but no image-magic prefix.
+    garbage = b'Z' * 32
+    r = update_client.request(
+        "vision.calibrate",
+        "--image", base64.b64encode(garbage).decode("ascii"))
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args", \
+        f"expected invalid_args, got {r.code!r} ({r.detail!r})"
+    assert r.detail.get("reason") == "unsupported_image_format", \
+        f"expected detail.reason=='unsupported_image_format', got {r.detail!r}"
+
+
+def test_r7_vision_calibrate_ocr_only(
+        update_client: WireClient, capabilities: dict) -> None:
+    """vision.calibrate with a synthesised PNG and NO endpoint exercises the
+    OCR-only partial-success path. Expect OK with body.ocr populated, body.vision
+    null. Skips cleanly if the conformance VM has --vision-endpoint configured
+    (this path is not exercisable there)."""
+    needs_verb(capabilities, "vision.calibrate")
+    png = _make_test_png(64, 64)
+    # Magic sanity-check on the host before sending — guards against silent
+    # _make_test_png regression turning this into a different test.
+    assert png.startswith(_PNG_MAGIC), "test PNG generator broken"
+
+    r = update_client.request(
+        "vision.calibrate",
+        "--image", base64.b64encode(png).decode("ascii"))
+    if isinstance(r, ErrResponse):
+        # Most plausible cause for OK-expected-but-got-ERR: the VM was
+        # launched WITH --vision-endpoint AND the endpoint is unreachable
+        # AND the OCR engine has no language packs. Skip rather than
+        # misreport — the assertion contract is the OCR-only PATH, not a
+        # blanket "must succeed under all configurations".
+        if r.code == "not_supported" and \
+                r.detail.get("reason") == "calibration_unavailable":
+            pytest.skip(
+                "calibration_unavailable: no OCR languages AND no vision "
+                "backend — neither path can be exercised on this VM")
+        pytest.fail(f"unexpected ErrResponse: {r.code!r} {r.detail!r}")
+
+    assert isinstance(r, OkResponse), f"expected OkResponse, got {r!r}"
+    body = json.loads(r.payload)
+
+    ocr = body.get("ocr")
+    assert isinstance(ocr, dict), f"ocr must be an object, got {ocr!r}"
+    assert isinstance(ocr.get("text"), str), \
+        f"ocr.text must be a string, got {ocr.get('text')!r}"
+    assert isinstance(ocr.get("lines"), list), \
+        f"ocr.lines must be a list, got {ocr.get('lines')!r}"
+    size = ocr.get("image_size")
+    assert isinstance(size, dict) and size.get("w") == 64 and \
+        size.get("h") == 64, \
+        f"ocr.image_size must be {{w:64,h:64}}, got {size!r}"
+    assert isinstance(ocr.get("elapsed_ms"), int) and not isinstance(
+        ocr["elapsed_ms"], bool), \
+        f"ocr.elapsed_ms must be an int, got {ocr.get('elapsed_ms')!r}"
+    assert ocr["elapsed_ms"] >= 0, \
+        f"ocr.elapsed_ms must be >= 0, got {ocr['elapsed_ms']!r}"
+    assert isinstance(ocr.get("engine_languages"), list), \
+        f"ocr.engine_languages must be a list, got " \
+        f"{ocr.get('engine_languages')!r}"
+
+    # OCR-only mode: vision must be JSON null. Without an endpoint there's
+    # nothing the agent could populate, and a non-null shape here would be
+    # a partial-failure-rule violation.
+    assert body.get("vision", "SENTINEL") is None, \
+        f"vision must be null in OCR-only mode, got {body.get('vision')!r}"
+
+    # elapsed_ms wraps the whole verb — must exist and be >= ocr.elapsed_ms.
+    assert isinstance(body.get("elapsed_ms"), int) and not isinstance(
+        body["elapsed_ms"], bool), \
+        f"body.elapsed_ms must be an int, got {body.get('elapsed_ms')!r}"
+    assert body["elapsed_ms"] >= ocr["elapsed_ms"], \
+        f"body.elapsed_ms ({body['elapsed_ms']}) must be >= ocr.elapsed_ms " \
+        f"({ocr['elapsed_ms']})"
+
+
+def test_r7_vision_calibrate_live_composite(
+        update_client: WireClient, capabilities: dict) -> None:
+    """Live composite round-trip: synthesised PNG sent with the LM Studio
+    endpoint. Expect both OCR and vision populated; prompt echoed back.
+    Skips cleanly when LM Studio not reachable (mirrors R6's pattern)."""
+    needs_verb(capabilities, "vision.calibrate")
+    if not _llm_reachable(_VISION_LIVE_HOST, _VISION_LIVE_PORT):
+        pytest.skip(
+            f"LM Studio at {_VISION_LIVE_HOST}:{_VISION_LIVE_PORT} not "
+            f"reachable from the test runner — skipping live composite")
+
+    png = _make_test_png(64, 64)
+    r = update_client.request(
+        "vision.calibrate",
+        "--image", base64.b64encode(png).decode("ascii"),
+        "--endpoint", _VISION_LIVE_URL,
+        "--model", "",
+        "--prompt", "Reply with the single word OK.",
+        # Generous timeout — model load can take several seconds.
+        "--timeout-ms", "120000")
+    assert isinstance(r, OkResponse), f"expected OkResponse, got {r!r}"
+    body = json.loads(r.payload)
+
+    # OCR side — must be a populated object (the host VM has English packs).
+    ocr = body.get("ocr")
+    assert isinstance(ocr, dict), f"ocr must be an object, got {ocr!r}"
+    assert isinstance(ocr.get("text"), str), \
+        f"ocr.text must be a string, got {ocr.get('text')!r}"
+
+    # Vision side — must be a populated object with a non-empty description.
+    vision = body.get("vision")
+    assert isinstance(vision, dict), \
+        f"vision must be an object, got {vision!r}"
+    assert isinstance(vision.get("description"), str) and \
+        vision["description"], \
+        f"vision.description must be a non-empty string, got " \
+        f"{vision.get('description')!r}"
+    assert isinstance(vision.get("model"), str), \
+        f"vision.model must be a string, got {vision.get('model')!r}"
+    assert isinstance(vision.get("elapsed_ms"), int) and not isinstance(
+        vision["elapsed_ms"], bool), \
+        f"vision.elapsed_ms must be an int, got {vision.get('elapsed_ms')!r}"
+    assert vision["elapsed_ms"] > 0, \
+        f"vision.elapsed_ms must be > 0, got {vision['elapsed_ms']!r}"
+
+    # Prompt echo policy: caller sent one -> must be echoed verbatim.
+    assert body.get("prompt") == "Reply with the single word OK.", \
+        f"prompt must be echoed verbatim, got {body.get('prompt')!r}"

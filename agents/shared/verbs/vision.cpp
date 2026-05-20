@@ -728,10 +728,17 @@ std::string build_openai_request(std::string_view model,
     return body;
 }
 
-// HTTP POST helper. Returns true on success and fills response_body. On
-// failure writes the spec ERR and returns false (caller just returns).
+// HTTP POST helper. Pure (no `Connection&` argument): on success fills
+// `response_body` and returns std::nullopt; on failure returns an
+// HttpError with the spec ErrorCode + a pre-formatted detail-JSON object
+// (braces included) that the caller writes verbatim onto the wire.
 //
-// Error mapping (matches R6 x-errors):
+// Pulling this out of `Connection&` is R7's prerequisite for `run_vision_llm`:
+// `vision.calibrate` needs to inspect a vision-LLM failure (and translate it
+// into `vision: null` + a warning field, NOT the verb's overall failure)
+// rather than have the HTTP layer commit to writing ERR.
+//
+// Error mapping (matches R6 x-errors, byte-identical to the pre-R7 helper):
 //   * WinHttpCrackUrl / scheme reject  -> invalid_args
 //   * WinHttpOpen failure              -> not_supported  (session init)
 //   * Send/Receive timeout             -> timeout
@@ -740,11 +747,24 @@ std::string build_openai_request(std::string_view model,
 //
 // Every successfully-opened WinHTTP handle is released on every path
 // (success AND every error). Mirrors file.download's close_all() discipline.
-bool http_post_json(Connection& conn,
-                    const std::string& endpoint_utf8,
-                    const std::string& request_body,
-                    int timeout_ms,
-                    std::string& response_body) {
+struct HttpError {
+    ErrorCode   code;
+    std::string detail_json;   // already-formatted `{...}` body for write_err
+};
+
+// Build invalid_args detail with the same `{"message": ...}` shape the
+// pre-R7 helper produced via `invalid_args(conn, ...)`.
+HttpError http_invalid_args(std::string_view msg) {
+    std::string d = "{";
+    json::append_kv_string(d, "message", msg);
+    d += '}';
+    return {ErrorCode::InvalidArgs, std::move(d)};
+}
+
+std::optional<HttpError> http_post_json(const std::string& endpoint_utf8,
+                                        const std::string& request_body,
+                                        int timeout_ms,
+                                        std::string& response_body) {
     response_body.clear();
 
     const std::wstring wurl = text::utf8_to_wide(endpoint_utf8);
@@ -758,16 +778,14 @@ bool http_post_json(Connection& conn,
     uc.lpszScheme         = scheme;   uc.dwSchemeLength   = 15;
     if (!WinHttpCrackUrl(wurl.c_str(),
                          static_cast<DWORD>(wurl.size()), 0, &uc)) {
-        invalid_args(conn,
-                     "vision.describe 'endpoint' is not a valid absolute "
-                     "http/https URL");
-        return false;
+        return http_invalid_args(
+            "vision.describe 'endpoint' is not a valid absolute "
+            "http/https URL");
     }
     if (uc.nScheme != INTERNET_SCHEME_HTTP &&
         uc.nScheme != INTERNET_SCHEME_HTTPS) {
-        invalid_args(conn,
-                     "vision.describe 'endpoint' scheme must be http or https");
-        return false;
+        return http_invalid_args(
+            "vision.describe 'endpoint' scheme must be http or https");
     }
     const bool https = (uc.nScheme == INTERNET_SCHEME_HTTPS);
 
@@ -780,8 +798,7 @@ bool http_post_json(Connection& conn,
         std::snprintf(d, sizeof(d),
                       "{\"reason\":\"winhttp_open_failed\",\"win32_error\":%lu}",
                       GetLastError());
-        conn.writer().write_err(ErrorCode::NotSupported, d);
-        return false;
+        return HttpError{ErrorCode::NotSupported, d};
     }
 
     // Apply the verb's timeout to every WinHTTP phase. The four parameters
@@ -796,8 +813,7 @@ bool http_post_json(Connection& conn,
                       "{\"reason\":\"winhttp_connect_failed\","
                       "\"win32_error\":%lu}", GetLastError());
         WinHttpCloseHandle(hSession);
-        conn.writer().write_err(ErrorCode::TransferFailed, d);
-        return false;
+        return HttpError{ErrorCode::TransferFailed, d};
     }
 
     DWORD req_flags = https ? WINHTTP_FLAG_SECURE : 0u;
@@ -811,8 +827,7 @@ bool http_post_json(Connection& conn,
                       "\"win32_error\":%lu}", GetLastError());
         WinHttpCloseHandle(hConnect);
         WinHttpCloseHandle(hSession);
-        conn.writer().write_err(ErrorCode::TransferFailed, d);
-        return false;
+        return HttpError{ErrorCode::TransferFailed, d};
     }
 
     auto close_all = [&]() {
@@ -841,15 +856,13 @@ bool http_post_json(Connection& conn,
             char d[80];
             std::snprintf(d, sizeof(d),
                 "{\"reason\":\"http_timeout\",\"win32_error\":%lu}", err);
-            conn.writer().write_err(ErrorCode::Timeout, d);
-            return false;
+            return HttpError{ErrorCode::Timeout, d};
         }
         char d[96];
         std::snprintf(d, sizeof(d),
                       "{\"reason\":\"http_send_failed\",\"win32_error\":%lu}",
                       err);
-        conn.writer().write_err(ErrorCode::TransferFailed, d);
-        return false;
+        return HttpError{ErrorCode::TransferFailed, d};
     }
 
     // HTTP status code. WinHttpQueryHeaders can fail on a malformed response;
@@ -870,8 +883,7 @@ bool http_post_json(Connection& conn,
                       "{\"reason\":\"http_query_status_failed\","
                       "\"win32_error\":%lu}",
                       err);
-        conn.writer().write_err(ErrorCode::TransferFailed, d);
-        return false;
+        return HttpError{ErrorCode::TransferFailed, d};
     }
     if (status < 200 || status >= 300) {
         // Drain a small slice of the body so the caller's detail can include
@@ -902,8 +914,7 @@ bool http_post_json(Connection& conn,
             json::append_kv_string(detail, "body_excerpt", partial);
         }
         detail += '}';
-        conn.writer().write_err(ErrorCode::TransferFailed, detail);
-        return false;
+        return HttpError{ErrorCode::TransferFailed, std::move(detail)};
     }
 
     // Read the response body.
@@ -915,8 +926,7 @@ bool http_post_json(Connection& conn,
             char d[80];
             std::snprintf(d, sizeof(d),
                 "{\"reason\":\"http_read_failed\",\"win32_error\":%lu}", err);
-            conn.writer().write_err(ErrorCode::TransferFailed, d);
-            return false;
+            return HttpError{ErrorCode::TransferFailed, d};
         }
         if (avail == 0) break;
         // Bound the total response size — a runaway server shouldn't be able
@@ -924,10 +934,9 @@ bool http_post_json(Connection& conn,
         // realistic chat-completions JSON for a description-class verb.
         if (response_body.size() + avail > 4u * 1024u * 1024u) {
             close_all();
-            conn.writer().write_err(ErrorCode::TransferFailed,
+            return HttpError{ErrorCode::TransferFailed,
                 "{\"reason\":\"response_too_large\","
-                "\"message\":\"vision.describe response exceeded 4 MiB\"}");
-            return false;
+                "\"message\":\"vision.describe response exceeded 4 MiB\"}"};
         }
         std::vector<char> chunk(avail);
         DWORD got = 0;
@@ -937,15 +946,14 @@ bool http_post_json(Connection& conn,
             char d[80];
             std::snprintf(d, sizeof(d),
                 "{\"reason\":\"http_read_failed\",\"win32_error\":%lu}", err);
-            conn.writer().write_err(ErrorCode::TransferFailed, d);
-            return false;
+            return HttpError{ErrorCode::TransferFailed, d};
         }
         if (got == 0) break;
         response_body.append(chunk.data(), got);
     }
 
     close_all();
-    return true;
+    return std::nullopt;
 }
 
 // Pull an integer out of a usage.* member if present. JsonValue keeps both
@@ -972,6 +980,159 @@ bool extract_usage_int(const mcp::JsonValue* usage_node,
     (void)p;
     out = v;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// run_vision_llm — shared OpenAI-compatible vision-LLM helper used by BOTH
+// vision.describe and vision.calibrate (R7 extraction).
+//
+// Pipeline (caller already holds decoded image bytes):
+//   1. base64-encode the bytes (RFC 4648 standard alphabet via base64.hpp).
+//   2. Build the OpenAI chat/completions body via build_openai_request().
+//   3. POST via http_post_json() with the caller's timeout.
+//   4. Parse the response; extract choices[0].message.content (description),
+//      response.model, optional usage.{prompt_tokens,completion_tokens}.
+//
+// On success: result.ok = true plus description/model/tokens/elapsed_ms.
+// On failure: result.ok = false plus error_code + error_detail_json (already
+// brace-formatted, ready for write_err verbatim). NO writes to the wire — the
+// caller decides whether to surface the error (describe → write ERR) or
+// translate it into a `vision: null` + warning (calibrate's partial-failure
+// rule).
+//
+// `elapsed_ms` measures the HTTP round-trip only (POST start → response read
+// complete). Matches the pre-R7 vision.describe semantic byte-for-byte.
+struct VisionLlmResult {
+    bool ok = false;
+
+    // success fields
+    std::string description;
+    std::string model;
+    long long   tokens_in        = 0;
+    long long   tokens_out       = 0;
+    bool        has_tokens_in    = false;
+    bool        has_tokens_out   = false;
+    long long   elapsed_ms       = 0;
+
+    // failure fields
+    ErrorCode   error_code       = ErrorCode::TransferFailed;
+    std::string error_detail_json;   // braced `{...}` ready for write_err
+};
+
+VisionLlmResult run_vision_llm(const std::byte* image_bytes,
+                               std::size_t image_len,
+                               const std::string& endpoint_utf8,
+                               std::string_view model,
+                               std::string_view prompt,
+                               int max_tokens,
+                               int timeout_ms) {
+    VisionLlmResult r;
+
+    // base64-encode + build OpenAI request body — same code path describe used
+    // pre-R7, just relocated.
+    const std::string image_b64 =
+        remote_hands::base64_encode(image_bytes, image_len);
+    const std::string request_body = build_openai_request(
+        model, prompt, image_b64, max_tokens);
+
+    // POST (timed).
+    const auto t0 = std::chrono::steady_clock::now();
+    std::string response_body;
+    auto err = http_post_json(endpoint_utf8, request_body, timeout_ms,
+                              response_body);
+    const auto t1 = std::chrono::steady_clock::now();
+    r.elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    if (err) {
+        r.error_code        = err->code;
+        r.error_detail_json = std::move(err->detail_json);
+        return r;
+    }
+
+    // Parse response.
+    auto parsed = mcp::parse(response_body);
+    if (!parsed || !parsed->is_object()) {
+        r.error_code = ErrorCode::TransferFailed;
+        r.error_detail_json =
+            "{\"reason\":\"response_not_json\","
+            "\"message\":\"vision.describe response was not parseable JSON\"}";
+        return r;
+    }
+
+    // choices[0].message.content (string)
+    const mcp::JsonValue* choices = parsed->find("choices");
+    if (choices == nullptr || !choices->is_array() ||
+        choices->as_array().empty()) {
+        r.error_code = ErrorCode::TransferFailed;
+        r.error_detail_json =
+            "{\"reason\":\"response_missing_choices\","
+            "\"message\":\"vision.describe response missing choices[0]\"}";
+        return r;
+    }
+    const mcp::JsonValue& choice0 = choices->as_array().front();
+    const mcp::JsonValue* msg = choice0.find("message");
+    if (msg == nullptr || !msg->is_object()) {
+        r.error_code = ErrorCode::TransferFailed;
+        r.error_detail_json =
+            "{\"reason\":\"response_missing_message\","
+            "\"message\":\"vision.describe response missing "
+            "choices[0].message\"}";
+        return r;
+    }
+    const mcp::JsonValue* content = msg->find("content");
+    if (content == nullptr || !content->is_string()) {
+        r.error_code = ErrorCode::TransferFailed;
+        r.error_detail_json =
+            "{\"reason\":\"response_missing_content\","
+            "\"message\":\"vision.describe response missing "
+            "choices[0].message.content (string)\"}";
+        return r;
+    }
+    r.description = content->as_string();
+
+    // model echo (response.model, may be absent on some servers — emit "" if so)
+    if (const mcp::JsonValue* mm = parsed->find("model");
+        mm && mm->is_string()) {
+        r.model = mm->as_string();
+    }
+
+    // optional usage.{prompt_tokens,completion_tokens}
+    const mcp::JsonValue* usage = parsed->find("usage");
+    r.has_tokens_in  = extract_usage_int(usage, "prompt_tokens",  r.tokens_in);
+    r.has_tokens_out = extract_usage_int(usage, "completion_tokens",
+                                          r.tokens_out);
+
+    r.ok = true;
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Image-magic sniffing (R7).
+//
+// Validates the first 8 bytes of the caller-supplied image against the
+// well-known PNG / JPEG / BMP signatures. Returns a short canonical token
+// ("png" / "jpeg" / "bmp") for the platform OCR helper, or std::nullopt on
+// unknown magic. Truncated input (< the minimum signature length for a given
+// candidate) is treated as unknown, not as a buffer over-read — every check
+// guards on `len` first.
+std::optional<std::string> sniff_image_format(const std::byte* data,
+                                              std::size_t len) {
+    auto u8 = reinterpret_cast<const unsigned char*>(data);
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (len >= 8 &&
+        u8[0] == 0x89 && u8[1] == 0x50 && u8[2] == 0x4E && u8[3] == 0x47 &&
+        u8[4] == 0x0D && u8[5] == 0x0A && u8[6] == 0x1A && u8[7] == 0x0A) {
+        return std::string("png");
+    }
+    // JPEG: FF D8 FF
+    if (len >= 3 && u8[0] == 0xFF && u8[1] == 0xD8 && u8[2] == 0xFF) {
+        return std::string("jpeg");
+    }
+    // BMP: 'BM'
+    if (len >= 2 && u8[0] == 0x42 && u8[1] == 0x4D) {
+        return std::string("bmp");
+    }
+    return std::nullopt;
 }
 
 }  // namespace
@@ -1228,91 +1389,420 @@ void describe(Connection& conn, const wire::Request& req) {
         return;
     }
 
-    // --- base64 + build request body --------------------------------------
-    const std::string image_b64 =
-        remote_hands::base64_encode(png_bytes.data(), png_bytes.size());
-    const std::string request_body = build_openai_request(
-        model_str, prompt_str, image_b64, max_tokens);
-
-    // --- POST (timed) -----------------------------------------------------
-    const auto t0 = std::chrono::steady_clock::now();
-    std::string response_body;
-    if (!http_post_json(conn, endpoint_resolved, request_body, timeout_ms,
-                        response_body)) {
-        return;   // http_post_json already wrote the ERR frame.
-    }
-    const auto t1 = std::chrono::steady_clock::now();
-    const long long elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-
-    // --- parse response ---------------------------------------------------
-    auto parsed = mcp::parse(response_body);
-    if (!parsed || !parsed->is_object()) {
-        conn.writer().write_err(ErrorCode::TransferFailed,
-            "{\"reason\":\"response_not_json\","
-            "\"message\":\"vision.describe response was not parseable JSON\"}");
+    // --- delegate to run_vision_llm (R7 extraction) -----------------------
+    // Byte-output-identical to the pre-R7 inline sequence: same base64
+    // encoding, same OpenAI request shape, same WinHTTP error mapping, same
+    // response parsing, same OK body layout (description, model, optional
+    // tokens_in/out, elapsed_ms).
+    VisionLlmResult llm = run_vision_llm(
+        png_bytes.data(), png_bytes.size(),
+        endpoint_resolved, model_str, prompt_str,
+        max_tokens, timeout_ms);
+    if (!llm.ok) {
+        conn.writer().write_err(llm.error_code, llm.error_detail_json);
         return;
     }
-
-    // choices[0].message.content (string)
-    const mcp::JsonValue* choices = parsed->find("choices");
-    if (choices == nullptr || !choices->is_array() ||
-        choices->as_array().empty()) {
-        conn.writer().write_err(ErrorCode::TransferFailed,
-            "{\"reason\":\"response_missing_choices\","
-            "\"message\":\"vision.describe response missing choices[0]\"}");
-        return;
-    }
-    const mcp::JsonValue& choice0 = choices->as_array().front();
-    const mcp::JsonValue* msg = choice0.find("message");
-    if (msg == nullptr || !msg->is_object()) {
-        conn.writer().write_err(ErrorCode::TransferFailed,
-            "{\"reason\":\"response_missing_message\","
-            "\"message\":\"vision.describe response missing "
-            "choices[0].message\"}");
-        return;
-    }
-    const mcp::JsonValue* content = msg->find("content");
-    if (content == nullptr || !content->is_string()) {
-        conn.writer().write_err(ErrorCode::TransferFailed,
-            "{\"reason\":\"response_missing_content\","
-            "\"message\":\"vision.describe response missing "
-            "choices[0].message.content (string)\"}");
-        return;
-    }
-    const std::string& description = content->as_string();
-
-    // model echo (response.model, may be absent on some servers — emit "" if so)
-    std::string model_used;
-    if (const mcp::JsonValue* mm = parsed->find("model"); mm && mm->is_string()) {
-        model_used = mm->as_string();
-    }
-
-    // optional usage.{prompt_tokens,completion_tokens}
-    const mcp::JsonValue* usage = parsed->find("usage");
-    long long tokens_in = 0, tokens_out = 0;
-    const bool has_tokens_in  = extract_usage_int(usage, "prompt_tokens",
-                                                  tokens_in);
-    const bool has_tokens_out = extract_usage_int(usage, "completion_tokens",
-                                                  tokens_out);
 
     // --- emit OK body -----------------------------------------------------
     std::string out;
-    out.reserve(description.size() + 256);
+    out.reserve(llm.description.size() + 256);
     out += '{';
-    json::append_kv_string(out, "description", description);
+    json::append_kv_string(out, "description", llm.description);
     out += ',';
-    json::append_kv_string(out, "model", model_used);
-    if (has_tokens_in) {
+    json::append_kv_string(out, "model", llm.model);
+    if (llm.has_tokens_in) {
         out += ',';
-        json::append_kv_int(out, "tokens_in", tokens_in);
+        json::append_kv_int(out, "tokens_in", llm.tokens_in);
     }
-    if (has_tokens_out) {
+    if (llm.has_tokens_out) {
         out += ',';
-        json::append_kv_int(out, "tokens_out", tokens_out);
+        json::append_kv_int(out, "tokens_out", llm.tokens_out);
     }
     out += ',';
-    json::append_kv_int(out, "elapsed_ms", elapsed_ms);
+    json::append_kv_int(out, "elapsed_ms", llm.elapsed_ms);
+    out += '}';
+    conn.writer().write_ok(out);
+}
+
+// ---------------------------------------------------------------------------
+// vision.calibrate handler (R7) — composite OCR + vision-LLM on a caller-
+// supplied image.
+//
+// Caller hands us an image (base64) and an optional prompt. We OCR the bytes
+// locally AND (when an endpoint is configured/provided) POST them to the
+// vision-LLM. Both results return in ONE response so the orchestrating LLM
+// can compare each output against its known ground truth — a trustability
+// calibration for the OCR pathway.
+//
+// Partial-failure rule (brief §Verb spec):
+//   (ocr_ok, vision_ok) -> shape
+//     (T, T) -> OK { ocr, vision, prompt?, elapsed_ms }
+//     (T, F) -> OK { ocr, vision: null, prompt?, elapsed_ms }
+//     (F, T) -> OK { ocr: null, vision, prompt?, elapsed_ms }
+//     (F, F) -> ERR not_supported { reason: "calibration_unavailable", ... }
+//   When `endpoint` is empty (per-call AND CLI both unset) vision is NOT
+//   attempted — that's "vision_ok = N/A" and folds into the table as if
+//   vision_ok = F (so OCR-only mode = OK with vision: null, NOT an error,
+//   unless OCR also failed).
+//
+// Run order: OCR FIRST (local, ~100-500 ms) then vision-LLM (network, often
+// several seconds). The fast partial-success when the LLM is slow/unavailable
+// gives the caller something to work with even on a degraded path.
+//
+// Hard caps:
+//   * Decoded image: 16 MiB (caller's base64 string can be up to ~22 MiB).
+//   * First-8-byte magic check: PNG / JPEG / BMP only. Unknown magic rejects
+//     with invalid_args{"reason":"unsupported_image_format"} BEFORE the
+//     16 MiB cap is exhausted — fastest path to refusal.
+
+// vision.calibrate — input_schema (schema order):
+//   ["image","prompt","language","endpoint","model","max_tokens","timeout_ms"]
+// x-errors: ["invalid_args","not_supported","transfer_failed","timeout"].
+// x-output-schema (R7 brief):
+//   {ocr: <ocr-block>|null, vision: <vision-block>|null,
+//    prompt?: string, elapsed_ms: int}
+void calibrate(Connection& conn, const wire::Request& req) {
+    const auto verb_t0 = std::chrono::steady_clock::now();
+
+    SchemaArgs args(req, {"image", "prompt", "language",
+                          "endpoint", "model", "max_tokens", "timeout_ms"});
+    if (args.reject_unknown(conn)) return;
+
+    // --- image: REQUIRED ---------------------------------------------------
+    if (!args.present("image")) {
+        invalid_args(conn,
+            "vision.calibrate 'image' is required (base64-encoded "
+            "PNG/JPEG/BMP bytes)");
+        return;
+    }
+    auto image_b64_opt = args.str("image");
+    if (!image_b64_opt) {
+        invalid_args(conn,
+            "vision.calibrate 'image' must be a base64 string");
+        return;
+    }
+    const std::string image_b64 = std::move(*image_b64_opt);
+
+    // --- prompt: optional --------------------------------------------------
+    bool        prompt_supplied = false;
+    std::string prompt_arg;
+    if (args.present("prompt")) {
+        auto p = args.str("prompt");
+        if (!p) {
+            invalid_args(conn,
+                "vision.calibrate 'prompt' must be a string");
+            return;
+        }
+        prompt_arg      = std::move(*p);
+        prompt_supplied = true;
+    }
+
+    // --- language: optional OCR hint --------------------------------------
+    std::string language_hint;
+    if (args.present("language")) {
+        auto l = args.str("language");
+        if (!l) {
+            invalid_args(conn,
+                "vision.calibrate 'language' must be a string");
+            return;
+        }
+        language_hint = std::move(*l);
+    }
+
+    // --- endpoint: optional, per-call override ----------------------------
+    std::string endpoint_arg;
+    if (args.present("endpoint")) {
+        auto e = args.str("endpoint");
+        if (!e || e->empty()) {
+            invalid_args(conn,
+                "vision.calibrate 'endpoint' must be a non-empty string");
+            return;
+        }
+        endpoint_arg = std::move(*e);
+    }
+
+    // --- model: optional --------------------------------------------------
+    std::string model_str;
+    if (args.present("model")) {
+        auto m = args.str("model");
+        if (!m) {
+            invalid_args(conn,
+                "vision.calibrate 'model' must be a string");
+            return;
+        }
+        model_str = std::move(*m);
+    }
+
+    // --- max_tokens / timeout_ms (same bounds as describe) ----------------
+    int max_tokens = kDefaultMaxTokens;
+    if (args.present("max_tokens")) {
+        auto v = args.integer32("max_tokens");
+        if (!v || *v < kMinMaxTokens || *v > kMaxMaxTokens) {
+            invalid_args(conn,
+                "vision.calibrate 'max_tokens' must be an integer 16..4096");
+            return;
+        }
+        max_tokens = *v;
+    }
+    int timeout_ms = kDefaultTimeoutMs;
+    if (args.present("timeout_ms")) {
+        auto v = args.integer32("timeout_ms");
+        if (!v || *v < kMinTimeoutMs || *v > kMaxTimeoutMs) {
+            invalid_args(conn,
+                "vision.calibrate 'timeout_ms' must be an integer "
+                "1000..300000");
+            return;
+        }
+        timeout_ms = *v;
+    }
+
+    // --- decode base64 -----------------------------------------------------
+    auto decoded_opt = remote_hands::base64_decode(image_b64);
+    if (!decoded_opt) {
+        std::string detail = "{";
+        json::append_kv_string(detail, "reason", "bad_base64");
+        detail += ',';
+        json::append_kv_string(detail, "message",
+            "vision.calibrate 'image' is not valid base64");
+        detail += '}';
+        conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+        return;
+    }
+    std::vector<std::byte> image_bytes = std::move(*decoded_opt);
+
+    // --- 16 MiB cap on DECODED bytes (before any expensive work) ----------
+    constexpr std::size_t kMaxDecodedBytes = 16u * 1024u * 1024u;
+    if (image_bytes.size() > kMaxDecodedBytes) {
+        std::string detail = "{";
+        json::append_kv_string(detail, "reason", "image_too_large");
+        detail += ',';
+        json::append_kv_int(detail, "max_bytes",
+                            static_cast<long long>(kMaxDecodedBytes));
+        detail += ',';
+        json::append_kv_int(detail, "observed_bytes",
+                            static_cast<long long>(image_bytes.size()));
+        detail += '}';
+        conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+        return;
+    }
+    if (image_bytes.empty()) {
+        std::string detail = "{";
+        json::append_kv_string(detail, "reason", "empty_image");
+        detail += ',';
+        json::append_kv_string(detail, "message",
+            "vision.calibrate 'image' decoded to zero bytes");
+        detail += '}';
+        conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+        return;
+    }
+
+    // --- magic check: PNG / JPEG / BMP only, refuse unknown ----------------
+    auto magic = sniff_image_format(image_bytes.data(), image_bytes.size());
+    if (!magic) {
+        std::string detail = "{";
+        json::append_kv_string(detail, "reason", "unsupported_image_format");
+        detail += ',';
+        json::append_kv_string(detail, "message",
+            "vision.calibrate 'image' is not PNG/JPEG/BMP "
+            "(first-8-byte magic check failed)");
+        detail += '}';
+        conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+        return;
+    }
+    const std::string image_format = *magic;
+
+    // --- run OCR first (local, fast) --------------------------------------
+    bool ocr_ok = false;
+    std::string ocr_failure_reason;
+    platform::OcrRecognition ocr_result;
+    long long ocr_elapsed_ms = 0;
+
+    const auto& caps = platform::ocr_capabilities();
+    if (caps.languages.empty()) {
+        ocr_failure_reason = "no_language_pack";
+    } else {
+        const auto ocr_t0 = std::chrono::steady_clock::now();
+        try {
+            ocr_result = platform::ocr_from_bytes(
+                reinterpret_cast<const std::uint8_t*>(image_bytes.data()),
+                image_bytes.size(),
+                image_format,
+                language_hint,
+                /* min_confidence */ 0.0f,
+                /* include_word_bboxes */ false);
+            ocr_ok = true;
+        } catch (const std::runtime_error& e) {
+            ocr_failure_reason = e.what();
+        }
+        const auto ocr_t1 = std::chrono::steady_clock::now();
+        ocr_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            ocr_t1 - ocr_t0).count();
+    }
+
+    // --- resolve endpoint: per-call > CLI default > empty (OCR-only mode) -
+    std::string endpoint_resolved =
+        endpoint_arg.empty() ? remote_hands::vision_endpoint() : endpoint_arg;
+
+    // --- run vision-LLM (network, slow) if endpoint resolved --------------
+    bool vision_attempted = false;
+    VisionLlmResult llm;
+    if (!endpoint_resolved.empty()) {
+        vision_attempted = true;
+        // Forward caller's prompt to the LLM; if none supplied, use the
+        // default. Echo policy is handled at the response-emit step below
+        // (caller-sent => echo; default => omit).
+        std::string_view llm_prompt =
+            prompt_supplied ? std::string_view(prompt_arg)
+                            : std::string_view(kDefaultPrompt);
+        llm = run_vision_llm(
+            image_bytes.data(), image_bytes.size(),
+            endpoint_resolved, model_str, llm_prompt,
+            max_tokens, timeout_ms);
+    }
+    const bool vision_ok = vision_attempted && llm.ok;
+
+    // --- partial-failure ladder: BOTH fail -> ERR not_supported -----------
+    if (!ocr_ok && !vision_ok) {
+        std::string detail = "{";
+        json::append_kv_string(detail, "reason", "calibration_unavailable");
+        detail += ',';
+        json::append_kv_string(detail, "ocr_failure",
+            ocr_failure_reason.empty() ? "engine_error" : ocr_failure_reason);
+        if (vision_attempted) {
+            detail += ',';
+            json::append_string(detail, "vision_failure");
+            detail += ":";
+            // Forward the run_vision_llm error_detail_json verbatim (it's
+            // already a JSON object `{...}`). Falls back to a bare reason
+            // when the helper never populated it (shouldn't happen, but
+            // defensive).
+            if (!llm.error_detail_json.empty() &&
+                llm.error_detail_json.front() == '{') {
+                detail += llm.error_detail_json;
+            } else {
+                detail += "{\"reason\":\"unknown\"}";
+            }
+        } else {
+            detail += ',';
+            json::append_kv_string(detail, "vision_failure",
+                "no_endpoint_configured");
+        }
+        detail += '}';
+        conn.writer().write_err(ErrorCode::NotSupported, detail);
+        return;
+    }
+
+    // --- emit OK body -----------------------------------------------------
+    const auto verb_t1 = std::chrono::steady_clock::now();
+    const long long verb_elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            verb_t1 - verb_t0).count();
+
+    std::string out;
+    out.reserve(1024);
+    out += '{';
+
+    // ocr — populated object or null
+    if (ocr_ok) {
+        // Full text: lines joined by '\n' (matches vision.ocr's emission).
+        std::string full_text;
+        for (auto const& line : ocr_result.lines) {
+            if (!full_text.empty()) full_text += '\n';
+            full_text += line.text;
+        }
+
+        json::append_string(out, "ocr");
+        out += ":{";
+        json::append_kv_string(out, "text", full_text);
+        out += ',';
+
+        // lines array — same shape as vision.ocr (text + bbox).
+        json::append_string(out, "lines");
+        out += ":[";
+        bool first_line = true;
+        for (auto const& line : ocr_result.lines) {
+            if (!first_line) out += ',';
+            first_line = false;
+            out += '{';
+            json::append_kv_int(out, "x", line.x); out += ',';
+            json::append_kv_int(out, "y", line.y); out += ',';
+            json::append_kv_int(out, "w", line.w); out += ',';
+            json::append_kv_int(out, "h", line.h); out += ',';
+            json::append_kv_string(out, "text", line.text);
+            out += '}';
+        }
+        out += ']';
+        out += ',';
+
+        json::append_kv_string(out, "language_used", ocr_result.language_used);
+        out += ',';
+        // calibrate operates on raw image bytes — there is no screen origin,
+        // so coordinate_space is fixed to "image_pixels" per the brief.
+        json::append_kv_string(out, "coordinate_space", "image_pixels");
+        out += ',';
+
+        // image_size: {w,h} per the R7 brief (note: vision.ocr emits
+        // {x,y,w,h} for the screen-anchored variant — calibrate's spec
+        // intentionally uses the simpler 2-field shape).
+        json::append_string(out, "image_size");
+        out += ":{";
+        json::append_kv_int(out, "w", ocr_result.image_width); out += ',';
+        json::append_kv_int(out, "h", ocr_result.image_height);
+        out += '}';
+        out += ',';
+
+        // text_angle (float, degrees clockwise)
+        json::append_string(out, "text_angle");
+        char angle_buf[32];
+        std::snprintf(angle_buf, sizeof(angle_buf), ":%g",
+                      static_cast<double>(ocr_result.text_angle));
+        out += angle_buf;
+        out += ',';
+
+        // engine_languages: BCP-47 list the OCR engine knows about.
+        json::append_string_array(out, "engine_languages", caps.languages);
+        out += ',';
+
+        json::append_kv_int(out, "elapsed_ms", ocr_elapsed_ms);
+        out += '}';
+    } else {
+        json::append_kv_null(out, "ocr");
+    }
+    out += ',';
+
+    // vision — populated object or null
+    if (vision_ok) {
+        json::append_string(out, "vision");
+        out += ":{";
+        json::append_kv_string(out, "description", llm.description);
+        out += ',';
+        json::append_kv_string(out, "model", llm.model);
+        if (llm.has_tokens_in) {
+            out += ',';
+            json::append_kv_int(out, "tokens_in", llm.tokens_in);
+        }
+        if (llm.has_tokens_out) {
+            out += ',';
+            json::append_kv_int(out, "tokens_out", llm.tokens_out);
+        }
+        out += ',';
+        json::append_kv_int(out, "elapsed_ms", llm.elapsed_ms);
+        out += '}';
+    } else {
+        json::append_kv_null(out, "vision");
+    }
+
+    // prompt echo policy (brief):
+    //   caller-sent + LLM invoked       -> forward AND echo
+    //   caller-sent + LLM NOT invoked   -> echo only
+    //   caller didn't send              -> omit (LLM gets default if invoked)
+    if (prompt_supplied) {
+        out += ',';
+        json::append_kv_string(out, "prompt", prompt_arg);
+    }
+
+    out += ',';
+    json::append_kv_int(out, "elapsed_ms", verb_elapsed_ms);
     out += '}';
     conn.writer().write_ok(out);
 }

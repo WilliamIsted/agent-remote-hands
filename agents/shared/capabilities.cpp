@@ -142,6 +142,7 @@ namespace screen_verbs {
 namespace vision_verbs {
     void ocr(Connection&, const wire::Request&);
     void describe(Connection&, const wire::Request&);
+    void calibrate(Connection&, const wire::Request&);
 }  // namespace vision_verbs
 
 namespace watch_verbs {
@@ -262,6 +263,7 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
         // vision.*
         {"vision.ocr",                 {Tier::Read,       &vision_verbs::ocr}},
         {"vision.describe",            {Tier::Update,     &vision_verbs::describe}},
+        {"vision.calibrate",           {Tier::Update,     &vision_verbs::calibrate}},
 
         // watch.*
         {"watch.region",               {Tier::Read,       &watch_verbs::region}},
@@ -350,6 +352,16 @@ bool verb_enabled(std::string_view verb) {
     if (verb == "vision.ocr")
         return !platform::ocr_capabilities().languages.empty();
     if (verb == "vision.describe")
+        return false;
+    // vision.calibrate — modern-only (R7): the verb fuses local Windows.Media
+    // OCR with the WinHTTP -> OpenAI vision-LLM POST. The OCR side requires
+    // a language pack (Win 8.1+); the vision side compiles legacy-clean but
+    // the feature is scoped to the modern family per the R7 brief, exactly
+    // mirroring vision.describe's modern-only stance. Off on legacy at the
+    // capability layer; the handler is still in the legacy TU set (one verb
+    // table) so /Wall doesn't flag a TU-extern, but find_verb() returns
+    // nullptr -> ERR not_supported.
+    if (verb == "vision.calibrate")
         return false;
     if (verb == "system.power.blockers")
         return g_vista_plus;

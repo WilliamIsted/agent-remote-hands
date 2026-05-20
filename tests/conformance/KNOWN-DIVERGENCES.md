@@ -2,8 +2,11 @@
 
 Operational note for anyone running the conformance suite against a v0.3.0
 agent. A clean VM-hosted run currently reports **26 failed / 167 passed /
-9 skipped** plus **`test_rebuild_v030.py` 25/25 passed**. **None of the 26
-failures is a v0.3.0 (R1–R4) regression** — each is classified below.
+9 skipped** plus **`test_rebuild_v030.py` 36/37 passed** (one environmental
+skip — the R5 `verify_enabled` test that gates on finding a disabled element
+in the foreground window). **None of the 26 failures is a v0.3.0 (R1–R4)
+regression** — each is classified below; the class-F entry now scopes
+R5+R6+R7 agent-ahead-of-spec verbs.
 
 Run it the sanctioned way (never the host PC):
 
@@ -64,7 +67,7 @@ between runs (27 vs 26 total depending on ordering).
 
 | Test(s) | Why |
 |---|---|
-| `test_websocket.py::test_mcp_tools_list_superset_of_capabilities` | R6 added `vision.describe` to `system.capabilities` (registered in `kVerbs`). The `system.verbs` / MCP `tools/list` output is generated from the spec JSON corpus in the pinned submodule, which doesn't have `vision.describe` yet. Result: capabilities is a strict superset of tools/list, failing the superset assertion. Resolves when the deferred Protocol-repo PR for R5+R6 lands and the submodule is bumped. Same pattern applies to R5's `element_disabled` discriminator and `verify_enabled` arg. |
+| `test_websocket.py::test_mcp_tools_list_superset_of_capabilities` | R6 added `vision.describe` and R7 added `vision.calibrate` to `system.capabilities` (registered in `kVerbs`). The `system.verbs` / MCP `tools/list` output is generated from the spec JSON corpus in the pinned submodule, which doesn't have either verb yet. Result: capabilities is a strict superset of tools/list, failing the superset assertion. Resolves when the deferred Protocol-repo PR for R5+R6+R7 lands and the submodule is bumped. Same pattern applies to R5's `element_disabled` discriminator and `verify_enabled` arg. |
 
 ## Fixed this run (no longer failing)
 
