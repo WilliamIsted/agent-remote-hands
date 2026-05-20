@@ -360,7 +360,7 @@ UI Automation. Element identifiers use the prefix `elt:` followed by a connectio
 | Verb | Tier | Args | Response | Notes |
 |---|---|---|---|---|
 | `element.list` | R | `[--region <x>,<y>,<w>,<h>]` | `OK <len>\n<json>` | Filtered enumeration of interactable / named elements |
-| `element.tree` | R | `<elt-id>` | `OK <len>\n<json>` | TreeWalker recursive descent. JSON: `{"elements":[{"depth":N,"id":"elt:N","role":"...","name":"...","bounds":[x,y,w,h],"flags":[...]}]}` |
+| `element.tree` | R | `<elt-id>` | `OK <len>\n<json>` | TreeWalker recursive descent. JSON: `{"elements":[{"depth":N,"id":"elt:N","role":"...","name":"...","bounds":[x,y,w,h],"flags":[...],"enabled":true/false/null,"clickable":true/false}]}` |
 | `element.at` | R | `<x> <y>` | `OK <len>\n<json>` or `ERR not_found` | Hit test |
 | `element.find` | R | `<role> <name-pattern>` | `OK <len>\n<json>` or `ERR not_found` or `ERR uia_blind` | `not_found` = nothing matched. `uia_blind` = UIA cannot see across the integrity barrier (caller may need to elevate). |
 | `element.wait` | R | `<role> <name-pattern> <timeout-ms>` | `OK <len>\n<json>` or `ERR timeout` | Polling form of `element.find` (re-walks the visible-element subtree every 250 ms until match or deadline). Returned id is valid for `element.invoke` on the same connection. Capability-gated. |
@@ -375,6 +375,8 @@ UI Automation. Element identifiers use the prefix `elt:` followed by a connectio
 | `element.set_text` | U | `<elt-id> <length>` | `OK 0` or `ERR readonly` or `ERR not_supported_by_target` | UTF-8 text payload follows |
 
 Element IDs are allocated by the agent on calls that produce element references (`element.list`, `element.tree`, `element.at`, `element.find`, `element.wait`). IDs remain valid for the connection's lifetime unless the underlying element is invalidated, in which case subsequent verbs return `ERR target_gone`.
+
+Element objects include both the legacy `flags` array and explicit actionability fields. `enabled` is tri-state: `true` means UIA or Win32 confirms the element is enabled, `false` means a disabled state was confirmed, and `null` means the agent could not prove either state. `clickable` is a cheap "worth trying to click" signal for visible, non-zero-sized interactive controls whose enabled state is not confirmed disabled. Installer frameworks and other legacy/custom controls may expose incomplete UIA metadata; callers SHOULD avoid filtering out controls solely because `enabled` is `null`.
 
 ### 4.6 `file.*`
 

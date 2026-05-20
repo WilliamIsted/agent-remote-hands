@@ -80,6 +80,8 @@ UI Automation introspection and control.
 - `element.text` (R): Reads text from the given element via TextPattern (preferred) or ValuePattern (fallback).
 - `element.set_text` (U): Writes text to the given element from a length-prefixed payload; surfaces `readonly` / `not_supported_by_target` distinctly.
 
+Element responses include `enabled` (`true`, `false`, or `null`) and `clickable` in addition to the legacy `flags` array. `null` means UIA/Win32 could not prove the enabled state; callers should not treat it as disabled, especially for legacy installer wizard controls.
+
 ## `file.*`
 
 File operations. UTF-8 paths. For directory-only verbs see `directory.*`.

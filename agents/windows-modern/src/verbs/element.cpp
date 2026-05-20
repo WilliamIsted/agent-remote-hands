@@ -145,12 +145,96 @@ std::string bstr_to_utf8(BSTR b) {
     return text::wide_to_utf8(b, len);
 }
 
+enum class EnabledState {
+    Unknown,
+    Disabled,
+    Enabled,
+};
+
+EnabledState native_window_enabled_state(IUIAutomationElement* elem) {
+    UIA_HWND native = 0;
+    if (FAILED(elem->get_CurrentNativeWindowHandle(&native)) || native == 0) {
+        return EnabledState::Unknown;
+    }
+
+    HWND hwnd = reinterpret_cast<HWND>(static_cast<INT_PTR>(native));
+    if (!IsWindow(hwnd)) return EnabledState::Unknown;
+
+    HWND parent = GetAncestor(hwnd, GA_PARENT);
+    if (parent && IsWindow(parent) && !IsWindowEnabled(parent)) {
+        return EnabledState::Disabled;
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if (style == 0 && GetLastError() != ERROR_SUCCESS) {
+        return IsWindowEnabled(hwnd) ? EnabledState::Enabled
+                                    : EnabledState::Unknown;
+    }
+
+    if ((style & WS_DISABLED) != 0 || !IsWindowEnabled(hwnd)) {
+        return EnabledState::Disabled;
+    }
+    return EnabledState::Enabled;
+}
+
+EnabledState element_enabled_state(IUIAutomationElement* elem) {
+    BOOL uia_enabled = FALSE;
+    const HRESULT hr = elem->get_CurrentIsEnabled(&uia_enabled);
+
+    // UIA can report legacy/custom installer controls as disabled/unknown even
+    // when their HWND is live. Trust a concrete Win32 disabled style, and let a
+    // live enabled HWND override a false UIA value for those controls.
+    const EnabledState native = native_window_enabled_state(elem);
+    if (native != EnabledState::Unknown) return native;
+
+    if (SUCCEEDED(hr)) {
+        return uia_enabled ? EnabledState::Enabled : EnabledState::Disabled;
+    }
+    return EnabledState::Unknown;
+}
+
+bool element_is_interactive_role(CONTROLTYPEID control_type) {
+    switch (control_type) {
+        case UIA_ButtonControlTypeId:
+        case UIA_CheckBoxControlTypeId:
+        case UIA_ComboBoxControlTypeId:
+        case UIA_HyperlinkControlTypeId:
+        case UIA_ListItemControlTypeId:
+        case UIA_MenuItemControlTypeId:
+        case UIA_RadioButtonControlTypeId:
+        case UIA_SliderControlTypeId:
+        case UIA_SpinnerControlTypeId:
+        case UIA_TabItemControlTypeId:
+        case UIA_TreeItemControlTypeId:
+        case UIA_SplitButtonControlTypeId:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool element_clickable(IUIAutomationElement* elem,
+                       CONTROLTYPEID control_type,
+                       const RECT& rc,
+                       EnabledState enabled) {
+    if (enabled == EnabledState::Disabled) return false;
+    if (rc.right <= rc.left || rc.bottom <= rc.top) return false;
+
+    BOOL offscreen = FALSE;
+    if (SUCCEEDED(elem->get_CurrentIsOffscreen(&offscreen)) && offscreen) {
+        return false;
+    }
+    return element_is_interactive_role(control_type);
+}
+
 // Reads the element's flag bits using cheap-ish properties.
-std::vector<std::string> element_flags(IUIAutomationElement* elem) {
+std::vector<std::string> element_flags(IUIAutomationElement* elem,
+                                       EnabledState enabled) {
     std::vector<std::string> out;
 
     BOOL b = FALSE;
-    if (SUCCEEDED(elem->get_CurrentIsEnabled(&b))         && b) out.emplace_back("enabled");
+    if (enabled == EnabledState::Enabled) out.emplace_back("enabled");
     if (SUCCEEDED(elem->get_CurrentHasKeyboardFocus(&b))  && b) out.emplace_back("focused");
     if (SUCCEEDED(elem->get_CurrentIsOffscreen(&b))       && b) out.emplace_back("offscreen");
     if (SUCCEEDED(elem->get_CurrentIsPassword(&b))        && b) out.emplace_back("password");
@@ -205,7 +289,8 @@ std::string value_pattern_value(IUIAutomationElement* elem) {
 }
 
 // Appends `{"id":"elt:N","role":"...","name":"...","value":"...",
-//          "bounds":[x,y,w,h],"flags":[...]}` to `out`.
+//          "bounds":[x,y,w,h],"flags":[...],"enabled":true|false|null,
+//          "clickable":true|false}` to `out`.
 void append_element_object(std::string& out,
                            const std::string& id,
                            IUIAutomationElement* elem) {
@@ -222,6 +307,9 @@ void append_element_object(std::string& out,
     RECT rc{};
     elem->get_CurrentBoundingRectangle(&rc);
 
+    const EnabledState enabled = element_enabled_state(elem);
+    const bool clickable = element_clickable(elem, ctype, rc, enabled);
+
     out += '{';
     json::append_kv_string(out, "id", id);                       out += ',';
     json::append_kv_string(out, "role", role_token(ctype));      out += ',';
@@ -232,7 +320,21 @@ void append_element_object(std::string& out,
     std::snprintf(bbuf, sizeof(bbuf), ":[%ld,%ld,%ld,%ld],",
                   rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
     out += bbuf;
-    json::append_string_array(out, "flags", element_flags(elem));
+    json::append_string_array(out, "flags", element_flags(elem, enabled));
+    out += ',';
+    switch (enabled) {
+        case EnabledState::Enabled:
+            json::append_kv_bool(out, "enabled", true);
+            break;
+        case EnabledState::Disabled:
+            json::append_kv_bool(out, "enabled", false);
+            break;
+        case EnabledState::Unknown:
+            json::append_kv_null(out, "enabled");
+            break;
+    }
+    out += ',';
+    json::append_kv_bool(out, "clickable", clickable);
     out += '}';
 }
 

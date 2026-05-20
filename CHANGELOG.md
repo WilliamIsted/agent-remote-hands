@@ -34,6 +34,9 @@ tier and verb names. Pin to v0.2.0-rc.5 for the Protocol 2.0 surface.
   `request_update_access`, `request_delete_access`,
   `request_extra_risky_access`. Holding a higher rung subsumes everything
   below per the ladder.
+- **Element actionability.** Element responses now expose tri-state
+  `enabled` and boolean `clickable` fields so legacy installer controls that
+  cannot provide reliable UIA enabled metadata are not silently skipped.
 
 Migration:
 - Clients raising to `drive` should now raise to `update`.
