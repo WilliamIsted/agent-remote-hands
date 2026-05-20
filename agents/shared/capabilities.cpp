@@ -141,6 +141,7 @@ namespace screen_verbs {
 
 namespace vision_verbs {
     void ocr(Connection&, const wire::Request&);
+    void describe(Connection&, const wire::Request&);
 }  // namespace vision_verbs
 
 namespace watch_verbs {
@@ -260,6 +261,7 @@ const std::unordered_map<std::string_view, VerbEntry>& verb_table() {
 
         // vision.*
         {"vision.ocr",                 {Tier::Read,       &vision_verbs::ocr}},
+        {"vision.describe",            {Tier::Update,     &vision_verbs::describe}},
 
         // watch.*
         {"watch.region",               {Tier::Read,       &watch_verbs::region}},
@@ -335,10 +337,20 @@ bool verb_enabled(std::string_view verb) {
 
     // Legacy gating:
     //   vision.ocr        — requires Windows.Media.Ocr (Win 8.1+, language pack installed)
+    //   vision.describe   — modern-only (R6): the verb's image-encode -> WinHTTP
+    //                       POST -> JSON-parse chain compiles legacy-clean
+    //                       (every dependency is XP-floor), but the feature is
+    //                       scoped to the modern family per the R6 brief. Off
+    //                       on legacy at the capability layer; the handler is
+    //                       still in the legacy TU set (one verb table) so an
+    //                       /Wall TU-extern doesn't appear, but find_verb()
+    //                       returns nullptr -> ERR not_supported.
     //   system.power.blockers — requires ShutdownBlockReasonQuery (Vista+)
     //   element.* / watch.element — require IUIAutomation (uiautomationcore.dll, registered)
     if (verb == "vision.ocr")
         return !platform::ocr_capabilities().languages.empty();
+    if (verb == "vision.describe")
+        return false;
     if (verb == "system.power.blockers")
         return g_vista_plus;
     if (verb.size() >= 8 && verb.substr(0, 8) == "element.")
@@ -371,6 +383,25 @@ std::string build_capabilities_json() {
     }
     out += '}';
     return out;
+}
+
+// vision.describe (R6) endpoint default — set once from main() at startup
+// after Config::parse, read by vision_verbs::describe on connection threads.
+//
+// Threading: writes happen only on the main thread before Server::run accepts
+// any connection (single-shot init); reads happen on connection workers.
+// Reads of a never-mutated-after-startup std::string are safe — the workers
+// observe whatever the main thread published before listen() returned.
+namespace {
+std::string g_vision_endpoint;
+}  // namespace
+
+void set_vision_endpoint(std::string endpoint) {
+    g_vision_endpoint = std::move(endpoint);
+}
+
+const std::string& vision_endpoint() {
+    return g_vision_endpoint;
 }
 
 std::string build_namespaces_json_array() {

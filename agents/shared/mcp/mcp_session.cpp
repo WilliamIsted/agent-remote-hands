@@ -15,6 +15,7 @@
 #include "mcp_session.hpp"
 
 #include "json_parse.hpp"
+#include "../base64.hpp"
 #include "../capabilities.hpp"
 #include "../connection.hpp"
 #include "../errors.hpp"
@@ -103,44 +104,12 @@ std::string serialise(const JsonValue& v) {
     return "null";
 }
 
-// Standard base64 encoder (RFC 4648). screen.capture's default-path image
-// bytes are emitted as an MCP image content item with base64 `data` (framing
-// §1.6). File-local — the shared layer has no base64 helper and the scope is
-// mcp_session.cpp only (same rationale as registry.cpp's local base64_encode
-// and vision.cpp's local base64_decode).
-std::string base64_encode(const char* data, std::size_t len) {
-    static constexpr char kTbl[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    const auto* p = reinterpret_cast<const unsigned char*>(data);
-    std::string out;
-    out.reserve(((len + 2) / 3) * 4);
-    std::size_t i = 0;
-    for (; i + 3 <= len; i += 3) {
-        const std::uint32_t n = (static_cast<std::uint32_t>(p[i]) << 16) |
-                                (static_cast<std::uint32_t>(p[i + 1]) << 8) |
-                                 static_cast<std::uint32_t>(p[i + 2]);
-        out += kTbl[(n >> 18) & 0x3f];
-        out += kTbl[(n >> 12) & 0x3f];
-        out += kTbl[(n >> 6) & 0x3f];
-        out += kTbl[n & 0x3f];
-    }
-    const std::size_t rem = len - i;
-    if (rem == 1) {
-        const std::uint32_t n = static_cast<std::uint32_t>(p[i]) << 16;
-        out += kTbl[(n >> 18) & 0x3f];
-        out += kTbl[(n >> 12) & 0x3f];
-        out += '=';
-        out += '=';
-    } else if (rem == 2) {
-        const std::uint32_t n = (static_cast<std::uint32_t>(p[i]) << 16) |
-                                (static_cast<std::uint32_t>(p[i + 1]) << 8);
-        out += kTbl[(n >> 18) & 0x3f];
-        out += kTbl[(n >> 12) & 0x3f];
-        out += kTbl[(n >> 6) & 0x3f];
-        out += '=';
-    }
-    return out;
-}
+// base64 — used to live here as a file-local helper for emitting screen.capture
+// default-path image bytes as an MCP image content item (framing §1.6).
+// Promoted to the shared header `base64.hpp` (R6) so vision.describe can
+// reuse it for its OpenAI-compatible image_url data-URL payload. The shared
+// helper's `const char*` overload preserves this TU's call signature; output
+// is byte-identical to the pre-promotion copy.
 
 // Best-effort positional flattening — the inverse of wire.py _args_to_dict
 // (§1.6.3). Reconstructs the flat token stream the existing (not-yet-migrated)

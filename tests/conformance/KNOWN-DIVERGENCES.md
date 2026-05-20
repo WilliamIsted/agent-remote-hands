@@ -60,6 +60,12 @@ fails inside the full run depending on suite ordering/clipboard state — a
 canonical-suite coupling artifact, not agent code. May appear/disappear
 between runs (27 vs 26 total depending on ordering).
 
+### F — Agent-ahead-of-spec (new verb/feature not yet in pinned submodule spec)
+
+| Test(s) | Why |
+|---|---|
+| `test_websocket.py::test_mcp_tools_list_superset_of_capabilities` | R6 added `vision.describe` to `system.capabilities` (registered in `kVerbs`). The `system.verbs` / MCP `tools/list` output is generated from the spec JSON corpus in the pinned submodule, which doesn't have `vision.describe` yet. Result: capabilities is a strict superset of tools/list, failing the superset assertion. Resolves when the deferred Protocol-repo PR for R5+R6 lands and the submodule is bumped. Same pattern applies to R5's `element_disabled` discriminator and `verify_enabled` arg. |
+
 ## Fixed this run (no longer failing)
 
 - `test_file.py::test_file_read_missing_returns_not_found`, `::test_file_write_missing_returns_not_found` — R4a added the existence probe → `not_found`.

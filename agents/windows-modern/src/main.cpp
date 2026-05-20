@@ -104,6 +104,11 @@ int wmain(int argc, wchar_t* argv[]) try {
     rh::platform::init_ocr();
     auto config = rh::Config::parse(argc, argv);
 
+    // R6: publish the resolved vision.describe endpoint default (CLI > env >
+    // empty) before any connection thread can dispatch the verb. Workers read
+    // the published string lock-free; no writes after this point.
+    rh::set_vision_endpoint(config.vision_endpoint);
+
     rh::log::info(L"Agent Remote Hands v0.3.0 starting on TCP port %u", config.port);
 
     WsaInit wsa;

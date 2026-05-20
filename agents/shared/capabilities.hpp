@@ -67,4 +67,16 @@ std::string build_capabilities_json();
 // Always includes "connection" — the lifecycle namespace is implicit.
 std::string build_namespaces_json_array();
 
+// vision.describe (R6) endpoint default. Set once at startup from
+// Config::vision_endpoint (CLI > env > empty). Read by vision_verbs::describe
+// as the fallback when the verb call omits `endpoint`. UTF-8 — verb converts
+// to wide via text::utf8_to_wide before WinHttpCrackUrl.
+//
+// Process-global mirrors the token-path / port pattern: parsed once in main,
+// stored at a stable address, read by a verb on a connection thread without
+// argument-plumbing through Server / Connection (the verb table is a
+// free-function dispatch; there is no per-call config payload).
+void set_vision_endpoint(std::string endpoint);
+const std::string& vision_endpoint();
+
 }  // namespace remote_hands

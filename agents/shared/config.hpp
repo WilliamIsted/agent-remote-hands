@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <string>
 
 namespace remote_hands {
 
@@ -42,6 +43,13 @@ struct Config {
     // longer than this, the agent self-exits (Task Scheduler is then expected
     // to restart it). 0 disables.
     unsigned int            watchdog_seconds     = 0;
+
+    // Default endpoint for `vision.describe` (R6) when the verb is called
+    // without an `endpoint` arg. Empty -> no default; the verb returns
+    // ERR invalid_args {reason:"vision_endpoint_missing"} if neither CLI/env
+    // default nor a per-call arg is supplied. Full URL, e.g.
+    // `http://192.168.80.1:1234/v1/chat/completions`. UTF-8.
+    std::string             vision_endpoint;
 
     // Parses argc / argv (wide-char) and returns a populated Config.
     // Exits the process on --help. Throws std::runtime_error on unknown flags.

@@ -22,6 +22,9 @@
 #include <string>
 #include <string_view>
 
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 namespace remote_hands {
 
 namespace {
@@ -54,6 +57,22 @@ EnvBuf get_env(const wchar_t* name) {
     return EnvBuf{raw, std::free};
 }
 
+// Convert a wide-char NUL-terminated string to UTF-8. Used for the
+// vision_endpoint URL (Config stores it UTF-8 because the verb hands it to
+// WinHttpCrackUrl via the existing text::utf8_to_wide helper; keeping it
+// UTF-8 in Config matches every other string field — only filesystem paths
+// are wide).
+std::string wide_to_utf8_string(const wchar_t* w) {
+    if (w == nullptr || *w == L'\0') return {};
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0,
+                                           nullptr, nullptr);
+    if (needed <= 1) return {};
+    std::string out(static_cast<std::size_t>(needed - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), needed - 1,
+                        nullptr, nullptr);
+    return out;
+}
+
 // Accepts "FOREVER" → -1, "0" → per-session, positive integer → hours.
 int parse_token_ttl(const wchar_t* s) {
     if (std::wcscmp(s, L"FOREVER") == 0) return -1;
@@ -83,6 +102,10 @@ Options:
   --watchdog <s>          Self-exit if no connection activity for this many
                           seconds (default: 0 = off; pair with Task Scheduler
                           restart-on-failure for unattended recovery)
+  --vision-endpoint <url> Default endpoint for vision.describe (R6) when the
+                          verb is called without an `endpoint` arg. Full URL,
+                          e.g. http://host:1234/v1/chat/completions. Unset
+                          means the verb requires the arg.
   -h, --help              Show this help and exit
 
 Environment variables (overridden by CLI flags):
@@ -92,6 +115,7 @@ Environment variables (overridden by CLI flags):
   REMOTE_HANDS_TOKEN_TTL      (FOREVER, 0, or hours; mirrors --token-ttl)
   REMOTE_HANDS_IDLE_TIMEOUT   (seconds)
   REMOTE_HANDS_WATCHDOG       (seconds)
+  REMOTE_HANDS_VISION_ENDPOINT (full URL; mirrors --vision-endpoint)
 
 Install / uninstall: see Tools\install-agent.ps1 (run from elevated
 PowerShell). The agent itself is a wire-protocol server, not an installer.
@@ -129,6 +153,10 @@ Config Config::parse(int argc, wchar_t* argv[]) {
         c.watchdog_seconds = static_cast<unsigned int>(
             std::wcstoul(env_wd.get(), nullptr, 10));
     }
+    if (auto env_vision = get_env(L"REMOTE_HANDS_VISION_ENDPOINT");
+        env_vision && *env_vision) {
+        c.vision_endpoint = wide_to_utf8_string(env_vision.get());
+    }
 
     // CLI overrides.
     for (int i = 1; i < argc; ++i) {
@@ -153,6 +181,11 @@ Config Config::parse(int argc, wchar_t* argv[]) {
         } else if (arg == L"--watchdog" && i + 1 < argc) {
             c.watchdog_seconds = static_cast<unsigned int>(
                 std::wcstoul(argv[++i], nullptr, 10));
+        } else if (arg == L"--vision-endpoint" && i + 1 < argc) {
+            // CLI overrides env (precedence mirrors --token-ttl /
+            // REMOTE_HANDS_TOKEN_TTL): a CLI value REPLACES whatever the
+            // env-read assigned. Empty CLI value would clear it.
+            c.vision_endpoint = wide_to_utf8_string(argv[++i]);
         } else if (arg == L"--install" || arg == L"--uninstall") {
             std::fwprintf(stderr,
                 L"--install / --uninstall were removed in this build.\n"

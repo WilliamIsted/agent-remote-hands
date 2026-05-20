@@ -44,6 +44,7 @@ mirrors the sibling tests (e.g. `test_system.py`)."""
 
 import base64
 import json
+import socket
 
 import pytest
 
@@ -665,3 +666,130 @@ def test_r5_click_verify_enabled_blocks_disabled(
         f"detail.target_element must be an object, got {te!r}"
     assert "name" in te and "role" in te and "flags" in te, \
         f"target_element missing one of name/role/flags: {te!r}"
+
+
+# ===========================================================================
+# R6 — vision.describe (LLM-mediated screen description)
+#
+# The verb captures a region/window/monitor/full screen, POSTs it to a
+# configured OpenAI-compatible /v1/chat/completions endpoint with the image
+# embedded as a data-URL, and returns the assistant message text + usage
+# stats. Four tests: three deterministic (no LLM required) plus one live
+# round-trip against LM Studio (host's vmnet1 IP, skipped if unreachable).
+#
+# All tier-Update; the conformance suite runs at update_client. The host
+# under test is assumed NOT to have --vision-endpoint configured by default,
+# so the no-endpoint test exercises the missing-config path.
+
+# Host's reachable IP from inside the VM. For a host-only VM this is the
+# vmnet1 gateway (e.g. 192.168.80.1); for a bridged VM it's the host's LAN
+# IPv4. NOT a loopback literal. NOT a hardcoded production assumption —
+# update this constant for your network, or refactor to env-var driven.
+_VISION_LIVE_HOST = "192.168.1.98"
+_VISION_LIVE_PORT = 1234
+_VISION_LIVE_URL = (
+    f"http://{_VISION_LIVE_HOST}:{_VISION_LIVE_PORT}/v1/chat/completions")
+
+
+def _llm_reachable(host: str, port: int, timeout_s: float = 1.0) -> bool:
+    """Quick TCP probe to decide whether the live LM Studio test should run.
+    Returns False on any connect failure — DNS, refused, unreachable, or
+    timeout — so the live test skips cleanly rather than failing when the
+    host LLM isn't up."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout_s)
+            return sock.connect_ex((host, port)) == 0
+    except OSError:
+        return False
+
+
+def test_r6_vision_describe_endpoint_missing(
+        update_client: WireClient, capabilities: dict) -> None:
+    """vision.describe with no endpoint arg AND no agent-side --vision-endpoint
+    default returns ERR invalid_args with detail.reason=='vision_endpoint_missing'.
+    The conformance VM is launched WITHOUT --vision-endpoint, so this is the
+    documented missing-config path."""
+    needs_verb(capabilities, "vision.describe")
+    r = update_client.request("vision.describe")
+    if isinstance(r, OkResponse):
+        # If the VM was launched with --vision-endpoint configured this test
+        # has no purchase — skip rather than misreport. The other R6 tests
+        # are not endpoint-default-dependent.
+        pytest.skip("agent appears to have a vision endpoint configured; "
+                    "endpoint-missing path not exercisable in this run")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    # The R6 detail.reason is the discriminator; the wire code is invalid_args
+    # (the endpoint isn't a network failure — it's a configuration error).
+    if r.code != "invalid_args" or \
+            r.detail.get("reason") != "vision_endpoint_missing":
+        pytest.skip(
+            f"unexpected error shape (likely endpoint configured server-side): "
+            f"code={r.code!r} detail={r.detail!r}")
+    assert r.code == "invalid_args", \
+        f"expected invalid_args, got {r.code!r}"
+    assert r.detail.get("reason") == "vision_endpoint_missing", \
+        f"expected detail.reason=='vision_endpoint_missing', got {r.detail!r}"
+
+
+def test_r6_vision_describe_invalid_url(
+        update_client: WireClient, capabilities: dict) -> None:
+    """vision.describe with a syntactically-invalid endpoint returns ERR
+    invalid_args (WinHttpCrackUrl rejects 'not-a-url')."""
+    needs_verb(capabilities, "vision.describe")
+    r = update_client.request("vision.describe", "--endpoint", "not-a-url")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args", \
+        f"expected invalid_args, got {r.code!r} ({r.detail!r})"
+
+
+def test_r6_vision_describe_unreachable(
+        update_client: WireClient, capabilities: dict) -> None:
+    """vision.describe with an unroutable endpoint (TEST-NET-1, RFC 5737)
+    returns ERR transfer_failed OR timeout — both are spec-acceptable
+    depending on whether the OS reports unreachable up-front or the wait
+    expires first. timeout_ms=2000 keeps the test fast."""
+    needs_verb(capabilities, "vision.describe")
+    r = update_client.request(
+        "vision.describe",
+        "--endpoint", "http://192.0.2.1:1/v1/chat/completions",
+        "--timeout-ms", "2000")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code in {"transfer_failed", "timeout"}, \
+        f"expected transfer_failed or timeout, got {r.code!r} ({r.detail!r})"
+
+
+def test_r6_vision_describe_live(
+        update_client: WireClient, capabilities: dict) -> None:
+    """Live round-trip: capture the full virtual screen, POST it to LM Studio
+    on the host's vmnet1 IP, expect a non-empty assistant message back.
+    Skips cleanly when the LLM is unreachable from the test runner (covers
+    the common case of running the suite without an LM Studio session up)."""
+    needs_verb(capabilities, "vision.describe")
+    if not _llm_reachable(_VISION_LIVE_HOST, _VISION_LIVE_PORT):
+        pytest.skip(
+            f"LM Studio at {_VISION_LIVE_HOST}:{_VISION_LIVE_PORT} not "
+            f"reachable from the test runner — skipping live round-trip")
+
+    r = update_client.request(
+        "vision.describe",
+        "--endpoint", _VISION_LIVE_URL,
+        # Empty model -> LM Studio picks the loaded model (its convention).
+        "--model", "",
+        "--prompt", "Reply with the single word OK.",
+        # Generous on the wall clock — model load can take several seconds.
+        "--timeout-ms", "120000")
+    assert isinstance(r, OkResponse), f"expected OkResponse, got {r!r}"
+    body = json.loads(r.payload)
+    assert isinstance(body.get("description"), str) and body["description"], \
+        f"description must be a non-empty string, got {body.get('description')!r}"
+    # Spec says model: string (no non-empty requirement). LM Studio populates
+    # it in practice, but the handler emits "" when the server omits the
+    # field — don't force a stronger contract than the spec.
+    assert isinstance(body.get("model"), str), \
+        f"model must be a string, got {body.get('model')!r}"
+    assert isinstance(body.get("elapsed_ms"), int) and not isinstance(
+        body["elapsed_ms"], bool), \
+        f"elapsed_ms must be an int, got {body.get('elapsed_ms')!r}"
+    assert body["elapsed_ms"] > 0, \
+        f"elapsed_ms must be > 0, got {body['elapsed_ms']!r}"

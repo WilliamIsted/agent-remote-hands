@@ -71,6 +71,7 @@
 // Paths use the standard `HKLM\Software\...` form. Roots accepted: HKLM,
 // HKCU, HKCR, HKU, HKCC (or their long-form equivalents).
 
+#include "../base64.hpp"
 #include "../connection.hpp"
 #include "../errors.hpp"
 #include "../json.hpp"
@@ -201,42 +202,11 @@ const char* reg_type_to_string(DWORD t) {
     }
 }
 
-// Standard base64 encoder (RFC 4648). REG_BINARY `data` on the READ path is
-// base64 per registry.value.read.json x-output-schema. File-local — the
-// shared layer has no base64 helper and the scope is registry.cpp only
-// (vision.cpp carries its own decoder by the same rationale).
-std::string base64_encode(const BYTE* data, std::size_t len) {
-    static constexpr char kTbl[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve(((len + 2) / 3) * 4);
-    std::size_t i = 0;
-    for (; i + 3 <= len; i += 3) {
-        const std::uint32_t n = (static_cast<std::uint32_t>(data[i]) << 16) |
-                                (static_cast<std::uint32_t>(data[i + 1]) << 8) |
-                                 static_cast<std::uint32_t>(data[i + 2]);
-        out += kTbl[(n >> 18) & 0x3f];
-        out += kTbl[(n >> 12) & 0x3f];
-        out += kTbl[(n >> 6) & 0x3f];
-        out += kTbl[n & 0x3f];
-    }
-    const std::size_t rem = len - i;
-    if (rem == 1) {
-        const std::uint32_t n = static_cast<std::uint32_t>(data[i]) << 16;
-        out += kTbl[(n >> 18) & 0x3f];
-        out += kTbl[(n >> 12) & 0x3f];
-        out += '=';
-        out += '=';
-    } else if (rem == 2) {
-        const std::uint32_t n = (static_cast<std::uint32_t>(data[i]) << 16) |
-                                (static_cast<std::uint32_t>(data[i + 1]) << 8);
-        out += kTbl[(n >> 18) & 0x3f];
-        out += kTbl[(n >> 12) & 0x3f];
-        out += kTbl[(n >> 6) & 0x3f];
-        out += '=';
-    }
-    return out;
-}
+// REG_BINARY base64 — the encoder used to live in this TU as a file-local
+// helper. Promoted to the shared header `base64.hpp` (R6) so vision.describe
+// can encode PNG bytes for its OpenAI-compatible image_url payload without a
+// third copy. Byte-identical output to the pre-promotion file-local copy
+// (the algorithm in base64.hpp was lifted verbatim from this TU's copy).
 
 // Serialise a value's data per registry.value.read.json x-output-schema:
 //   REG_SZ / REG_EXPAND_SZ / REG_LINK : the literal string

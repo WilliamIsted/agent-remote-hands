@@ -113,6 +113,12 @@ int wmain(int argc, wchar_t* argv[]) try {
     rh::init_capabilities(rh::AgentFamily::Legacy);
     rh::platform::init_ocr();
 
+    // R6: vision.describe is gated off on legacy at the capability layer, but
+    // Config still parses --vision-endpoint / REMOTE_HANDS_VISION_ENDPOINT
+    // cleanly (shared parser); publish it here so behaviour stays uniform
+    // (and a future re-enable doesn't surprise).
+    rh::set_vision_endpoint(config.vision_endpoint);
+
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 
     // mDNS advertisement (on by default; suppress with --no-discoverable / REMOTE_HANDS_DISCOVERABLE=0).
