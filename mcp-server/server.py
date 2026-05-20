@@ -60,12 +60,25 @@ from mcp.server.stdio import stdio_server  # noqa: E402
 
 
 SERVER_NAME = "agent-remote-hands"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
 
 
 def _build_agent_client() -> AgentClient:
     host = os.environ.get("REMOTE_HANDS_HOST", "127.0.0.1")
     port = int(os.environ.get("REMOTE_HANDS_PORT", "8765"))
+    # mdns:auto / mdns:select → resolve via on-LAN discovery before
+    # connecting. See mcp-server/mdns_select.py.
+    if host.startswith("mdns:"):
+        from mdns_select import resolve, MdnsError
+        try:
+            host = resolve(host)
+            print(
+                f"[mcp-server] mDNS resolved to {host}:{port}",
+                file=sys.stderr,
+            )
+        except MdnsError as e:
+            print(f"[mcp-server] mDNS resolution failed: {e}", file=sys.stderr)
+            raise SystemExit(2)
     return AgentClient(host=host, port=port, client_name=SERVER_NAME)
 
 

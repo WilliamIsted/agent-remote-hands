@@ -64,7 +64,7 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
     # -----------------------------------------------------------------
     # Click — coordinate click vs UIA-element-id click
     # -----------------------------------------------------------------
-    "input.click": FamilyEntry(
+    "input.mouse.click": FamilyEntry(
         family=["element.click"],
         self_caveats=(
             "coordinate click — fast and works on any visible target, but "
@@ -80,13 +80,13 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
         },
     ),
     "element.click": FamilyEntry(
-        family=["input.click"],
+        family=["input.mouse.click"],
         self_caveats=(
             "click via UIA element id — robust but depends on UIA visibility "
             "of the target."
         ),
         alternatives={
-            "input.click": (
+            "input.mouse.click": (
                 "coordinate click — required when the target isn't "
                 "UIA-visible (canvas-rendered UI, some Unity / DirectComposition "
                 "overlays). Use after screen.capture to identify coordinates."
@@ -266,8 +266,8 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
     # -----------------------------------------------------------------
     # Text input — typing vs UIA-direct-set vs key-by-key
     # -----------------------------------------------------------------
-    "input.type": FamilyEntry(
-        family=["element.set_text", "input.key"],
+    "input.keyboard.type": FamilyEntry(
+        family=["element.set_text", "input.keyboard.key"],
         self_caveats=(
             "synthesises Unicode keystrokes via SendInput at the foreground "
             "window. Subject to focus stealing; some games / DirectInput "
@@ -279,7 +279,7 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
                 "More reliable than input.type for text fields with "
                 "validation or auto-complete; bypasses focus issues."
             ),
-            "input.key": (
+            "input.keyboard.key": (
                 "press named keys with optional modifiers. Use for "
                 "single-key actions (Enter, Tab, F4) or shortcuts "
                 "(Ctrl+S). Not for entering free-form text."
@@ -287,13 +287,13 @@ VARIANT_FAMILIES: Dict[str, FamilyEntry] = {
         },
     ),
     "element.set_text": FamilyEntry(
-        family=["input.type"],
+        family=["input.keyboard.type"],
         self_caveats=(
             "directly sets a UIA element's text via ValuePattern. Requires "
             "the element to be UIA-visible and support ValuePattern."
         ),
         alternatives={
-            "input.type": (
+            "input.keyboard.type": (
                 "synthesise keystrokes — use for non-UIA-visible text "
                 "fields (canvas-rendered, some game UI), or when the "
                 "element rejects programmatic value-set but accepts "

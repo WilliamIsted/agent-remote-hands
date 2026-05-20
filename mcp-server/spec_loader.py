@@ -139,16 +139,23 @@ def resolve_spec_dir() -> Path:
 # Spec loading
 
 def load_specs(spec_dir: Optional[Path] = None) -> dict[str, dict]:
-    """Load every `spec/verbs/*.json` and return `{verb_name: spec_dict}`.
+    """Load every `spec/verbs/**/*.json` and return `{verb_name: spec_dict}`.
 
     `spec_dir` defaults to `resolve_spec_dir()`. Raises on parse errors or
     on a verb file whose `name` field disagrees with its filename basename
-    (a useful sanity check for hand-edited spec files)."""
+    (a useful sanity check for hand-edited spec files).
+
+    In v2.2 the protocol-repo's `spec/verbs/` is split into `common/` and
+    `windows/` subdirectories; older layouts kept everything at the top
+    level. Both shapes load cleanly via the recursive glob below.
+    """
     if spec_dir is None:
         spec_dir = resolve_spec_dir()
     verbs_dir = spec_dir / "verbs"
     out: dict[str, dict] = {}
-    for path in sorted(glob.glob(str(verbs_dir / "*.json"))):
+    paths = sorted(glob.glob(str(verbs_dir / "**" / "*.json"),
+                             recursive=True))
+    for path in paths:
         with open(path, "r", encoding="utf-8") as f:
             spec = json.load(f)
         name = spec.get("name")

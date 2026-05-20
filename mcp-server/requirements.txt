@@ -1,3 +1,7 @@
 # Runtime dependencies for the Agent Remote Hands MCP bridge.
 # Install with: pip install -r mcp-server/requirements.txt
 mcp>=1.0.0
+# zeroconf — only used when REMOTE_HANDS_HOST starts with `mdns:`
+# (see mcp-server/mdns_select.py). The bridge starts fine without it for
+# explicit IP/hostname configurations; import is lazy.
+zeroconf>=0.131
