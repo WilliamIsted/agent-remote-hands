@@ -571,6 +571,62 @@ bool read_timeout_ms(Connection& conn, const SchemaArgs& args,
 }
 
 // ---------------------------------------------------------------------------
+// R5 — disabled-element pre-check. Reads UIA `IsEnabledProperty`; if false,
+// writes a structured `invalid_args` response with the spec-aligned
+// `element_disabled` discriminator and returns false (the caller must return
+// without invoking the pattern). Returns true on (enabled) or (UIA read
+// failure) — a read failure is NOT treated as "disabled"; the verb proceeds
+// and any genuine UIA disability surfaces via the pattern call's own error.
+//
+// `IsOffscreen == true` alone does NOT block (per the task spec — many valid
+// UIA elements are invocable while offscreen, e.g. a virtualized list item
+// before scroll). `offscreen` is still surfaced in the `flags` array purely
+// for caller visibility.
+//
+// Detail shape (matches element-object emission style elsewhere in this TU):
+//   {
+//     "reason": "element_disabled",
+//     "name":   "<accessible name>",
+//     "role":   "<role token>",
+//     "flags":  ["offscreen", ...],
+//     "bounds": {"x":..,"y":..,"w":..,"h":..}
+//   }
+//
+// invalid_args is in the x-errors of every invoke-style verb this gate is
+// applied to (the spec already declares it for find_invoke/invoke/toggle/
+// expand/collapse/focus/set_text) — so emitting via ErrorCode::InvalidArgs
+// stays within each verb's declared error surface. The `reason` discriminator
+// is the agent-ahead-of-spec signal; the protocol-side schema PR is tracked
+// as a deferred follow-up per the task brief.
+bool block_if_disabled(Connection& conn, IUIAutomationElement* elem) {
+    BOOL enabled = TRUE;
+    if (FAILED(elem->get_CurrentIsEnabled(&enabled))) {
+        // UIA failed to report the state; do not block. Pattern call will
+        // surface the underlying failure on its own.
+        return false;
+    }
+    if (enabled) return false;
+
+    CONTROLTYPEID ctype = UIA_CustomControlTypeId;
+    elem->get_CurrentControlType(&ctype);
+
+    RECT rc{};
+    elem->get_CurrentBoundingRectangle(&rc);
+
+    std::string detail = "{";
+    json::append_kv_string(detail, "reason", "element_disabled");      detail += ',';
+    json::append_kv_string(detail, "name",   element_name(elem));      detail += ',';
+    json::append_kv_string(detail, "role",   role_token(ctype));       detail += ',';
+    json::append_string_array(detail, "flags", element_flags(elem));   detail += ',';
+    json::append_string(detail, "bounds");
+    detail += ':';
+    append_bounds_object(detail, rc);
+    detail += '}';
+    conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Internal helper: invoke the InvokePattern on `elem` and write the verb
 // response. Used by element.invoke (after handle lookup) and the compound
 // verbs element.find_invoke / element.at_invoke.
@@ -1015,6 +1071,9 @@ void invoke(Connection& conn, const wire::Request& req) {
     IUIAutomationElement* elem = require_handle(conn, args, "element.invoke");
     if (!elem) return;
 
+    // R5: disabled-element pre-check.
+    if (block_if_disabled(conn, elem)) return;
+
     invoke_on_element(conn, elem);
 }
 
@@ -1028,6 +1087,9 @@ void toggle(Connection& conn, const wire::Request& req) {
 
     IUIAutomationElement* elem = require_handle(conn, args, "element.toggle");
     if (!elem) return;
+
+    // R5: disabled-element pre-check.
+    if (block_if_disabled(conn, elem)) return;
 
     ComPtr<IUIAutomationTogglePattern> tp;
     if (FAILED(elem->GetCurrentPatternAs(
@@ -1072,6 +1134,9 @@ void do_expand_collapse(Connection& conn, const wire::Request& req,
 
     IUIAutomationElement* elem = require_handle(conn, args, verb);
     if (!elem) return;
+
+    // R5: disabled-element pre-check.
+    if (block_if_disabled(conn, elem)) return;
 
     ComPtr<IUIAutomationExpandCollapsePattern> ecp;
     if (FAILED(elem->GetCurrentPatternAs(
@@ -1123,6 +1188,9 @@ void focus(Connection& conn, const wire::Request& req) {
 
     IUIAutomationElement* elem = require_handle(conn, args, "element.focus");
     if (!elem) return;
+
+    // R5: disabled-element pre-check.
+    if (block_if_disabled(conn, elem)) return;
 
     const HRESULT hr = elem->SetFocus();
     if (hr == UIA_E_ELEMENTNOTAVAILABLE) {
@@ -1209,6 +1277,9 @@ void set_text(Connection& conn, const wire::Request& req) {
     IUIAutomationElement* elem = require_handle(conn, args, "element.set_text");
     if (!elem) return;
 
+    // R5: disabled-element pre-check.
+    if (block_if_disabled(conn, elem)) return;
+
     std::optional<std::string> text_arg = args.str("text");
     if (!text_arg) {
         invalid_args(conn, "element.set_text requires string 'text'");
@@ -1293,6 +1364,11 @@ void find_invoke(Connection& conn, const wire::Request& req) {
         if (!find_first_match(conn, uia, root.Get(), spec, match)) return;
 
         if (match) {
+            // R5: disabled-element pre-check. The find phase is unchanged;
+            // only the invoke step gains the gate. If the matched element
+            // is disabled, refuse with `element_disabled` instead of
+            // silently invoking it.
+            if (block_if_disabled(conn, match.Get())) return;
             invoke_on_element(conn, match.Get());
             return;
         }

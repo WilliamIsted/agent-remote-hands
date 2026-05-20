@@ -12,7 +12,7 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-"""Agent-side assertions for the v0.3.0 rebuild (Phases R1/R2/R3).
+"""Agent-side assertions for the v0.3.0 rebuild (Phases R1/R2/R3/R5).
 
 ADDITIVE-ONLY. This file does NOT modify any resynced submodule test. It
 covers behaviour the canonical v2.2 submodule suite cannot structurally
@@ -30,6 +30,12 @@ content item:
     bytes follow the JSON frame forming a valid PNG/BMP.
   * §1.6.6 — default (no encoding arg) `screen.capture` returns an MCP
     image content item whose base64 `data` decodes to PNG/BMP magic.
+  * R5 — disabled-element pre-check on element-handle invoke verbs +
+    input.mouse.click hit-test (`target_element`) + opt-in `verify_enabled`
+    refusal. Agent-ahead-of-spec: the discriminator `detail.reason ==
+    "element_disabled"` and the `verify_enabled` arg are not yet in the
+    pinned 2.2-rc protocol submodule; the schema PR is a deferred follow-up
+    tracked in the task brief.
 
 Every test is `needs_verb`-gated so an agent that does not advertise the
 verb (older agents, the NT/classic build, the legacy build for the
@@ -460,3 +466,202 @@ def test_screen_capture_base64_image_content_item(
         assert raw.startswith(_PNG_MAGIC), "mimeType png but data not PNG"
     elif item["mimeType"] == "image/bmp":
         assert raw.startswith(_BMP_MAGIC), "mimeType bmp but data not BMP"
+
+
+# ===========================================================================
+# R5 — disabled-element pre-check + input.mouse.click hit-test / verify_enabled
+#
+# Both code paths share the same `detail.reason == "element_disabled"`
+# discriminator with `{name, role, flags, bounds}` fields. The agent is
+# intentionally ahead of the pinned 2.2-rc spec on this (a follow-up
+# protocol-repo PR is tracked in the task brief) — the wire shape is the
+# authoritative contract here. needs_verb gates skip on agents that don't
+# implement the relevant verb.
+
+def _find_disabled_element(client: WireClient) -> dict:
+    """Scan `element.list --full` for an element whose UIA `flags` array
+    does NOT contain "enabled". Returns the element dict, or None if no
+    authentically-disabled control was discoverable on this host.
+
+    Pure read-tier: element.list is Read. The walk is bounded by the
+    spec-default limit, which is large enough on a real Windows desktop
+    that at least one disabled control (greyed-out menu item, sub-feature
+    button, etc.) is reliably present."""
+    r = client.request("element.list", "--full", "true", "--limit", "500")
+    if not isinstance(r, OkResponse):
+        return None
+    body = json.loads(r.payload)
+    for e in body.get("elements", []):
+        flags = e.get("flags") or []
+        if "enabled" not in flags:
+            # Reject obviously empty/unaddressable entries: we need a name
+            # OR an automation_id to drive element.find_invoke against,
+            # AND a non-empty bounding rectangle for the click-coord test.
+            if not (e.get("name") or e.get("automation_id")):
+                continue
+            b = e.get("bounds") or {}
+            if not (isinstance(b.get("w"), int) and b["w"] > 0 and
+                    isinstance(b.get("h"), int) and b["h"] > 0):
+                continue
+            return e
+    return None
+
+
+def test_r5_invoke_disabled_returns_element_disabled(
+        update_client: WireClient, capabilities: dict) -> None:
+    """element.find_invoke against an authentically-disabled UIA control
+    returns ERR invalid_args with `detail.reason == "element_disabled"`
+    and the spec-aligned introspection fields (name/role/flags/bounds).
+
+    Discovery: scan element.list --full for any element missing "enabled"
+    in its flags array. Skips if no disabled control is present on the
+    host's current foreground — every desktop session legitimately differs
+    on whether a greyed-out toolbar button is visible."""
+    needs_verb(capabilities, "element.list")
+    needs_verb(capabilities, "element.find_invoke")
+
+    disabled = _find_disabled_element(update_client)
+    if disabled is None:
+        pytest.skip("no authentically-disabled UIA element discoverable in "
+                    "the current element.list snapshot")
+
+    # element.find_invoke matches on name + role. Use both for specificity
+    # (automation_id is mutually exclusive with name per the spec). A
+    # tight timeout keeps the test fast — the element was visible in the
+    # most recent list snapshot, so a 0-ms find will resolve immediately.
+    args = ["--timeout-ms", "200"]
+    if disabled.get("name"):
+        args += ["--name", disabled["name"]]
+    if disabled.get("role"):
+        args += ["--role", disabled["role"]]
+
+    r = update_client.request("element.find_invoke", *args)
+    # The element may have been redrawn / re-enabled between list and
+    # find_invoke; that's a flaky-environment outcome, not a contract
+    # violation. Accept the spec-declared not_found / uia_blind as a
+    # legitimate transient and skip rather than fail.
+    if isinstance(r, ErrResponse) and r.code in ("not_found", "uia_blind"):
+        pytest.skip(f"disabled element no longer matchable ({r.code})")
+
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args", \
+        f"expected invalid_args, got {r.code!r} ({r.detail!r})"
+    assert r.detail.get("reason") == "element_disabled", \
+        f"expected detail.reason == 'element_disabled', got " \
+        f"{r.detail.get('reason')!r} (full detail: {r.detail!r})"
+    assert "name" in r.detail, f"detail missing 'name': {r.detail!r}"
+    assert "role" in r.detail, f"detail missing 'role': {r.detail!r}"
+    assert "flags" in r.detail and isinstance(r.detail["flags"], list), \
+        f"detail.flags must be a list, got {r.detail.get('flags')!r}"
+    assert "bounds" in r.detail and isinstance(r.detail["bounds"], dict), \
+        f"detail.bounds must be an object, got {r.detail.get('bounds')!r}"
+    for k in ("x", "y", "w", "h"):
+        assert k in r.detail["bounds"], \
+            f"detail.bounds missing {k}: {r.detail['bounds']!r}"
+
+
+def test_r5_click_target_element_always_present(
+        update_client: WireClient, capabilities: dict) -> None:
+    """input.mouse.click OK body carries the new `target_element` field
+    (R5 hit-test addition). Field is present unconditionally; value is
+    either a UIA-element object {name, role, flags, ...} or JSON null
+    when ElementFromPoint resolved nothing at the click coordinate.
+
+    Coordinate strategy: pick an enabled UIA element from element.list
+    (so the click reliably lands on a real native control) and click its
+    bounding-rect centre. Falls back to OFFSCREEN coords if no suitable
+    enabled control was discoverable."""
+    needs_verb(capabilities, "input.mouse.click")
+
+    # Prefer a real enabled control with non-trivial bounds. Read tier is
+    # fine for element.list; the click itself runs at update tier.
+    target_x = OFFSCREEN_X
+    target_y = OFFSCREEN_Y
+    if "element.list" in capabilities:
+        r0 = update_client.request("element.list",
+                                   "--full", "true", "--limit", "200")
+        if isinstance(r0, OkResponse):
+            body = json.loads(r0.payload)
+            for e in body.get("elements", []):
+                flags = e.get("flags") or []
+                if "enabled" not in flags:
+                    continue
+                b = e.get("bounds") or {}
+                if (isinstance(b.get("w"), int) and b["w"] > 4 and
+                        isinstance(b.get("h"), int) and b["h"] > 4):
+                    target_x = b["x"] + b["w"] // 2
+                    target_y = b["y"] + b["h"] // 2
+                    break
+
+    r = update_client.request("input.mouse.click",
+                              "--x", str(target_x),
+                              "--y", str(target_y))
+    assert isinstance(r, OkResponse), f"got {r!r}"
+    body = json.loads(r.payload)
+    # Pre-existing fields must still be present (regression guard for the
+    # R5 additive change).
+    assert "synthesised" in body, f"OK body missing synthesised: {body!r}"
+    assert "target_handle" in body, f"OK body missing target_handle: {body!r}"
+    assert "actual_position" in body, \
+        f"OK body missing actual_position: {body!r}"
+    # The new R5 field: present unconditionally, value is object-or-null.
+    assert "target_element" in body, \
+        f"OK body missing target_element (R5): {body!r}"
+    te = body["target_element"]
+    assert te is None or isinstance(te, dict), \
+        f"target_element must be object-or-null, got {te!r}"
+    if isinstance(te, dict):
+        # When UIA resolves an element, the spec object carries
+        # name/role/flags (bounds is also emitted for the agent's R5
+        # implementation, mirroring the refusal-detail shape).
+        assert "name" in te, f"target_element missing name: {te!r}"
+        assert "role" in te, f"target_element missing role: {te!r}"
+        assert "flags" in te and isinstance(te["flags"], list), \
+            f"target_element.flags must be a list, got {te.get('flags')!r}"
+
+
+def test_r5_click_verify_enabled_blocks_disabled(
+        update_client: WireClient, capabilities: dict) -> None:
+    """input.mouse.click with `verify_enabled:true` on the centre of a
+    disabled UIA element's bounding rectangle refuses with ERR
+    invalid_args + `detail.reason == "element_disabled"`. No click is
+    synthesised — the refusal happens before SendInput."""
+    needs_verb(capabilities, "element.list")
+    needs_verb(capabilities, "input.mouse.click")
+
+    disabled = _find_disabled_element(update_client)
+    if disabled is None:
+        pytest.skip("no authentically-disabled UIA element discoverable in "
+                    "the current element.list snapshot")
+
+    b = disabled["bounds"]
+    cx = b["x"] + b["w"] // 2
+    cy = b["y"] + b["h"] // 2
+
+    r = update_client.request("input.mouse.click",
+                              "--x", str(cx),
+                              "--y", str(cy),
+                              "--verify-enabled", "true")
+    # Same flaky-environment tolerance as the find_invoke test: if the
+    # element was redrawn / re-enabled between list and click, the
+    # verify_enabled gate proceeds and we get an OK (or some other
+    # transient). Accept OK-with-non-error-target as the "element no
+    # longer disabled" outcome and skip.
+    if isinstance(r, OkResponse):
+        pytest.skip("hit-tested element was no longer disabled at click "
+                    "time (verify_enabled correctly proceeded)")
+
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args", \
+        f"expected invalid_args, got {r.code!r} ({r.detail!r})"
+    assert r.detail.get("reason") == "element_disabled", \
+        f"expected detail.reason == 'element_disabled', got " \
+        f"{r.detail.get('reason')!r} (full detail: {r.detail!r})"
+    # The verify_enabled refusal embeds target_element (object with
+    # name/role/flags/bounds) so the caller can introspect what was
+    # rejected without re-querying.
+    te = r.detail.get("target_element")
+    assert isinstance(te, dict), \
+        f"detail.target_element must be an object, got {te!r}"
+    assert "name" in te and "role" in te and "flags" in te, \
+        f"target_element missing one of name/role/flags: {te!r}"

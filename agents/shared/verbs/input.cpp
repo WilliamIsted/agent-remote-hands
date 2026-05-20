@@ -109,6 +109,7 @@
 
 #include "../connection.hpp"
 #include "../crash_check.hpp"
+#include "../element_table.hpp"
 #include "../errors.hpp"
 #include "../json.hpp"
 #include "../log.hpp"
@@ -132,6 +133,9 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <objbase.h>          // Defines `interface` macro before UIA headers.
+#include <UIAutomation.h>
+#include <wrl/client.h>
 
 // MOUSEEVENTF_HWHEEL is Vista+ (winuser.h). The legacy/XP toolchain
 // (v141_xp + the v7.1A-era SDK) predates it, so define it numerically here —
@@ -153,6 +157,11 @@ namespace remote_hands::input_verbs {
 // registry.cpp / file.cpp.
 using wire::SchemaArgs;
 using wire::invalid_args;
+
+// R5: ComPtr is used both inside the anon namespace (helpers) and at file
+// scope (the click handler's hit_elem local). The using declaration lives
+// here at the verb namespace so it is visible to both.
+using Microsoft::WRL::ComPtr;
 
 namespace {
 
@@ -392,6 +401,140 @@ void append_actual_position(std::string& out, int x, int y) {
     out += '}';
 }
 
+// ---------------------------------------------------------------------------
+// R5 — UIA hit-test helpers (input.mouse.click).
+//
+// The role / name / flags / bounds extraction mirrors element.cpp's anon-
+// namespace helpers (a small subset is duplicated here rather than promoting
+// them to a shared header — see the task's "Files affected" constraint; the
+// canonical implementations remain in element.cpp). Behaviour MUST match.
+
+const char* role_token_for(LONG control_type) {
+    switch (control_type) {
+        case UIA_ButtonControlTypeId:        return "button";
+        case UIA_CalendarControlTypeId:      return "calendar";
+        case UIA_CheckBoxControlTypeId:      return "checkbox";
+        case UIA_ComboBoxControlTypeId:      return "combobox";
+        case UIA_EditControlTypeId:          return "edit";
+        case UIA_HyperlinkControlTypeId:     return "link";
+        case UIA_ImageControlTypeId:         return "image";
+        case UIA_ListItemControlTypeId:      return "listitem";
+        case UIA_ListControlTypeId:          return "list";
+        case UIA_MenuControlTypeId:          return "menu";
+        case UIA_MenuBarControlTypeId:       return "menubar";
+        case UIA_MenuItemControlTypeId:      return "menuitem";
+        case UIA_ProgressBarControlTypeId:   return "progressbar";
+        case UIA_RadioButtonControlTypeId:   return "radiobutton";
+        case UIA_ScrollBarControlTypeId:     return "scrollbar";
+        case UIA_SliderControlTypeId:        return "slider";
+        case UIA_SpinnerControlTypeId:       return "spinner";
+        case UIA_StatusBarControlTypeId:     return "statusbar";
+        case UIA_TabControlTypeId:           return "tab";
+        case UIA_TabItemControlTypeId:       return "tabitem";
+        case UIA_TextControlTypeId:          return "text";
+        case UIA_ToolBarControlTypeId:       return "toolbar";
+        case UIA_ToolTipControlTypeId:       return "tooltip";
+        case UIA_TreeControlTypeId:          return "tree";
+        case UIA_TreeItemControlTypeId:      return "treeitem";
+        case UIA_CustomControlTypeId:        return "custom";
+        case UIA_GroupControlTypeId:         return "group";
+        case UIA_ThumbControlTypeId:         return "thumb";
+        case UIA_DataGridControlTypeId:      return "datagrid";
+        case UIA_DataItemControlTypeId:      return "dataitem";
+        case UIA_DocumentControlTypeId:      return "document";
+        case UIA_SplitButtonControlTypeId:   return "splitbutton";
+        case UIA_WindowControlTypeId:        return "window";
+        case UIA_PaneControlTypeId:          return "pane";
+        case UIA_HeaderControlTypeId:        return "header";
+        case UIA_HeaderItemControlTypeId:    return "headeritem";
+        case UIA_TableControlTypeId:         return "table";
+        case UIA_TitleBarControlTypeId:      return "titlebar";
+        case UIA_SeparatorControlTypeId:     return "separator";
+        default:                             return "unknown";
+    }
+}
+
+std::string bstr_to_utf8(BSTR b) {
+    if (!b) return {};
+    const UINT wlen = SysStringLen(b);
+    if (wlen == 0) return {};
+    const int u8len = WideCharToMultiByte(
+        CP_UTF8, 0, b, static_cast<int>(wlen), nullptr, 0, nullptr, nullptr);
+    if (u8len <= 0) return {};
+    std::string out(static_cast<std::size_t>(u8len), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, b, static_cast<int>(wlen),
+                        out.data(), u8len, nullptr, nullptr);
+    return out;
+}
+
+std::string uia_element_name(IUIAutomationElement* elem) {
+    BSTR b = nullptr;
+    elem->get_CurrentName(&b);
+    std::string out = bstr_to_utf8(b);
+    if (b) SysFreeString(b);
+    return out;
+}
+
+// Mirrors element.cpp's element_flags() — restricted to the spec
+// x-output-schema flag enum (#92).
+std::vector<std::string> uia_element_flags(IUIAutomationElement* elem) {
+    std::vector<std::string> out;
+    BOOL b = FALSE;
+    if (SUCCEEDED(elem->get_CurrentIsEnabled(&b))        && b) out.emplace_back("enabled");
+    if (SUCCEEDED(elem->get_CurrentHasKeyboardFocus(&b)) && b) out.emplace_back("focused");
+    if (SUCCEEDED(elem->get_CurrentIsOffscreen(&b))      && b) out.emplace_back("offscreen");
+    if (SUCCEEDED(elem->get_CurrentIsPassword(&b))       && b) out.emplace_back("password");
+    if (SUCCEEDED(elem->get_CurrentIsRequiredForForm(&b)) && b) out.emplace_back("required");
+    return out;
+}
+
+// Emits `target_element` as the JSON OBJECT { name, role, flags, bounds }.
+// The leading key is appended by the caller; this writes only the object
+// body. Used by input.mouse.click on the success path (target_element field)
+// AND by the verify_enabled refusal path (same object inside the error
+// detail), so the two shapes match exactly.
+void append_uia_target_element_object(std::string& out,
+                                      IUIAutomationElement* elem) {
+    CONTROLTYPEID ctype = UIA_CustomControlTypeId;
+    elem->get_CurrentControlType(&ctype);
+
+    RECT rc{};
+    elem->get_CurrentBoundingRectangle(&rc);
+
+    out += '{';
+    json::append_kv_string(out, "name", uia_element_name(elem));     out += ',';
+    json::append_kv_string(out, "role", role_token_for(ctype));      out += ',';
+    json::append_string_array(out, "flags", uia_element_flags(elem)); out += ',';
+    json::append_string(out, "bounds");
+    out += ":{";
+    json::append_kv_int(out, "x", rc.left);                  out += ',';
+    json::append_kv_int(out, "y", rc.top);                   out += ',';
+    json::append_kv_int(out, "w", rc.right - rc.left);       out += ',';
+    json::append_kv_int(out, "h", rc.bottom - rc.top);
+    out += "}}";
+}
+
+// Lazily fetches UIA from the connection's ElementTable (same shared
+// singleton element.* uses) and queries ElementFromPoint(x, y). Returns a
+// ComPtr that is non-null only when UIA resolved a control at the point.
+// UIA may be unavailable (legacy build without uiautomationcore.dll
+// registered; pre-Vista host); in that case we return null and the caller
+// continues without a target_element field — consistent with the spec's
+// "omitted/null otherwise" semantics for input.mouse.click target_element.
+ComPtr<IUIAutomationElement> uia_element_from_point(Connection& conn,
+                                                    int x, int y) {
+    ComPtr<IUIAutomationElement> out;
+    IUIAutomation* uia = conn.element_table().uia();
+    if (!uia) return out;
+    POINT pt{ x, y };
+    // ElementFromPoint may legitimately fail (e.g. across an IL barrier) —
+    // a failure or null is treated identically to "no element resolved".
+    if (FAILED(uia->ElementFromPoint(pt, &out))) {
+        out.Reset();
+    }
+    return out;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -477,8 +620,15 @@ void move(Connection& conn, const wire::Request& req) {
 // x-output-schema: {synthesised, target_handle, actual_position:{x,y}}.
 
 void click(Connection& conn, const wire::Request& req) {
+    // R5: `verify_enabled` (boolean, default false) is the agent-side opt-in
+    // pre-check arg. Declared here so SchemaArgs' systemic unknown-flag
+    // rejection (schema_args.hpp) does NOT reject `--verify-enabled` as
+    // unknown. (Schema-side spec PR is a deferred follow-up per the R5 task
+    // brief; the agent is intentionally ahead of the pinned 2.2-rc spec on
+    // this name.)
     SchemaArgs args(req, {"x", "y", "button", "double", "triple", "clicks",
-                          "clicks_interval_ms", "duration_ms", "modifiers"});
+                          "clicks_interval_ms", "duration_ms", "modifiers",
+                          "verify_enabled"});
     if (args.reject_unknown(conn)) return;
 
     auto xv = args.integer32("x");
@@ -600,6 +750,20 @@ void click(Connection& conn, const wire::Request& req) {
     std::vector<WORD> mods;
     if (!resolve_modifiers(conn, args, "input.mouse.click", mods)) return;
 
+    // R5: verify_enabled — when true, hit-test the click coordinate and
+    // refuse if the resolved UIA element is disabled. Default false.
+    bool verify_enabled = false;
+    if (args.present("verify_enabled")) {
+        auto v = args.boolean("verify_enabled");
+        if (!v) {
+            invalid_args(conn,
+                         "input.mouse.click 'verify_enabled' must be a "
+                         "boolean");
+            return;
+        }
+        verify_enabled = *v;
+    }
+
     // UIPI guard before any state change. uipi_blocked is in
     // input.mouse.click.json x-errors.
     if (!uipi::check_foreground_or_fail(conn)) return;
@@ -610,6 +774,38 @@ void click(Connection& conn, const wire::Request& req) {
     int land_x = *xv;
     int land_y = *yv;
     clamp_to_virtual_screen(land_x, land_y);
+
+    // R5: UIA hit-test at the (clamped) click coordinate — same coordinate
+    // space the click uses. Always performed; the resolved element (if any)
+    // feeds both the verify_enabled refusal path AND the success-body
+    // `target_element` field. When ElementFromPoint returns null (e.g. game
+    // canvas, IL barrier, no UIA singleton) we proceed without a target
+    // and emit `target_element: null` per the task brief's "omitted/null
+    // otherwise" guidance.
+    ComPtr<IUIAutomationElement> hit_elem =
+        uia_element_from_point(conn, land_x, land_y);
+
+    if (verify_enabled && hit_elem) {
+        BOOL is_enabled = TRUE;
+        if (SUCCEEDED(hit_elem->get_CurrentIsEnabled(&is_enabled)) &&
+            !is_enabled) {
+            // R5 refusal: same element_disabled discriminator as the
+            // element-handle invoke gate, with the target_element object
+            // (name/role/flags/bounds) carried as a nested object so the
+            // caller can introspect what was rejected. NOT synthesised.
+            std::string detail = "{";
+            json::append_kv_string(detail, "reason", "element_disabled");
+            detail += ',';
+            json::append_string(detail, "target_element");
+            detail += ':';
+            append_uia_target_element_object(detail, hit_elem.Get());
+            detail += '}';
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
+        }
+        // verify_enabled with null hit-test: proceed normally — we cannot
+        // verify, but the caller asked us not to be over-strict.
+    }
 
     auto push_mods_down = [&](std::vector<INPUT>& seq) {
         for (WORD m : mods) {
@@ -744,7 +940,11 @@ void click(Connection& conn, const wire::Request& req) {
     // queue; the UIPI silent-drop post-check already returned ERR
     // uipi_blocked above, so reaching here means accepted -> true),
     // target_handle (WindowFromPoint at the landed position; empty when on
-    // the desktop / outside any window), actual_position (the clamped x/y).
+    // the desktop / outside any window), actual_position (the clamped x/y),
+    // and (R5) target_element — the UIA element resolved at the click
+    // coordinate, or JSON null when ElementFromPoint returned nothing /
+    // UIA is unavailable. target_element is purely informational; existing
+    // {synthesised, target_handle, actual_position} fields are unchanged.
     POINT pt{ land_x, land_y };
     HWND under = WindowFromPoint(pt);
 
@@ -755,6 +955,18 @@ void click(Connection& conn, const wire::Request& req) {
                            under ? hwnd_to_string(under) : std::string());
     body += ',';
     append_actual_position(body, land_x, land_y);
+    body += ',';
+    json::append_string(body, "target_element");
+    body += ':';
+    if (hit_elem) {
+        append_uia_target_element_object(body, hit_elem.Get());
+    } else {
+        // No UIA element resolved at the point: emit JSON null. The task
+        // brief allows either omission OR null; null is chosen as the
+        // idiomatic shape so the field is always structurally present and
+        // downstream tooling can read it unconditionally.
+        body += "null";
+    }
     body += '}';
     conn.writer().write_ok(body);
 }
