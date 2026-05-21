@@ -10,6 +10,7 @@
 
 import Foundation
 import CoreGraphics
+import AppKit
 
 /// The outcome of a verb handler. The connection layer turns this into bytes
 /// on the wire via `formatOK` / `formatERR` and follows it with a state
@@ -128,7 +129,7 @@ public enum VerbTable {
 
         // System power.
         "system.power.blockers":    VerbSpec(tier: .read,        preHelloOK: false),
-        "system.power.lock":        VerbSpec(tier: .read,        preHelloOK: false),
+        "system.power.lock":        VerbSpec(tier: .extraRisky,  preHelloOK: false),
         "system.power.cancel":      VerbSpec(tier: .extraRisky,  preHelloOK: false),
         "system.power.shutdown":    VerbSpec(tier: .extraRisky,  preHelloOK: false),
         "system.power.reboot":      VerbSpec(tier: .extraRisky,  preHelloOK: false),
@@ -160,6 +161,9 @@ public enum VerbTable {
         "directory.create":         VerbSpec(tier: .create, preHelloOK: false),
         "directory.rename":         VerbSpec(tier: .update, preHelloOK: false),
         "directory.remove":         VerbSpec(tier: .delete, preHelloOK: false),
+        // directory.delete is the post-rc.2 canonical name for the same verb;
+        // both ship and route to the same handler.
+        "directory.delete":         VerbSpec(tier: .delete, preHelloOK: false),
 
         // Element (AX) — 7 read + 7 update.
         "element.list":             VerbSpec(tier: .read,   preHelloOK: false),
@@ -235,7 +239,7 @@ public func dispatchVerb(
     case "input.keyboard.key_down": return handleKeyDown(request)
     case "input.keyboard.key_up":   return handleKeyUp(request)
     case "input.keyboard.type":     return handleKeyType(request)
-    case "input.position":          return handleInputPosition()
+    case "input.position":          return handleInputPosition(request)
     case "input.send_message", "input.post_message":
         return .err(code: "not_supported_by_target", detail: ["verb": request.verb])
     case "vision.ocr":            return handleVisionOCR(request)
@@ -283,7 +287,8 @@ public func dispatchVerb(
     case "directory.exists":     return handleDirExists(request)
     case "directory.create":     return handleDirCreate(request)
     case "directory.rename":     return handleDirRename(request)
-    case "directory.remove":     return handleDirRemove(request)
+    case "directory.remove",
+         "directory.delete":     return handleDirRemove(request)
     case "element.list":         return handleElementList(request, table: elementTable)
     case "element.tree":         return handleElementTree(request, table: elementTable)
     case "element.at":           return handleElementAt(request, table: elementTable)
@@ -740,9 +745,29 @@ private func handleKeyType(_ request: WireRequest) -> VerbOutcome {
 
 // MARK: input.position
 
-private func handleInputPosition() -> VerbOutcome {
+private func handleInputPosition(_ request: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
     let p = Input.cursorPosition()
-    let body: [String: Any] = ["x": Int(p.x.rounded()), "y": Int(p.y.rounded())]
+    var body: [String: Any] = ["x": Int(p.x.rounded()), "y": Int(p.y.rounded())]
+    if parsed.flags["include-monitor"] != nil {
+        // Determine which NSScreen contains the cursor. Origin matters:
+        // NSEvent.mouseLocation uses bottom-left, NSScreen.frame uses
+        // bottom-left too, but our `p` here is in CG coords (top-left).
+        // Compare in CG space against converted screen frames.
+        let primaryHeight = NSScreen.main?.frame.height ?? 0
+        var idx = 0
+        for (i, screen) in NSScreen.screens.enumerated() {
+            let f = screen.frame
+            // Convert NSScreen frame (Cocoa, lower-left origin) to CG (top-left).
+            let cgY = primaryHeight - f.origin.y - f.size.height
+            if p.x >= f.origin.x && p.x < f.origin.x + f.size.width &&
+               p.y >= cgY && p.y < cgY + f.size.height {
+                idx = i
+                break
+            }
+        }
+        body["monitor_index"] = idx
+    }
     let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     return .ok(payload: data)
 }
@@ -770,7 +795,12 @@ private func handleWatchRegion(_ r: WireRequest, context: DispatchContext) -> Ve
 
 private func handleWatchWindow(_ r: WireRequest, context: DispatchContext) -> VerbOutcome {
     let parsed = ParsedArgs(r.args)
-    let prefix = parsed.flags["title-prefix"]
+    // --title-prefix is required (post-rc.2). Without it, the subscription
+    // would emit events for every app launch on the system — too noisy and
+    // not what most callers want.
+    guard let prefix = parsed.flags["title-prefix"], !prefix.isEmpty else {
+        return .err(code: "invalid_args", detail: ["message": "watch.window requires --title-prefix"])
+    }
     let id = context.subscriptions.nextSubID()
     let sub = WindowWatchSubscription(id: id, titlePrefix: prefix, send: context.sendEvent)
     context.subscriptions.add(sub)
@@ -852,9 +882,10 @@ private func handleVisionOCR(_ r: WireRequest) -> VerbOutcome {
 // MARK: system.power.*
 
 private func handlePowerBlockers() -> VerbOutcome {
+    // Conformance expects a bare array; the wrapper-object was the old v2.0
+    // shape.
     let blockers = Power.blockers()
-    let body: [String: Any] = ["blockers": blockers.map { $0.jsonObject }]
-    let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    let data = (try? JSONSerialization.data(withJSONObject: blockers.map { $0.jsonObject }, options: [.sortedKeys])) ?? Data()
     return .ok(payload: data)
 }
 
@@ -900,9 +931,11 @@ private func procErrorOutcome(_ e: ProcError) -> VerbOutcome {
 
 private func handleProcessList(_ r: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(r.args)
-    let filter = parsed.flags["filter"]
+    // --pattern is the post-rc.2 canonical name; --filter retained as alias.
+    let filter = parsed.flags["pattern"] ?? parsed.flags["filter"]
+    let includeCounters = parsed.flags["include-counters"] != nil
     let entries = ProcOps.list(filter: filter)
-    let body: [String: Any] = ["processes": entries.map { $0.jsonObject }]
+    let body: [String: Any] = ["processes": entries.map { $0.jsonObject(includeCounters: includeCounters) }]
     let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     return .ok(payload: data)
 }
@@ -1000,10 +1033,30 @@ private func fsErrorOutcome(_ e: FSError) -> VerbOutcome {
 }
 
 private func handleFileCreate(_ r: WireRequest) -> VerbOutcome {
-    guard let path = r.args.first else {
+    // Two arg shapes:
+    //   file.create <path> [<length>]      with optional payload (length=0 OK)
+    //   file.create <path> --content X     content embedded in flag
+    let parsed = ParsedArgs(r.args)
+    guard let path = parsed.positionals.first else {
         return .err(code: "invalid_args", detail: ["message": "file.create requires <path>"])
     }
-    return fsResult({ try FileSystem.createFile(path); return () }, encode: { _ in Data() })
+    let initial: Data
+    if let content = parsed.flags["content"] {
+        initial = Data(content.utf8)
+    } else {
+        initial = r.payload
+    }
+    return fsResult({
+        try FileSystem.createFile(path)
+        if !initial.isEmpty {
+            try FileSystem.writeAt(path, offset: 0, payload: initial, truncate: false)
+        }
+        return ["created": true] as [String: Any]
+    }, encode: encodeJSON)
+}
+
+private func encodeJSON(_ obj: [String: Any]) -> Data {
+    return (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])) ?? Data()
 }
 
 private func handleFileRead(_ r: WireRequest) -> VerbOutcome {
@@ -1014,12 +1067,30 @@ private func handleFileRead(_ r: WireRequest) -> VerbOutcome {
 }
 
 private func handleFileWrite(_ r: WireRequest) -> VerbOutcome {
-    // Grammar: file.write <path> <length>
-    guard r.args.count >= 2 else {
-        return .err(code: "invalid_args", detail: ["message": "file.write requires <path> <length>"])
+    // Grammar: file.write <path> <length>            (with payload)
+    //          file.write <path> --content X         (content in flag form)
+    // file.write is U-tier — it overwrites an existing file; it does NOT
+    // create. Missing target → not_found (use file.create).
+    let parsed = ParsedArgs(r.args)
+    guard let path = parsed.positionals.first else {
+        return .err(code: "invalid_args", detail: ["message": "file.write requires <path>"])
     }
-    let path = r.args[0]
-    return fsResult({ try FileSystem.writeFile(path, payload: r.payload); return () }, encode: { _ in Data() })
+    let payload: Data
+    if let content = parsed.flags["content"] {
+        payload = Data(content.utf8)
+    } else {
+        payload = r.payload
+    }
+    return fsResult({
+        // Pre-flight: ensure the file exists. writeFile would create it
+        // otherwise, which is file.create's job.
+        let (exists, type) = FileSystem.exists(path)
+        if !exists || type != .file {
+            throw FSError.notFound
+        }
+        try FileSystem.writeFile(path, payload: payload)
+        return ["written": true, "bytes": payload.count] as [String: Any]
+    }, encode: encodeJSON)
 }
 
 private func handleFileWriteAt(_ r: WireRequest) -> VerbOutcome {
@@ -1063,8 +1134,8 @@ private func handleFileRename(_ r: WireRequest) -> VerbOutcome {
     return fsResult({
         try FileSystem.rename(src: parsed.positionals[0], dst: parsed.positionals[1],
                               overwrite: overwrite, allowCrossFS: crossfs)
-        return ()
-    }, encode: { _ in Data() })
+        return ["renamed": true] as [String: Any]
+    }, encode: encodeJSON)
 }
 
 private func handleFileStat(_ r: WireRequest) -> VerbOutcome {
@@ -1147,7 +1218,10 @@ private func handleDirCreate(_ r: WireRequest) -> VerbOutcome {
         return .err(code: "invalid_args", detail: ["message": "directory.create requires <path>"])
     }
     let parents = parsed.flags["parents"] != nil
-    return fsResult({ try FileSystem.createDirectory(path, withParents: parents); return () }, encode: { _ in Data() })
+    return fsResult({
+        try FileSystem.createDirectory(path, withParents: parents)
+        return ["created": true] as [String: Any]
+    }, encode: encodeJSON)
 }
 
 private func handleDirRename(_ r: WireRequest) -> VerbOutcome {
@@ -1160,8 +1234,8 @@ private func handleDirRename(_ r: WireRequest) -> VerbOutcome {
     return fsResult({
         try FileSystem.rename(src: parsed.positionals[0], dst: parsed.positionals[1],
                               overwrite: overwrite, allowCrossFS: crossfs)
-        return ()
-    }, encode: { _ in Data() })
+        return ["renamed": true] as [String: Any]
+    }, encode: encodeJSON)
 }
 
 private func handleDirRemove(_ r: WireRequest) -> VerbOutcome {
@@ -1209,8 +1283,8 @@ private func elementErrorOutcome(_ e: ElementError) -> VerbOutcome {
 }
 
 private func encodeSnapshots(_ snaps: [Element.Snapshot]) -> Data {
-    let body: [String: Any] = ["elements": snaps.map { $0.jsonObject }]
-    return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    // Bare array per the post-rc.2 shape (same as window.list, etc.).
+    return (try? JSONSerialization.data(withJSONObject: snaps.map { $0.jsonObject }, options: [.sortedKeys])) ?? Data()
 }
 
 private func encodeSnapshot(_ snap: Element.Snapshot) -> Data {

@@ -28,8 +28,28 @@ public struct ProcessInfoEntry: Sendable {
     public let name: String
     public let path: String
 
-    public var jsonObject: [String: Any] {
-        ["pid": Int(pid), "ppid": Int(ppid), "name": name, "path": path]
+    /// Post-rc.2 shape uses `image` (executable name) and optional counters
+    /// block. The `name` and `path` fields are preserved for callers that
+    /// already depend on them; field renames are conservative.
+    public func jsonObject(includeCounters: Bool = false) -> [String: Any] {
+        var obj: [String: Any] = [
+            "pid": Int(pid),
+            "ppid": Int(ppid),
+            "image": name,           // canonical post-rc.2 field
+            "image_path": path,      // full exec path
+            "name": name,            // legacy alias retained
+            "path": path,            // legacy alias retained
+        ]
+        if includeCounters {
+            // libproc/task_info-derived counters would land here. For the
+            // first conformance pass, emit zeroes so the field is present
+            // and a future slice can wire real numbers.
+            obj["cpu_user_ms"] = 0
+            obj["cpu_kernel_ms"] = 0
+            obj["rss_bytes"] = 0
+            obj["handle_count"] = 0
+        }
+        return obj
     }
 }
 

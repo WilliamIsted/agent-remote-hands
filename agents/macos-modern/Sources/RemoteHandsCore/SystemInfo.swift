@@ -82,10 +82,15 @@ private func currentArchString() -> String {
 }
 
 private func screens() -> [[String: Any]] {
+    // The primary display is the first entry in NSScreen.screens — it's
+    // the one with origin at (0, 0) in the global coordinate space, and
+    // also conventionally the one carrying the menu bar.
+    let mainScreen = NSScreen.main
     return NSScreen.screens.enumerated().map { idx, screen in
         let f = screen.frame
         return [
             "index": idx,
+            "primary": screen == mainScreen,
             "bounds": [
                 "x": Int(f.origin.x),
                 "y": Int(f.origin.y),
