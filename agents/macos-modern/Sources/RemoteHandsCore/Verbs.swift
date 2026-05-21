@@ -78,9 +78,17 @@ public enum VerbTable {
         // Clipboard — get is read, set is update and consumes a payload.
         "clipboard.get":         VerbSpec(tier: .read,   preHelloOK: false),
         "clipboard.set":         VerbSpec(tier: .update, preHelloOK: false, consumesPayload: true),
+
+        // Window — list/find/state are read; focus/close/move are update.
+        "window.list":           VerbSpec(tier: .read,   preHelloOK: false),
+        "window.find":           VerbSpec(tier: .read,   preHelloOK: false),
+        "window.state":          VerbSpec(tier: .read,   preHelloOK: false),
+        "window.focus":          VerbSpec(tier: .update, preHelloOK: false),
+        "window.close":          VerbSpec(tier: .update, preHelloOK: false),
+        "window.move":           VerbSpec(tier: .update, preHelloOK: false),
     ]
 
-    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard"]
+    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window"]
     public static let implementedVerbs: [String] = Array(specs.keys)
 }
 
@@ -119,6 +127,12 @@ public func dispatchVerb(
     case "screen.capture":     return handleScreenCapture(request)
     case "clipboard.get":      return handleClipboardGet()
     case "clipboard.set":      return handleClipboardSet(request)
+    case "window.list":        return handleWindowList(request)
+    case "window.find":        return handleWindowFind(request)
+    case "window.focus":       return handleWindowFocus(request)
+    case "window.close":       return handleWindowClose(request)
+    case "window.move":        return handleWindowMove(request)
+    case "window.state":       return handleWindowState(request)
     default:
         // Unreachable — VerbTable.specs guard covers everything above.
         return .err(code: "internal_error", detail: ["verb": request.verb])
@@ -287,5 +301,108 @@ private func handleClipboardSet(_ request: WireRequest) -> VerbOutcome {
         return .ok(payload: Data())
     } catch {
         return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
+}
+
+// MARK: window.*
+
+private func handleWindowList(_ request: WireRequest) -> VerbOutcome {
+    let args = ParsedArgs(request.args)
+    let filter = args.flags["filter"]
+    let includeAll = args.flags["all"] != nil
+    let windows = Window.list(filter: filter, includeAll: includeAll)
+    let body: [String: Any] = ["windows": windows.map { $0.jsonObject }]
+    guard let data = try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]) else {
+        return .err(code: "internal_error", detail: ["message": "window.list JSON encoding failed"])
+    }
+    return .ok(payload: data)
+}
+
+private func handleWindowFind(_ request: WireRequest) -> VerbOutcome {
+    guard let pattern = request.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "window.find requires a title pattern"])
+    }
+    do {
+        let w = try Window.find(pattern: pattern)
+        let data = (try? JSONSerialization.data(withJSONObject: w.jsonObject, options: [.sortedKeys])) ?? Data()
+        return .ok(payload: data)
+    } catch WindowError.notFound {
+        return .err(code: "not_found", detail: ["message": "no window matched pattern \"\(pattern)\""])
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
+}
+
+private func handleWindowFocus(_ request: WireRequest) -> VerbOutcome {
+    guard let id = request.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "window.focus requires <id>"])
+    }
+    return windowActionResult { try Window.focus(idStr: id) }
+}
+
+private func handleWindowClose(_ request: WireRequest) -> VerbOutcome {
+    guard let id = request.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "window.close requires <id>"])
+    }
+    return windowActionResult { try Window.close(idStr: id) }
+}
+
+private func handleWindowMove(_ request: WireRequest) -> VerbOutcome {
+    // Grammar: window.move <id> <x> <y> <w> <h>
+    guard request.args.count >= 5 else {
+        return .err(code: "invalid_args", detail: ["message": "window.move requires <id> <x> <y> <w> <h>"])
+    }
+    let id = request.args[0]
+    guard let x = Int(request.args[1]),
+          let y = Int(request.args[2]),
+          let w = Int(request.args[3]),
+          let h = Int(request.args[4]) else {
+        return .err(code: "invalid_args", detail: ["message": "x/y/w/h must be integers"])
+    }
+    let rect = CGRect(x: x, y: y, width: w, height: h)
+    return windowActionResult { try Window.move(idStr: id, to: rect) }
+}
+
+private func handleWindowState(_ request: WireRequest) -> VerbOutcome {
+    guard let id = request.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "window.state requires <id>"])
+    }
+    do {
+        let s = try Window.state(idStr: id)
+        let data = (try? JSONSerialization.data(withJSONObject: ["state": s], options: [.sortedKeys])) ?? Data()
+        return .ok(payload: data)
+    } catch let e as WindowError {
+        return windowErrorOutcome(e)
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
+}
+
+private func windowActionResult(_ op: () throws -> Void) -> VerbOutcome {
+    do {
+        try op()
+        return .ok(payload: Data())
+    } catch let e as WindowError {
+        return windowErrorOutcome(e)
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
+}
+
+private func windowErrorOutcome(_ e: WindowError) -> VerbOutcome {
+    switch e {
+    case .invalidId(let s):
+        return .err(code: "invalid_args", detail: ["message": "expected mac:<n>, got \"\(s)\""])
+    case .notFound:
+        return .err(code: "not_found", detail: [:])
+    case .axDisabled:
+        return .err(code: "permission_denied", detail: [
+            "category": "accessibility",
+            "hint": "Grant in System Settings → Privacy & Security → Accessibility, then restart the agent",
+        ])
+    case .axError(let m):
+        return .err(code: "ax_error", detail: ["message": m])
+    case .readonly(let m):
+        return .err(code: "readonly", detail: ["message": m])
     }
 }

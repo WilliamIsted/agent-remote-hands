@@ -59,7 +59,7 @@ public func systemInfoBody(currentTier: Tier, implementedNamespaces: [String], i
             "implemented_verbs": implementedVerbs.sorted(),
             "tcc": [
                 "screen_recording": ScreenCapture.hasScreenRecordingPermission() ? "granted" : "denied",
-                "accessibility": "unknown",      // probed once AX verbs land
+                "accessibility": Window.hasAccessibilityPermission() ? "granted" : "denied",
                 "input_monitoring": "unknown",   // probed once input.* lands
             ] as [String: String],
         ] as [String: Any],
