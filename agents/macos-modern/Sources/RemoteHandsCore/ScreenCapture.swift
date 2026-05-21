@@ -11,7 +11,9 @@
 import Foundation
 import CoreGraphics
 import ImageIO
-import ScreenCaptureKit
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// Supported screen-capture output formats on this family.
 ///
@@ -43,17 +45,29 @@ public enum CaptureError: Error, Equatable {
     case permissionDenied
     /// Format not implemented on this family (currently: webp).
     case unsupportedFormat(String)
-    /// ScreenCaptureKit / ImageIO returned an error. Detail string is
-    /// included for logging.
+    /// CoreGraphics / ImageIO returned an error. Detail string is included
+    /// for logging.
     case captureFailed(String)
 }
 
 /// Screen-capture entry points.
 ///
-/// MVP slice uses `SCScreenshotManager.captureImage` (Sonoma 14+). The
-/// Ventura 13 fallback via `SCStream` is omitted — it would require an
-/// async stream wrapper and frame-delivery callbacks, and Ventura support
-/// can be re-added in a later slice if needed.
+/// Capture uses `CGDisplayCreateImage` — a synchronous CoreGraphics call
+/// that grabs the display framebuffer directly. Two other paths were tried
+/// and rejected:
+///
+/// - **ScreenCaptureKit** (`SCShareableContent` / `SCStream`): its async
+///   machinery requires a running main run loop, which this headless
+///   wire-protocol server does not provide — the first SCK call hangs
+///   indefinitely.
+/// - **`CGWindowListCreateImage`**: returns `nil` in this process context
+///   (it composites the window list, a path that fails outside a normal
+///   GUI app). `CGDisplayCreateImage` grabs the framebuffer instead and
+///   works — the same path Apple's `screencapture(1)` uses.
+///
+/// `CGDisplayCreateImage` was deprecated in Sequoia 15 and is absent from
+/// the macOS 26 SDK headers, but remains in the runtime dylib on every
+/// macOS this agent targets, so it is resolved via `dlsym` at first use.
 public enum ScreenCapture {
 
     /// Capture the entire main display and encode in the requested format.
@@ -61,7 +75,7 @@ public enum ScreenCapture {
     /// slices; current behaviour is "primary display, full bounds".
     public static func captureFullScreen(format: CaptureFormat, quality: Int) throws -> Data {
         try probeTCC()
-        let image = try captureSCSync()
+        let image = try captureMainDisplay()
         return try encode(image, format: format, quality: Double(quality) / 100.0)
     }
 
@@ -80,33 +94,36 @@ public enum ScreenCapture {
         }
     }
 
-    /// Synchronous bridge to ScreenCaptureKit's async one-shot. The verb
-    /// dispatcher is called from a per-connection dispatch queue (sync
-    /// world); ScreenCaptureKit is async-only. `runBlocking` (see
-    /// `Async.swift`) is the shared bridge pattern.
-    private static func captureSCSync() throws -> CGImage {
-        return try runBlocking {
-            let content = try await SCShareableContent.excludingDesktopWindows(
-                false,
-                onScreenWindowsOnly: true
-            )
-            guard let display = content.displays.first else {
-                throw CaptureError.captureFailed("no displays available")
-            }
-            let filter = SCContentFilter(display: display, excludingWindows: [])
-            let config = SCStreamConfiguration()
-            // Capture at the display's pixel-accurate size. SCDisplay
-            // .width/.height are in points; scale up by the backing factor
-            // so Retina capture isn't downsampled.
-            let scale = CGFloat(filter.pointPixelScale)
-            config.width = Int(filter.contentRect.width * scale)
-            config.height = Int(filter.contentRect.height * scale)
-            config.showsCursor = false
-            return try await SCScreenshotManager.captureImage(
-                contentFilter: filter,
-                configuration: config
-            )
+    /// C signature of `CGDisplayCreateImage(CGDirectDisplayID) -> CGImageRef`.
+    /// `CGDirectDisplayID` is a `UInt32`. It is a "Create" function
+    /// (returns a +1 reference), hence the `Unmanaged` return.
+    private typealias CGDisplayCreateImageFn =
+        @convention(c) (UInt32) -> Unmanaged<CGImage>?
+
+    /// `CGDisplayCreateImage`, resolved once by symbol name. Absent from
+    /// the macOS 26 build SDK but present in every macOS runtime this agent
+    /// targets. `nil` only if a future macOS removes it from the runtime
+    /// too — in which case capture fails cleanly rather than crashing.
+    private static let displayCreateImage: CGDisplayCreateImageFn? = {
+        guard let handle = dlopen(
+                  "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+                  RTLD_NOW),
+              let symbol = dlsym(handle, "CGDisplayCreateImage")
+        else {
+            return nil
         }
+        return unsafeBitCast(symbol, to: CGDisplayCreateImageFn.self)
+    }()
+
+    /// Capture the main display at full backing-pixel resolution.
+    private static func captureMainDisplay() throws -> CGImage {
+        guard let displayCreateImage = displayCreateImage else {
+            throw CaptureError.captureFailed("CGDisplayCreateImage unavailable on this system")
+        }
+        guard let image = displayCreateImage(CGMainDisplayID())?.takeRetainedValue() else {
+            throw CaptureError.captureFailed("CGDisplayCreateImage returned nil")
+        }
+        return image
     }
 
     private static func encode(_ image: CGImage, format: CaptureFormat, quality: Double) throws -> Data {
@@ -126,4 +143,3 @@ public enum ScreenCapture {
         return Data(referencing: buffer)
     }
 }
-
