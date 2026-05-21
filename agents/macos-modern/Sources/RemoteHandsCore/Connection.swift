@@ -27,7 +27,7 @@ public final class ConnectionSession {
     private let fd: Int32
     private var state: ConnectionState = .preHello
     private var tier: Tier = .read
-    private var buffer = Data()
+    private let frameReader: FrameReader
     private let label: String
     private let logger: (String) -> Void
 
@@ -35,6 +35,9 @@ public final class ConnectionSession {
         self.fd = fd
         self.label = label
         self.logger = logger
+        self.frameReader = FrameReader { verb in
+            VerbTable.specs[verb]?.consumesPayload ?? false
+        }
     }
 
     /// Run the read loop until the socket closes or the peer sends
@@ -57,58 +60,26 @@ public final class ConnectionSession {
                 // 0 = peer EOF; <0 = error. Either way: end.
                 return
             }
-            buffer.append(contentsOf: readBuf[0..<n])
+            frameReader.append(Array(readBuf[0..<n]))
 
-            while tryProcessFrame() {
-                if state == .closed { return }
+            // Drain as many complete frames as the buffer holds. `nextFrame`
+            // returns `.incomplete` when more bytes are needed; we stop and
+            // wait for the next read.
+            drainLoop: while true {
+                let result = frameReader.nextFrame()
+                switch result {
+                case .incomplete:
+                    break drainLoop
+                case .headerTooLong:
+                    sendErr(code: "header_too_long")
+                case .parseError(let code, let detail):
+                    sendErr(code: code, detail: detail)
+                case .ok(let request):
+                    process(request: request)
+                    if state == .closed { return }
+                }
             }
         }
-    }
-
-    /// Try to extract one frame from the buffer. Returns true if a frame was
-    /// processed (caller should loop), false if more bytes are needed.
-    private func tryProcessFrame() -> Bool {
-        // Find the terminating \n.
-        guard let nlIdx = buffer.firstIndex(of: 0x0A) else { return false }
-
-        if nlIdx > wireHeaderMaxBytes {
-            sendErr(code: "header_too_long")
-            // Drop buffer up through the \n so we resync.
-            buffer.removeSubrange(0...nlIdx)
-            return true
-        }
-
-        // Slice off the header (without \n, and without optional trailing \r).
-        var headerEnd = nlIdx
-        if headerEnd > 0 && buffer[headerEnd - 1] == 0x0D { headerEnd -= 1 }
-        let headerBytes = buffer[0..<headerEnd]
-        let lineStr = String(decoding: headerBytes, as: UTF8.self)
-
-        let verb: String
-        let args: [String]
-        do {
-            (verb, args) = try parseWireHeader(lineStr)
-        } catch let err as WireParseError {
-            sendErr(code: errorCode(for: err))
-            buffer.removeSubrange(0...nlIdx)
-            return true
-        } catch {
-            sendErr(code: "invalid_args")
-            buffer.removeSubrange(0...nlIdx)
-            return true
-        }
-
-        // Decide whether to consume a trailing payload. The MVP slice has no
-        // verbs with a payload argument; `clipboard.set` / `file.write` etc.
-        // will set their last-arg-is-length convention when they land.
-        let payload = Data()  // no MVP verb consumes a payload yet
-
-        // Consume the framed bytes from the buffer.
-        buffer.removeSubrange(0...nlIdx)
-
-        let request = WireRequest(verb: verb, args: args, payload: payload)
-        process(request: request)
-        return true
     }
 
     private func process(request: WireRequest) {
@@ -168,15 +139,6 @@ public final class ConnectionSession {
                 p = p.advanced(by: n)
                 remaining -= n
             }
-        }
-    }
-
-    private func errorCode(for err: WireParseError) -> String {
-        switch err {
-        case .unmatchedQuote:   return "invalid_args"
-        case .headerTooLong:    return "header_too_long"
-        case .emptyHeader:      return "invalid_args"
-        case .invalidLength:    return "invalid_args"
         }
     }
 }

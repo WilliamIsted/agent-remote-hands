@@ -90,21 +90,36 @@ func exitUsage(_ message: String) -> Never {
 // load on the underlying word — fine for this MVP.
 nonisolated(unsafe) var shutdownFlag: Int32 = 0
 
+// libc's `signal()` installs handlers with SA_RESTART by default on Darwin,
+// so a blocked `accept(2)` resumes after the signal handler returns instead
+// of failing with EINTR — which means SIGTERM doesn't actually stop the
+// accept loop until a connection happens to arrive. We use `sigaction(2)`
+// with `sa_flags = 0` (no SA_RESTART) so signals interrupt the syscall and
+// the loop can check `shutdownFlag` promptly.
+
+private let shutdownHandler: @convention(c) (Int32) -> Void = { _ in
+    shutdownFlag = 1
+    let msg = "\nshutdown requested\n"
+    msg.withCString { ptr in
+        _ = Darwin.write(2, ptr, strlen(ptr))
+    }
+}
+
 func installSignalHandlers() {
-    signal(SIGINT) { _ in
-        shutdownFlag = 1
-        // Print a newline so the next log line isn't appended after `^C`.
-        let msg = "\nshutdown requested\n"
-        msg.withCString { ptr in
-            _ = Darwin.write(2, ptr, strlen(ptr))
-        }
-    }
-    signal(SIGTERM) { _ in
-        shutdownFlag = 1
-    }
-    // Ignore SIGPIPE — peer dropping mid-write should produce EPIPE on the
-    // write() return path, not kill the process.
-    signal(SIGPIPE, SIG_IGN)
+    var act = sigaction()
+    act.__sigaction_u.__sa_handler = shutdownHandler
+    act.sa_flags = 0
+    sigemptyset(&act.sa_mask)
+    sigaction(SIGINT, &act, nil)
+    sigaction(SIGTERM, &act, nil)
+
+    // Ignore SIGPIPE so peer-dropped writes surface as EPIPE on the return
+    // path rather than killing the process.
+    var ignore = sigaction()
+    ignore.__sigaction_u.__sa_handler = SIG_IGN
+    ignore.sa_flags = 0
+    sigemptyset(&ignore.sa_mask)
+    sigaction(SIGPIPE, &ignore, nil)
 }
 
 // MARK: bootstrap

@@ -24,13 +24,25 @@ public enum VerbOutcome: Sendable {
     case okWithTierChange(newTier: Tier, payload: Data)
 }
 
-/// The information the dispatcher needs about each verb: required tier and
-/// whether it's valid only before / only after hello.
+/// The information the dispatcher needs about each verb: required tier,
+/// payload consumption, and whether it's valid pre-hello.
 public struct VerbSpec: Sendable {
     public let tier: Tier
     /// True for verbs callable before `connection.hello` (only hello and
     /// close qualify). All other verbs require state == connected.
     public let preHelloOK: Bool
+    /// True for verbs whose grammar includes a final `<length>` argument
+    /// followed by exactly that many opaque payload bytes on the wire
+    /// (PROTOCOL.md §1.2). The framing layer reads the payload before the
+    /// verb handler is invoked; the handler receives it in
+    /// `WireRequest.payload`.
+    public let consumesPayload: Bool
+
+    public init(tier: Tier, preHelloOK: Bool = false, consumesPayload: Bool = false) {
+        self.tier = tier
+        self.preHelloOK = preHelloOK
+        self.consumesPayload = consumesPayload
+    }
 }
 
 /// Convenience: convert `[String: String]` detail to `[String: Any]` for the

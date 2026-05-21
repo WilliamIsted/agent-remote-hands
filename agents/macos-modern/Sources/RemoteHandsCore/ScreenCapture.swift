@@ -82,53 +82,30 @@ public enum ScreenCapture {
 
     /// Synchronous bridge to ScreenCaptureKit's async one-shot. The verb
     /// dispatcher is called from a per-connection dispatch queue (sync
-    /// world); ScreenCaptureKit is async-only. Bridging via Task.detached +
-    /// DispatchSemaphore is the standard pattern; the box is `@unchecked
-    /// Sendable` because the only writes happen inside the Task and the
-    /// only read happens after `wait()`, with no overlap.
+    /// world); ScreenCaptureKit is async-only. `runBlocking` (see
+    /// `Async.swift`) is the shared bridge pattern.
     private static func captureSCSync() throws -> CGImage {
-        let box = ResultBox<CGImage>()
-        let sem = DispatchSemaphore(value: 0)
-
-        Task.detached {
-            do {
-                let content = try await SCShareableContent.excludingDesktopWindows(
-                    false,
-                    onScreenWindowsOnly: true
-                )
-                guard let display = content.displays.first else {
-                    box.set(.failure(CaptureError.captureFailed("no displays available")))
-                    sem.signal()
-                    return
-                }
-                let filter = SCContentFilter(display: display, excludingWindows: [])
-                let config = SCStreamConfiguration()
-                // Capture at the display's pixel-accurate size. SCDisplay
-                // .width/.height are in points; scale up by the backing
-                // factor so Retina capture isn't downsampled.
-                let scale = CGFloat(filter.pointPixelScale)
-                config.width = Int(filter.contentRect.width * scale)
-                config.height = Int(filter.contentRect.height * scale)
-                config.showsCursor = false
-                let img = try await SCScreenshotManager.captureImage(
-                    contentFilter: filter,
-                    configuration: config
-                )
-                box.set(.success(img))
-            } catch {
-                box.set(.failure(error))
+        return try runBlocking {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: true
+            )
+            guard let display = content.displays.first else {
+                throw CaptureError.captureFailed("no displays available")
             }
-            sem.signal()
-        }
-
-        sem.wait()
-        switch box.get() {
-        case .success(let img): return img
-        case .failure(let err):
-            if let cap = err as? CaptureError { throw cap }
-            throw CaptureError.captureFailed("\(err)")
-        case .none:
-            throw CaptureError.captureFailed("capture Task completed without result")
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let config = SCStreamConfiguration()
+            // Capture at the display's pixel-accurate size. SCDisplay
+            // .width/.height are in points; scale up by the backing factor
+            // so Retina capture isn't downsampled.
+            let scale = CGFloat(filter.pointPixelScale)
+            config.width = Int(filter.contentRect.width * scale)
+            config.height = Int(filter.contentRect.height * scale)
+            config.showsCursor = false
+            return try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: config
+            )
         }
     }
 
@@ -150,18 +127,3 @@ public enum ScreenCapture {
     }
 }
 
-/// Minimal Sendable-tolerant container for sync↔async bridging.
-private final class ResultBox<T>: @unchecked Sendable {
-    private var value: Result<T, Error>?
-    private let lock = NSLock()
-
-    func set(_ r: Result<T, Error>) {
-        lock.lock(); defer { lock.unlock() }
-        value = r
-    }
-
-    func get() -> Result<T, Error>? {
-        lock.lock(); defer { lock.unlock() }
-        return value
-    }
-}
