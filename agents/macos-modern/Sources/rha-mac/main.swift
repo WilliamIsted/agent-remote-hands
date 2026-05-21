@@ -161,6 +161,11 @@ if cli.allowPowerStateChanges {
     log("system.power.{shutdown,reboot,logoff,sleep,hibernate} are DISABLED (default); pass --allow-power-state-changes to enable")
 }
 
+// Trigger the macOS TCC consent dialogs (Screen Recording, Accessibility,
+// Input Monitoring). macOS shows each only when the permission is
+// undetermined, so in practice this prompts once, on first run.
+Permissions.requestAll(logger: log)
+
 let tokenStore: TokenStore?
 do {
     let store = try TokenStore.initialise()
