@@ -983,6 +983,11 @@ private func fsErrorOutcome(_ e: FSError) -> VerbOutcome {
     case .notADirectory:    return .err(code: "not_a_directory", detail: [:])
     case .notEmpty:         return .err(code: "not_empty", detail: [:])
     case .permissionDenied: return .err(code: "permission_denied", detail: [:])
+    case .protectedPath:
+        return .err(code: "permission_denied", detail: [
+            "category": "protected_path",
+            "hint": "the agent blocks file/directory access to its own token file, keychain, and SSH keys",
+        ])
     case .crossDevice:      return .err(code: "cross_device", detail: ["hint": "use --cross-fs to enable copy-then-remove fallback"])
     case .timeout:          return .err(code: "timeout", detail: [:])
     case .io(let m):        return .err(code: "io_error", detail: ["message": m])

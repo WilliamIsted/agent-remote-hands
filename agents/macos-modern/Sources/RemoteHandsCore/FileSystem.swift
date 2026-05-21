@@ -32,6 +32,10 @@ public enum FSError: Error, Equatable {
     case notADirectory
     case notEmpty
     case permissionDenied
+    /// Path is protected by the agent's FileGuard policy (token file,
+    /// keychain, SSH keys, etc.). Distinct from `permissionDenied` so the
+    /// wire response can report `category: protected_path` to clients.
+    case protectedPath
     case crossDevice
     case timeout
     case io(String)
@@ -71,6 +75,7 @@ public enum FileSystem {
     // MARK: stat / exists
 
     public static func stat(_ path: String) throws -> StatInfo {
+        try FileGuard.ensureAllowed(path)
         var st = Darwin.stat()
         if sysStat(path, &st) != 0 {
             throw errToFSError(errno: errno)
@@ -79,6 +84,12 @@ public enum FileSystem {
     }
 
     public static func exists(_ path: String) -> (exists: Bool, type: FSEntryType?) {
+        // Protected paths report as not-existing rather than denied so a
+        // probing client can't even confirm the file is there. Verb-level
+        // exists handler turns this into the same wire shape as a real
+        // miss — callers needing distinction should use file.stat which
+        // returns ERR permission_denied with category=protected_path.
+        if FileGuard.isProtected(path) { return (false, nil) }
         // Use stat (follows symlinks) so /tmp → /private/tmp resolves to
         // type=directory, not type=symlink. Callers needing symlink
         // detection should use file.stat (which we also use stat() for in
@@ -91,6 +102,7 @@ public enum FileSystem {
     // MARK: file ops
 
     public static func createFile(_ path: String) throws {
+        try FileGuard.ensureAllowed(path)
         let fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
         if fd < 0 {
             throw errToFSError(errno: errno)
@@ -99,6 +111,7 @@ public enum FileSystem {
     }
 
     public static func readFile(_ path: String) throws -> Data {
+        try FileGuard.ensureAllowed(path)
         let url = URL(fileURLWithPath: path)
         do {
             return try Data(contentsOf: url, options: [.mappedIfSafe])
@@ -112,6 +125,7 @@ public enum FileSystem {
     }
 
     public static func writeFile(_ path: String, payload: Data) throws {
+        try FileGuard.ensureAllowed(path)
         let url = URL(fileURLWithPath: path)
         do {
             try payload.write(to: url, options: [.atomic])
@@ -124,6 +138,7 @@ public enum FileSystem {
     }
 
     public static func writeAt(_ path: String, offset: Int64, payload: Data, truncate: Bool = false) throws {
+        try FileGuard.ensureAllowed(path)
         var flags: Int32 = O_WRONLY
         if truncate && offset == 0 { flags |= O_TRUNC }
         let fd = open(path, flags)
@@ -145,6 +160,7 @@ public enum FileSystem {
     }
 
     public static func deleteFile(_ path: String) throws {
+        try FileGuard.ensureAllowed(path)
         if unlink(path) != 0 {
             // unlink fails on directories with EPERM/EISDIR; if it's a dir,
             // try rmdir for empty-directory parity with PROTOCOL.md's
@@ -158,6 +174,11 @@ public enum FileSystem {
     }
 
     public static func rename(src: String, dst: String, overwrite: Bool = false, allowCrossFS: Bool = false) throws {
+        // Both ends of a rename must be allowed — otherwise an attacker
+        // could move the token file out of its protected dir, or write a
+        // chosen file into one.
+        try FileGuard.ensureAllowed(src)
+        try FileGuard.ensureAllowed(dst)
         if !overwrite {
             var st = Darwin.stat()
             if lstat(dst, &st) == 0 { throw FSError.alreadyExists }
@@ -177,6 +198,7 @@ public enum FileSystem {
     }
 
     public static func waitForPath(_ glob: String, intervalMs: Int = 200, deadlineMs: Int) throws -> StatInfo {
+        try FileGuard.ensureAllowed(glob)
         let stop = Double(deadlineMs) / 1000.0
         while Date().timeIntervalSince1970 < stop {
             // Cheap glob: exact-match path is the common case. Future
@@ -190,6 +212,7 @@ public enum FileSystem {
     }
 
     public static func download(url urlStr: String, destination: String) throws -> StatInfo {
+        try FileGuard.ensureAllowed(destination)
         guard let url = URL(string: urlStr) else { throw FSError.io("invalid URL: \(urlStr)") }
         let tmpURL: URL = try runBlocking {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
@@ -232,6 +255,7 @@ public enum FileSystem {
     }
 
     public static func listDirectory(_ path: String) throws -> [DirEntry] {
+        try FileGuard.ensureAllowed(path)
         var st = Darwin.stat()
         if sysStat(path, &st) != 0 { throw errToFSError(errno: errno) }
         if entryType(mode: mode_t(st.st_mode)) != .directory { throw FSError.notADirectory }
@@ -255,12 +279,15 @@ public enum FileSystem {
     }
 
     public static func directoryStat(_ path: String) throws -> (count: Int, mtime: Double) {
+        // listDirectory + stat both call FileGuard internally; no duplicate
+        // check needed here.
         let entries = try listDirectory(path)
         let st = try stat(path)
         return (entries.count, st.mtime)
     }
 
     public static func createDirectory(_ path: String, withParents: Bool = false) throws {
+        try FileGuard.ensureAllowed(path)
         do {
             try fm.createDirectory(atPath: path, withIntermediateDirectories: withParents, attributes: nil)
         } catch let e as NSError {
@@ -274,6 +301,7 @@ public enum FileSystem {
     }
 
     public static func removeDirectory(_ path: String, recursive: Bool) throws {
+        try FileGuard.ensureAllowed(path)
         if !recursive {
             if rmdir(path) != 0 {
                 if errno == ENOTEMPTY { throw FSError.notEmpty }
