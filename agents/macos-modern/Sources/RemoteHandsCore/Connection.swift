@@ -30,6 +30,7 @@ public final class ConnectionSession: @unchecked Sendable {
     private let frameReader: FrameReader
     private let elementTable = ElementTable()
     private let subscriptions = SubscriptionRegistry()
+    private let tokenStore: TokenStore?
     /// Serialises ALL writes to fd — OK/ERR replies from the read loop and
     /// EVENT frames from subscription queues both go through `send()` which
     /// takes this lock.
@@ -37,9 +38,10 @@ public final class ConnectionSession: @unchecked Sendable {
     private let label: String
     private let logger: (String) -> Void
 
-    public init(fd: Int32, label: String, logger: @escaping (String) -> Void) {
+    public init(fd: Int32, label: String, tokenStore: TokenStore?, logger: @escaping (String) -> Void) {
         self.fd = fd
         self.label = label
+        self.tokenStore = tokenStore
         self.logger = logger
         self.frameReader = FrameReader { verb in
             VerbTable.specs[verb]?.consumesPayload ?? false
@@ -107,7 +109,8 @@ public final class ConnectionSession: @unchecked Sendable {
             subscriptions: subscriptions,
             sendEvent: { [weak self] subID, payload in
                 self?.send(formatEvent(subID: subID, payload: payload))
-            }
+            },
+            tokenStore: tokenStore
         )
         let outcome = dispatchVerb(request, context: context)
         switch outcome {

@@ -63,7 +63,8 @@ public final class SubscriptionRegistry: @unchecked Sendable {
 
 /// Context passed through to every verb handler. Holds per-connection state
 /// the dispatcher needs to expose: current tier, element table, the
-/// subscription registry, and the EVENT-frame send callback.
+/// subscription registry, the EVENT-frame send callback, and a process-
+/// wide token store (or nil if tier elevation is unconfigured).
 public struct DispatchContext {
     public let currentTier: Tier
     public let elementTable: ElementTable
@@ -72,14 +73,19 @@ public struct DispatchContext {
     /// connection-level send mutex serialises this against the regular
     /// response writes.
     public let sendEvent: @Sendable (String, Data) -> Void
+    /// The agent's elevation token. `nil` means `connection.tier_raise`
+    /// returns `not_supported_by_target` (used for tests / bootstrap).
+    public let tokenStore: TokenStore?
 
     public init(currentTier: Tier, elementTable: ElementTable,
                 subscriptions: SubscriptionRegistry,
-                sendEvent: @escaping @Sendable (String, Data) -> Void) {
+                sendEvent: @escaping @Sendable (String, Data) -> Void,
+                tokenStore: TokenStore?) {
         self.currentTier = currentTier
         self.elementTable = elementTable
         self.subscriptions = subscriptions
         self.sendEvent = sendEvent
+        self.tokenStore = tokenStore
     }
 }
 

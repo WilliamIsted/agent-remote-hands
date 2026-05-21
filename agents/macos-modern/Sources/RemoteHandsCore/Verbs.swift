@@ -216,7 +216,7 @@ public func dispatchVerb(
     case "connection.hello":   return handleHello(request)
     case "connection.close":   return handleClose(request)
     case "connection.reset":   return handleReset(request)
-    case "connection.tier_raise": return handleTierRaise(request, currentTier: currentTier)
+    case "connection.tier_raise": return handleTierRaise(request, currentTier: currentTier, tokenStore: context.tokenStore)
     case "connection.tier_drop":  return handleTierDrop(request, currentTier: currentTier)
     case "system.info":        return handleSystemInfo(currentTier: currentTier)
     case "system.health":      return handleSystemHealth()
@@ -336,14 +336,26 @@ private func handleReset(_ request: WireRequest) -> VerbOutcome {
     return .ok(payload: Data())
 }
 
-private func handleTierRaise(_ request: WireRequest, currentTier: Tier) -> VerbOutcome {
-    // Token file generation is not yet implemented in the MVP slice. Without
-    // a token file there is no way to elevate; return not_supported_by_target
-    // until the Token module lands.
-    return .err(
-        code: "not_supported_by_target",
-        detail: ["message": "token file not yet implemented in MVP slice"]
-    )
+private func handleTierRaise(_ request: WireRequest, currentTier: Tier, tokenStore: TokenStore?) -> VerbOutcome {
+    // Grammar: connection.tier_raise <tier> <token>
+    guard request.args.count >= 2 else {
+        return .err(code: "invalid_args", detail: ["message": "expected <tier> <token>"])
+    }
+    guard let target = Tier(rawValue: request.args[0]) else {
+        return .err(code: "invalid_args", detail: ["message": "unknown tier \"\(request.args[0])\""])
+    }
+    guard let store = tokenStore else {
+        return .err(code: "not_supported_by_target", detail: ["message": "agent started without token store"])
+    }
+    if !store.matches(request.args[1]) {
+        return .err(code: "auth_failed", detail: ["message": "token mismatch"])
+    }
+    // Token valid — grant requested tier. Per PROTOCOL.md §2.3 the new tier
+    // can be at, above, or below the current tier (this verb is the
+    // elevation primitive; tier_drop is the un-token'd downgrade).
+    let body: [String: String] = ["new_tier": target.rawValue]
+    let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    return .okWithTierChange(newTier: target, payload: data)
 }
 
 private func handleTierDrop(_ request: WireRequest, currentTier: Tier) -> VerbOutcome {

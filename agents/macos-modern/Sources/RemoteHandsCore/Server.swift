@@ -37,13 +37,15 @@ public final class Server {
     private let host: String
     private let port: UInt16
     private let logger: (String) -> Void
+    private let tokenStore: TokenStore?
     private var serverFd: Int32 = -1
     private var connectionCounter: Int = 0
     private let acceptQueue = DispatchQueue(label: "rha-mac.accept")
 
-    public init(host: String, port: UInt16, logger: @escaping (String) -> Void) {
+    public init(host: String, port: UInt16, tokenStore: TokenStore?, logger: @escaping (String) -> Void) {
         self.host = host
         self.port = port
+        self.tokenStore = tokenStore
         self.logger = logger
     }
 
@@ -71,8 +73,9 @@ public final class Server {
             }
             connectionCounter += 1
             let label = "conn-\(connectionCounter)"
+            let store = tokenStore
             DispatchQueue.global(qos: .userInitiated).async { [logger] in
-                let session = ConnectionSession(fd: clientFd, label: label, logger: logger)
+                let session = ConnectionSession(fd: clientFd, label: label, tokenStore: store, logger: logger)
                 session.run()
             }
         }

@@ -134,7 +134,18 @@ func log(_ message: String) {
 }
 
 log("\(AgentIdentity.name) \(AgentIdentity.version) starting (\(AgentIdentity.osFamily))")
-let server = Server(host: cli.host, port: cli.port, logger: log)
+
+let tokenStore: TokenStore?
+do {
+    let store = try TokenStore.initialise()
+    log("token file written to \(store.path) (token rotates on each restart)")
+    tokenStore = store
+} catch {
+    log("token initialisation failed: \(error) — tier_raise will return not_supported_by_target")
+    tokenStore = nil
+}
+
+let server = Server(host: cli.host, port: cli.port, tokenStore: tokenStore, logger: log)
 
 do {
     try server.run(shouldStop: { shutdownFlag != 0 })
