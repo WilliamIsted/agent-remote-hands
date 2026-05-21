@@ -86,9 +86,17 @@ public enum VerbTable {
         "window.focus":          VerbSpec(tier: .update, preHelloOK: false),
         "window.close":          VerbSpec(tier: .update, preHelloOK: false),
         "window.move":           VerbSpec(tier: .update, preHelloOK: false),
+
+        // Mouse input — all update-tier.
+        "input.mouse.click":     VerbSpec(tier: .update, preHelloOK: false),
+        "input.mouse.move":      VerbSpec(tier: .update, preHelloOK: false),
+        "input.mouse.scroll":    VerbSpec(tier: .update, preHelloOK: false),
+        "input.mouse.drag":      VerbSpec(tier: .update, preHelloOK: false),
+        "input.mouse.press":     VerbSpec(tier: .update, preHelloOK: false),
+        "input.mouse.release":   VerbSpec(tier: .update, preHelloOK: false),
     ]
 
-    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window"]
+    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input"]
     public static let implementedVerbs: [String] = Array(specs.keys)
 }
 
@@ -133,6 +141,12 @@ public func dispatchVerb(
     case "window.close":       return handleWindowClose(request)
     case "window.move":        return handleWindowMove(request)
     case "window.state":       return handleWindowState(request)
+    case "input.mouse.click":  return handleMouseClick(request)
+    case "input.mouse.move":   return handleMouseMove(request)
+    case "input.mouse.scroll": return handleMouseScroll(request)
+    case "input.mouse.drag":   return handleMouseDrag(request)
+    case "input.mouse.press":  return handleMousePress(request)
+    case "input.mouse.release":return handleMouseRelease(request)
     default:
         // Unreachable — VerbTable.specs guard covers everything above.
         return .err(code: "internal_error", detail: ["verb": request.verb])
@@ -404,5 +418,102 @@ private func windowErrorOutcome(_ e: WindowError) -> VerbOutcome {
         return .err(code: "ax_error", detail: ["message": m])
     case .readonly(let m):
         return .err(code: "readonly", detail: ["message": m])
+    }
+}
+
+// MARK: input.mouse.*
+
+private func parsePoint(_ args: [String]) -> CGPoint? {
+    guard args.count >= 2, let x = Double(args[0]), let y = Double(args[1]) else { return nil }
+    return CGPoint(x: x, y: y)
+}
+
+private func parseButton(_ flags: [String: String]) throws -> MouseButton {
+    let raw = flags["button"] ?? "left"
+    return try MouseButton(parsing: raw)
+}
+
+private func handleMouseClick(_ request: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard let pt = parsePoint(parsed.positionals) else {
+        return .err(code: "invalid_args", detail: ["message": "expected <x> <y>"])
+    }
+    let clicks = parsed.intFlag("clicks") ?? 1
+    return inputResult {
+        let button = try parseButton(parsed.flags)
+        try Input.click(at: pt, button: button, clicks: clicks)
+    }
+}
+
+private func handleMouseMove(_ request: WireRequest) -> VerbOutcome {
+    guard let pt = parsePoint(ParsedArgs(request.args).positionals) else {
+        return .err(code: "invalid_args", detail: ["message": "expected <x> <y>"])
+    }
+    return inputResult { try Input.move(to: pt) }
+}
+
+private func handleMouseScroll(_ request: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard parsed.positionals.count >= 3,
+          let x = Double(parsed.positionals[0]),
+          let y = Double(parsed.positionals[1]),
+          let notches = Int(parsed.positionals[2]) else {
+        return .err(code: "invalid_args", detail: ["message": "expected <x> <y> <notches>"])
+    }
+    return inputResult { try Input.scroll(at: CGPoint(x: x, y: y), notches: notches) }
+}
+
+private func handleMouseDrag(_ request: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard parsed.positionals.count >= 4,
+          let x1 = Double(parsed.positionals[0]),
+          let y1 = Double(parsed.positionals[1]),
+          let x2 = Double(parsed.positionals[2]),
+          let y2 = Double(parsed.positionals[3]) else {
+        return .err(code: "invalid_args", detail: ["message": "expected <x1> <y1> <x2> <y2>"])
+    }
+    return inputResult {
+        let button = try parseButton(parsed.flags)
+        try Input.drag(from: CGPoint(x: x1, y: y1), to: CGPoint(x: x2, y: y2), button: button)
+    }
+}
+
+private func handleMousePress(_ request: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard let pt = parsePoint(parsed.positionals) else {
+        return .err(code: "invalid_args", detail: ["message": "expected <x> <y>"])
+    }
+    return inputResult {
+        let button = try parseButton(parsed.flags)
+        try Input.press(at: pt, button: button)
+    }
+}
+
+private func handleMouseRelease(_ request: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard let pt = parsePoint(parsed.positionals) else {
+        return .err(code: "invalid_args", detail: ["message": "expected <x> <y>"])
+    }
+    return inputResult {
+        let button = try parseButton(parsed.flags)
+        try Input.release(at: pt, button: button)
+    }
+}
+
+private func inputResult(_ op: () throws -> Void) -> VerbOutcome {
+    do {
+        try op()
+        return .ok(payload: Data())
+    } catch InputError.permissionDenied {
+        return .err(code: "permission_denied", detail: [
+            "category": "input_monitoring",
+            "hint": "Grant in System Settings → Privacy & Security → Input Monitoring, then restart the agent",
+        ])
+    } catch InputError.unknownButton(let b) {
+        return .err(code: "invalid_args", detail: ["message": "unknown button \"\(b)\"; expected left/right/middle"])
+    } catch InputError.eventCreationFailed {
+        return .err(code: "internal_error", detail: ["message": "CGEvent creation failed"])
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
     }
 }

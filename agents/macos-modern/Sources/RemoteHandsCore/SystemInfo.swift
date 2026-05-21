@@ -60,7 +60,7 @@ public func systemInfoBody(currentTier: Tier, implementedNamespaces: [String], i
             "tcc": [
                 "screen_recording": ScreenCapture.hasScreenRecordingPermission() ? "granted" : "denied",
                 "accessibility": Window.hasAccessibilityPermission() ? "granted" : "denied",
-                "input_monitoring": "unknown",   // probed once input.* lands
+                "input_monitoring": Input.hasInputMonitoringPermission() ? "granted" : "denied",
             ] as [String: String],
         ] as [String: Any],
     ]
