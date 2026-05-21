@@ -2,9 +2,9 @@
 
 macOS target for Agent Remote Hands. Implements the v2 wire protocol — see [`PROTOCOL.md`](../../PROTOCOL.md) at the repo root for the canonical spec.
 
-**Status:** Full 88-verb v2.2 wire surface, MCP-stdio framing post-hello, token + tier_raise, subscription mechanism for `watch.*` with EVENT framing, AX + ScreenCaptureKit + CGEvent + NSPasteboard + ImageIO + Vision + FSEvents + IOPMAssertions integrated. **Conformance suite: 101/238 tests pass against the live agent** as of the latest commit; remaining 59 failures + 78 skips are family-specific (see [Known divergences](#known-divergences) below).
+**Status:** Full 88-verb v2.2 wire surface, MCP-stdio framing post-hello, token + tier_raise, subscription mechanism for `watch.*` with EVENT framing, AX + CoreGraphics capture + CGEvent + NSPasteboard + ImageIO + Vision + FSEvents + IOPMAssertions integrated. **Conformance suite: 101/238 tests pass against the live agent** as of the latest commit; remaining 59 failures + 78 skips are family-specific (see [Known divergences](#known-divergences) below).
 
-**Floor:** macOS 14 Sonoma (raised from the planning's Ventura 13 once `CGWindowListCreateImage` proved unavailable in the macOS 26 SDK — `SCScreenshotManager.captureImage` is now the primary capture API and lands at Sonoma).
+**Floor:** macOS 12.3 Monterey — the deliberate target from the floor-tradeoffs analysis (see [`COMPATIBILITY.md`](COMPATIBILITY.md), Big Sur 11 considered and rejected). `screen.capture` uses the synchronous `CGDisplayCreateImage` CoreGraphics path (resolved via `dlsym`); ScreenCaptureKit is not used — its async API hangs without a main run loop, which this headless server does not provide. No single API hard-requires 12.3: the hard technical floor is Swift concurrency (macOS 12.0), and 12.3 is kept as a conservative documented target.
 
 ## Build
 
@@ -92,7 +92,7 @@ All 13 verb namespaces; 82 implementing verbs + 6 stubs = 88 total in `system.ca
 |---|---|
 | `connection.*` (5) | All live; tier_raise uses 256-bit token rotated on each agent restart |
 | `system.*` (12) | info/health/capabilities/verbs live; power.{shutdown,reboot,logoff,hibernate,sleep,lock,blockers} live; power.cancel stub (no --delay timer yet) |
-| `screen.capture` | ScreenCaptureKit primary path; full-screen only. `--region`/`--window`/`--monitor` reserved for follow-up slice |
+| `screen.capture` | `CGDisplayCreateImage` (synchronous CoreGraphics, `dlsym`-resolved); full-screen only. `--region`/`--window`/`--monitor` reserved for follow-up slice |
 | `window.*` (6) | CGWindowList enumeration; AX for focus/close/move/state |
 | `input.mouse.*` (6) | CGEvent + Input Monitoring TCC |
 | `input.keyboard.*` (4) | CGEvent + virtual-key lookup table + Unicode `type` |
