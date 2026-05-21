@@ -32,6 +32,10 @@ import Darwin
 struct CLI {
     var host: String = "127.0.0.1"
     var port: UInt16 = 8765
+    /// Bonjour advertising. Default-on (matches the Windows-modern
+    /// convention from ldoc-104-mdns-default-on-no-discoverable); pass
+    /// --no-discoverable to opt out.
+    var discoverable: Bool = true
 }
 
 func parseArgv(_ argv: [String]) -> CLI {
@@ -49,6 +53,9 @@ func parseArgv(_ argv: [String]) -> CLI {
             guard let p = UInt16(argv[i + 1]) else { exitUsage("--port: invalid value \"\(argv[i + 1])\"") }
             cli.port = p
             i += 2
+        case "--no-discoverable":
+            cli.discoverable = false
+            i += 1
         case "-h", "--help":
             printUsage()
             exit(0)
@@ -68,11 +75,11 @@ func printUsage() {
     \(exe) — Agent Remote Hands, macos-modern family (v\(AgentIdentity.version), protocol \(AgentIdentity.protocolVersion))
 
     Usage:
-      \(exe) [--host <addr>] [--port <n>]
+      \(exe) [--host <addr>] [--port <n>] [--no-discoverable]
       \(exe) --version
       \(exe) --help
 
-    Defaults: --host 127.0.0.1 --port 8765
+    Defaults: --host 127.0.0.1 --port 8765 (Bonjour advertising on)
     """)
 }
 
@@ -145,13 +152,25 @@ do {
     tokenStore = nil
 }
 
+let mdns: MDNSResponder?
+if cli.discoverable {
+    let r = MDNSResponder(port: cli.port, logger: log)
+    r.start()
+    mdns = r
+} else {
+    log("Bonjour advertising disabled (--no-discoverable)")
+    mdns = nil
+}
+
 let server = Server(host: cli.host, port: cli.port, tokenStore: tokenStore, logger: log)
 
 do {
     try server.run(shouldStop: { shutdownFlag != 0 })
 } catch {
     log("server error: \(error)")
+    mdns?.stop()
     exit(1)
 }
 
+mdns?.stop()
 log("shutdown complete")

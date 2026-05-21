@@ -60,7 +60,7 @@ public func systemInfoBody(currentTier: Tier, implementedNamespaces: [String], i
             "capture": "screencapturekit",
             "ui_automation": "ax",
             "image_formats": CaptureFormat.allCases.map { $0.rawValue },
-            "discovery": "none",      // Bonjour lands with mDNS module
+            "discovery": "bonjour",
             "implemented_verbs": implementedVerbs.sorted(),
             "tcc": [
                 "screen_recording": ScreenCapture.hasScreenRecordingPermission() ? "granted" : "denied",
