@@ -110,6 +110,9 @@ public enum VerbTable {
         "input.send_message":       VerbSpec(tier: .update, preHelloOK: false),
         "input.post_message":       VerbSpec(tier: .update, preHelloOK: false),
 
+        // Vision.
+        "vision.ocr":               VerbSpec(tier: .read,        preHelloOK: false, consumesPayload: true),
+
         // System power.
         "system.power.blockers":    VerbSpec(tier: .read,        preHelloOK: false),
         "system.power.lock":        VerbSpec(tier: .read,        preHelloOK: false),
@@ -162,7 +165,7 @@ public enum VerbTable {
         "element.at_invoke":        VerbSpec(tier: .update, preHelloOK: false),
     ]
 
-    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element", "file", "directory", "process"]
+    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element", "file", "directory", "process", "vision"]
     public static let implementedVerbs: [String] = Array(specs.keys)
 }
 
@@ -221,6 +224,7 @@ public func dispatchVerb(
     case "input.position":          return handleInputPosition()
     case "input.send_message", "input.post_message":
         return .err(code: "not_supported_by_target", detail: ["verb": request.verb])
+    case "vision.ocr":            return handleVisionOCR(request)
     case "system.power.blockers": return handlePowerBlockers()
     case "system.power.lock":     return powerResult { try Power.lock() }
     case "system.power.shutdown": return powerResult { try Power.shutdown() }
@@ -695,6 +699,25 @@ private func handleInputPosition() -> VerbOutcome {
     let body: [String: Any] = ["x": Int(p.x.rounded()), "y": Int(p.y.rounded())]
     let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     return .ok(payload: data)
+}
+
+// MARK: vision.ocr
+
+private func handleVisionOCR(_ r: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(r.args)
+    let accurate = parsed.flags["fast"] == nil  // default accurate; --fast for speed
+    do {
+        let observations = try VisionOps.ocr(imageData: r.payload, accurate: accurate)
+        let body: [String: Any] = ["observations": observations.map { $0.jsonObject }]
+        let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+        return .ok(payload: data)
+    } catch VisionError.decodeFailed(let m) {
+        return .err(code: "invalid_args", detail: ["message": "image decode failed: \(m)"])
+    } catch VisionError.ocrFailed(let m) {
+        return .err(code: "ocr_failed", detail: ["message": m])
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
 }
 
 // MARK: system.power.*
