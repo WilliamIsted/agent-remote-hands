@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        Entitlements for the macos-modern agent. Used by Tools/sign-macos-modern.sh
+        when signing with a Developer ID Application certificate under
+        Hardened Runtime.
+
+        Network server: required for the agent's BSD-socket listener on
+        port 8765. Without this, the Hardened Runtime sandbox denies
+        accept(2).
+    -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!--
+        Apple Events automation: needed by system.power.{shutdown,reboot,
+        logoff} which dispatch via osascript → "tell application System
+        Events". First-run prompt asks the user to allow control of
+        System Events.
+    -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+
+    <!--
+        AX accessibility, Screen Recording, and Input Monitoring are NOT
+        entitlements — they're TCC privacy categories that the user grants
+        via System Settings → Privacy & Security. The binary needs to be
+        codesigned with a stable identity so the grant persists across
+        rebuilds; if unsigned (dev mode) the grant is keyed on the binary
+        path + hash and resets on each rebuild.
+    -->
+</dict>
+</plist>

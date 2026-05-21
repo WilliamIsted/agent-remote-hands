@@ -25,12 +25,36 @@ swift build -c release --arch arm64 --arch x86_64
 ## Run
 
 ```bash
-.build/release/rha-mac                 # Default: TCP 8765 on 127.0.0.1
+.build/release/rha-mac                 # Default: TCP 8765 on 127.0.0.1, Bonjour on
 .build/release/rha-mac --port 9000     # Custom port
 .build/release/rha-mac --host 0.0.0.0  # Expose to LAN
+.build/release/rha-mac --no-discoverable  # Don't publish via Bonjour
 ```
 
-The agent does not yet generate a token file or advertise via Bonjour — those land in later slices.
+A fresh token is generated at `~/Library/Application Support/AgentRemoteHands/token` on each start. Use it to elevate from `read` to higher tiers via `connection.tier_raise`.
+
+## Install as a LaunchAgent
+
+For autostart on login, run from a clean shell:
+
+```bash
+Tools/install-macos-modern.sh                          # default port 8765
+Tools/install-macos-modern.sh --port 9000              # custom port
+Tools/install-macos-modern.sh --uninstall              # reverse
+```
+
+The script writes `~/Library/LaunchAgents/me.isted.rha.plist` (LaunchAgent, not LaunchDaemon — needs the user's Aqua session), copies the release binary to `~/Applications/rha-mac/rha-mac`, and `launchctl bootstrap`s it. Stdout/stderr land at `~/Library/Logs/rha-mac.{out,err}.log`. `KeepAlive { Crashed: true }` restarts the agent on crash but not on clean exit.
+
+## Sign + notarise for distribution
+
+```bash
+Tools/sign-macos-modern.sh \
+    --identity "Developer ID Application: <Your Name> (TEAMID)" \
+    --profile NOTARY_PROFILE \
+    --output ./dist/rha-mac.modern.universal2
+```
+
+Requires a Developer ID Application cert in the keychain plus `notarytool` credentials stored via `xcrun notarytool store-credentials`. Builds Universal 2, signs with Hardened Runtime + the [`rha-mac.entitlements`](rha-mac.entitlements) file (`network.server` + `automation.apple-events`), submits to Apple's notary service, and staples the ticket on success.
 
 ## Test
 
