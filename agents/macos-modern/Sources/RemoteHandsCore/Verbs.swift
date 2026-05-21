@@ -110,6 +110,16 @@ public enum VerbTable {
         "input.send_message":       VerbSpec(tier: .update, preHelloOK: false),
         "input.post_message":       VerbSpec(tier: .update, preHelloOK: false),
 
+        // System power.
+        "system.power.blockers":    VerbSpec(tier: .read,        preHelloOK: false),
+        "system.power.lock":        VerbSpec(tier: .read,        preHelloOK: false),
+        "system.power.cancel":      VerbSpec(tier: .extraRisky,  preHelloOK: false),
+        "system.power.shutdown":    VerbSpec(tier: .extraRisky,  preHelloOK: false),
+        "system.power.reboot":      VerbSpec(tier: .extraRisky,  preHelloOK: false),
+        "system.power.logoff":      VerbSpec(tier: .extraRisky,  preHelloOK: false),
+        "system.power.hibernate":   VerbSpec(tier: .extraRisky,  preHelloOK: false),
+        "system.power.sleep":       VerbSpec(tier: .extraRisky,  preHelloOK: false),
+
         // Process.
         "process.list":             VerbSpec(tier: .read,   preHelloOK: false),
         "process.start":            VerbSpec(tier: .create, preHelloOK: false, consumesPayload: true),
@@ -211,6 +221,16 @@ public func dispatchVerb(
     case "input.position":          return handleInputPosition()
     case "input.send_message", "input.post_message":
         return .err(code: "not_supported_by_target", detail: ["verb": request.verb])
+    case "system.power.blockers": return handlePowerBlockers()
+    case "system.power.lock":     return powerResult { try Power.lock() }
+    case "system.power.shutdown": return powerResult { try Power.shutdown() }
+    case "system.power.reboot":   return powerResult { try Power.reboot() }
+    case "system.power.logoff":   return powerResult { try Power.logoff() }
+    case "system.power.hibernate":return powerResult { try Power.hibernate() }
+    case "system.power.sleep":    return powerResult { try Power.sleep() }
+    case "system.power.cancel":
+        // No --delay support implemented yet, so nothing is ever pending.
+        return .err(code: "not_found", detail: ["message": "no pending shutdown"])
     case "process.list":         return handleProcessList(request)
     case "process.start":        return handleProcessStart(request)
     case "process.shell":        return handleProcessShell(request)
@@ -675,6 +695,32 @@ private func handleInputPosition() -> VerbOutcome {
     let body: [String: Any] = ["x": Int(p.x.rounded()), "y": Int(p.y.rounded())]
     let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     return .ok(payload: data)
+}
+
+// MARK: system.power.*
+
+private func handlePowerBlockers() -> VerbOutcome {
+    let blockers = Power.blockers()
+    let body: [String: Any] = ["blockers": blockers.map { $0.jsonObject }]
+    let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    return .ok(payload: data)
+}
+
+private func powerResult(_ op: () throws -> Void) -> VerbOutcome {
+    do {
+        try op()
+        return .ok(payload: Data())
+    } catch PowerError.permissionDenied {
+        return .err(code: "permission_denied", detail: ["category": "apple_events"])
+    } catch PowerError.notFound {
+        return .err(code: "not_found", detail: [:])
+    } catch PowerError.unsupported {
+        return .err(code: "not_supported", detail: [:])
+    } catch PowerError.io(let m) {
+        return .err(code: "io_error", detail: ["message": m])
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
 }
 
 // MARK: process.*
