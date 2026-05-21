@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import CoreGraphics
 
 /// The outcome of a verb handler. The connection layer turns this into bytes
 /// on the wire via `formatOK` / `formatERR` and follows it with a state
@@ -94,6 +95,20 @@ public enum VerbTable {
         "input.mouse.drag":      VerbSpec(tier: .update, preHelloOK: false),
         "input.mouse.press":     VerbSpec(tier: .update, preHelloOK: false),
         "input.mouse.release":   VerbSpec(tier: .update, preHelloOK: false),
+
+        // Keyboard input — all update-tier; type consumes a payload.
+        "input.keyboard.key":       VerbSpec(tier: .update, preHelloOK: false),
+        "input.keyboard.key_down":  VerbSpec(tier: .update, preHelloOK: false),
+        "input.keyboard.key_up":    VerbSpec(tier: .update, preHelloOK: false),
+        "input.keyboard.type":      VerbSpec(tier: .update, preHelloOK: false, consumesPayload: true),
+
+        // Shared input verbs.
+        "input.position":           VerbSpec(tier: .read,   preHelloOK: false),
+        // Windows-only message verbs — Apple Events would be the equivalent
+        // affordance but the wire shape is incompatible. Stubs ensure the
+        // wire surface includes them but always returns not_supported_by_target.
+        "input.send_message":       VerbSpec(tier: .update, preHelloOK: false),
+        "input.post_message":       VerbSpec(tier: .update, preHelloOK: false),
     ]
 
     public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input"]
@@ -147,6 +162,13 @@ public func dispatchVerb(
     case "input.mouse.drag":   return handleMouseDrag(request)
     case "input.mouse.press":  return handleMousePress(request)
     case "input.mouse.release":return handleMouseRelease(request)
+    case "input.keyboard.key":      return handleKeyTap(request)
+    case "input.keyboard.key_down": return handleKeyDown(request)
+    case "input.keyboard.key_up":   return handleKeyUp(request)
+    case "input.keyboard.type":     return handleKeyType(request)
+    case "input.position":          return handleInputPosition()
+    case "input.send_message", "input.post_message":
+        return .err(code: "not_supported_by_target", detail: ["verb": request.verb])
     default:
         // Unreachable — VerbTable.specs guard covers everything above.
         return .err(code: "internal_error", detail: ["verb": request.verb])
@@ -511,9 +533,69 @@ private func inputResult(_ op: () throws -> Void) -> VerbOutcome {
         ])
     } catch InputError.unknownButton(let b) {
         return .err(code: "invalid_args", detail: ["message": "unknown button \"\(b)\"; expected left/right/middle"])
+    } catch InputError.unknownKey(let k) {
+        return .err(code: "invalid_args", detail: ["message": "unknown key \"\(k)\"; see Input.swift KeyName table"])
+    } catch InputError.unknownModifier(let m) {
+        return .err(code: "invalid_args", detail: ["message": "unknown modifier \"\(m)\"; expected cmd/shift/opt/ctrl/fn"])
     } catch InputError.eventCreationFailed {
         return .err(code: "internal_error", detail: ["message": "CGEvent creation failed"])
     } catch {
         return .err(code: "internal_error", detail: ["message": "\(error)"])
     }
+}
+
+// MARK: input.keyboard.*
+
+private func parseModifiers(_ flags: [String: String]) throws -> CGEventFlags {
+    guard let raw = flags["modifiers"] else { return [] }
+    return try Modifier.combinedFlags(from: raw)
+}
+
+private func handleKeyTap(_ request: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard let name = parsed.positionals.first else {
+        return .err(code: "invalid_args", detail: ["message": "input.keyboard.key requires <name>"])
+    }
+    return inputResult {
+        let mods = try parseModifiers(parsed.flags)
+        try Input.keyTap(named: name, modifiers: mods)
+    }
+}
+
+private func handleKeyDown(_ request: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard let name = parsed.positionals.first else {
+        return .err(code: "invalid_args", detail: ["message": "input.keyboard.key_down requires <name>"])
+    }
+    return inputResult {
+        let mods = try parseModifiers(parsed.flags)
+        try Input.keyDown(named: name, modifiers: mods)
+    }
+}
+
+private func handleKeyUp(_ request: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard let name = parsed.positionals.first else {
+        return .err(code: "invalid_args", detail: ["message": "input.keyboard.key_up requires <name>"])
+    }
+    return inputResult {
+        let mods = try parseModifiers(parsed.flags)
+        try Input.keyUp(named: name, modifiers: mods)
+    }
+}
+
+private func handleKeyType(_ request: WireRequest) -> VerbOutcome {
+    guard let text = String(data: request.payload, encoding: .utf8) else {
+        return .err(code: "invalid_args", detail: ["message": "input.keyboard.type payload must be UTF-8"])
+    }
+    return inputResult { try Input.typeText(text) }
+}
+
+// MARK: input.position
+
+private func handleInputPosition() -> VerbOutcome {
+    let p = Input.cursorPosition()
+    let body: [String: Any] = ["x": Int(p.x.rounded()), "y": Int(p.y.rounded())]
+    let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    return .ok(payload: data)
 }
