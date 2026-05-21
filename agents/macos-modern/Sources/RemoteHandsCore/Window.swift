@@ -68,6 +68,19 @@ public enum Window {
     /// Enumerate on-screen windows. Off-screen, desktop-element, and dock
     /// windows are excluded — matches the protocol's "interactable
     /// windows" intent.
+    ///
+    /// Title resolution uses a fallback ladder, since `kCGWindowName` is
+    /// gated by Screen Recording TCC on Sonoma+ and many apps (Terminal,
+    /// SwiftUI, Catalyst) don't reliably populate AXTitle either:
+    ///
+    ///   1. `kCGWindowName` from CGWindowList — fastest, no TCC if it works
+    ///   2. `AXTitle` of the matching AX window (paired by per-pid ordinal)
+    ///   3. `AXDocument` basename (document-based apps)
+    ///   4. `kCGWindowOwnerName` (e.g. "Terminal") as the ultimate non-empty
+    ///      fallback — always available; gives the caller *something*.
+    ///
+    /// The AX step is skipped when Accessibility TCC is denied or no app
+    /// in the list has any empty title (avoiding pointless walks).
     public static func list(filter: String? = nil, includeAll: Bool = false) -> [WindowInfo] {
         var options: CGWindowListOption = [.excludeDesktopElements]
         if !includeAll {
@@ -76,37 +89,109 @@ public enum Window {
         guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
-        var out: [WindowInfo] = []
+
+        // Pass 1: extract raw CG fields. We keep all entries and apply the
+        // --filter step at the end so the filter can match owner-fallback
+        // titles too.
+        struct RawEntry {
+            let id: CGWindowID
+            let pid: pid_t
+            var title: String
+            let owner: String
+            let bounds: CGRect
+            let layer: Int
+        }
+        var rawEntries: [RawEntry] = []
         for entry in raw {
             guard let num = entry[kCGWindowNumber as String] as? UInt32 else { continue }
+            let layer = entry[kCGWindowLayer as String] as? Int ?? 0
+            if !includeAll && layer != 0 { continue }
+            let pid = pid_t(entry[kCGWindowOwnerPID as String] as? Int32 ?? 0)
             let title = (entry[kCGWindowName as String] as? String) ?? ""
-            // window.list defaults to interactable windows — without
-            // Screen Recording TCC, titles are nil for off-process windows
-            // (Sonoma+). Caller filters with --filter once `system.info`
-            // tells them the TCC state.
-            if let f = filter, !globMatch(pattern: f, in: title) {
+            let owner = (entry[kCGWindowOwnerName as String] as? String) ?? ""
+            let bounds = (entry[kCGWindowBounds as String] as? [String: Any]).map(rect(from:)) ?? .zero
+            rawEntries.append(RawEntry(
+                id: num, pid: pid, title: title,
+                owner: owner, bounds: bounds, layer: layer
+            ))
+        }
+
+        // Pass 2: fill empty titles via AX (only if AX TCC granted, only
+        // for pids that have at least one empty title).
+        if AXIsProcessTrustedWithOptions(nil) {
+            let pidsWithEmpty = Set(rawEntries.filter { $0.title.isEmpty }.map { $0.pid })
+            var axTitlesByPID: [pid_t: [String]] = [:]
+            for pid in pidsWithEmpty {
+                axTitlesByPID[pid] = collectAXWindowTitles(pid: pid)
+            }
+            // Walk the CG list in order; for each pid, consume AX titles
+            // by ordinal position. CG and AX orderings don't strictly
+            // match, but for typical apps with 1-3 windows the pairing is
+            // good enough that the caller sees a meaningful title.
+            var consumed: [pid_t: Int] = [:]
+            for i in rawEntries.indices where rawEntries[i].title.isEmpty {
+                let pid = rawEntries[i].pid
+                let idx = consumed[pid, default: 0]
+                if let axList = axTitlesByPID[pid], idx < axList.count, !axList[idx].isEmpty {
+                    rawEntries[i].title = axList[idx]
+                }
+                consumed[pid] = idx + 1
+            }
+        }
+
+        // Pass 3: owner-name fallback for still-empty titles, then --filter,
+        // then emit.
+        var out: [WindowInfo] = []
+        for e in rawEntries {
+            let finalTitle = e.title.isEmpty ? e.owner : e.title
+            if let f = filter,
+               !globMatch(pattern: f, in: finalTitle),
+               !globMatch(pattern: f, in: e.owner) {
                 continue
             }
-            let pid = pid_t(entry[kCGWindowOwnerPID as String] as? Int32 ?? 0)
-            let owner = (entry[kCGWindowOwnerName as String] as? String) ?? ""
-            let layer = entry[kCGWindowLayer as String] as? Int ?? 0
-            // Skip the Dock, status bar, etc. unless includeAll. Layer 0 is
-            // ordinary app windows; non-zero layers are usually system UI.
-            if !includeAll && layer != 0 { continue }
-            let bounds = (entry[kCGWindowBounds as String] as? [String: Any]).map(rect(from:)) ?? .zero
             out.append(WindowInfo(
-                id: num, title: title, pid: pid,
-                owner: owner, bounds: bounds, layer: layer
+                id: e.id, title: finalTitle, pid: e.pid,
+                owner: e.owner, bounds: e.bounds, layer: e.layer
             ))
         }
         return out
     }
 
+    /// Per-pid AX window-title collection. Reads `AXTitle` and falls back
+    /// to `AXDocument` basename. Empty strings mean "no usable AX title"
+    /// — the caller then falls through to owner-name.
+    private static func collectAXWindowTitles(pid: pid_t) -> [String] {
+        let app = AXUIElementCreateApplication(pid)
+        var ref: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &ref)
+        guard err == .success, let windows = ref as? [AXUIElement] else { return [] }
+        return windows.map { w in
+            if let t = axString(w, attribute: kAXTitleAttribute as String), !t.isEmpty {
+                return t
+            }
+            // AXDocument is a path (file:// URL or POSIX). basename it.
+            if let doc = axString(w, attribute: kAXDocumentAttribute as String), !doc.isEmpty {
+                return (doc as NSString).lastPathComponent
+            }
+            return ""
+        }
+    }
+
+    /// Substring-match (case-insensitive) on title OR owner. Substring —
+    /// not glob — because the find-by-partial-name UX is what callers
+    /// actually want ("find me the Terminal window" → matches `"Terminal —
+    /// -zsh — 80x24"`). `window.list --filter` still does glob if a
+    /// caller wants anchored wildcards.
     public static func find(pattern: String) throws -> WindowInfo {
-        for w in list() where globMatch(pattern: pattern, in: w.title) {
-            return w
+        for w in list() {
+            if substringMatch(pattern: pattern, in: w.title) { return w }
+            if substringMatch(pattern: pattern, in: w.owner) { return w }
         }
         throw WindowError.notFound
+    }
+
+    public static func substringMatch(pattern: String, in str: String) -> Bool {
+        return str.range(of: pattern, options: [.caseInsensitive]) != nil
     }
 
     // MARK: AX-driven verbs

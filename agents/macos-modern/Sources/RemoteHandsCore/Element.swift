@@ -85,17 +85,71 @@ public enum Element {
     }
 
     /// Enumerate visible interactable elements in the foreground app.
-    /// `region` (optional) clips to a screen rect.
-    public static func list(table: ElementTable, region: CGRect? = nil, maxResults: Int = 256) throws -> [Snapshot] {
+    /// `region` (optional) clips to a screen rect; `role` (optional) filters
+    /// to that exact `AXRole` value, bypassing the default interactable-set
+    /// (callers that pass `--role AXWindow` want windows, not buttons).
+    public static func list(
+        table: ElementTable,
+        region: CGRect? = nil,
+        role: String? = nil,
+        maxResults: Int = 256
+    ) throws -> [Snapshot] {
         try probeTCC()
         guard let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
             return []
         }
         let app = AXUIElementCreateApplication(frontPID)
+
+        // Fast path: AXWindow is exposed by the application element via
+        // kAXWindowsAttribute. Reading that attribute directly is O(N) in
+        // window count, vs. an exhaustive tree walk that times out on
+        // complex apps (Terminal's scrollback alone has tens of thousands
+        // of AX nodes).
+        if let r = role, r.caseInsensitiveCompare("AXWindow") == .orderedSame {
+            return listAppWindows(app: app, pid: frontPID, region: region,
+                                   maxResults: maxResults, table: table)
+        }
+
+        // Role-filtered walks tighten depth: most targeted roles (AXButton,
+        // AXTextField, AXLink, …) sit within ~6 levels of the app root in
+        // typical Cocoa hierarchies. The depth-16 default was sized for
+        // the unfiltered interactable-set case which terminates quickly
+        // via the result cap. With a narrow role filter the cap may never
+        // hit, so depth-16 turns into a several-second exhaustive walk.
+        let maxDepth = (role != nil) ? 6 : 16
         var out: [Snapshot] = []
-        walk(app, pid: frontPID, depth: 0, maxDepth: 16, table: table, into: &out, filter: { snap in
-            interactableRoles.contains(snap.role) && (region.map { $0.intersects(snap.bounds ?? .null) } ?? true)
+        walk(app, pid: frontPID, depth: 0, maxDepth: maxDepth, table: table, into: &out, filter: { snap in
+            let roleOK: Bool
+            if let role = role {
+                roleOK = snap.role.caseInsensitiveCompare(role) == .orderedSame
+            } else {
+                roleOK = interactableRoles.contains(snap.role)
+            }
+            return roleOK && (region.map { $0.intersects(snap.bounds ?? .null) } ?? true)
         }, cap: maxResults)
+        return out
+    }
+
+    /// AXWindow fast-path. Reads the application's window list directly
+    /// rather than walking the AX tree.
+    private static func listAppWindows(
+        app: AXUIElement, pid: pid_t, region: CGRect?, maxResults: Int, table: ElementTable
+    ) -> [Snapshot] {
+        var ref: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &ref)
+        guard err == .success, let windows = ref as? [AXUIElement] else { return [] }
+        var out: [Snapshot] = []
+        for w in windows {
+            if out.count >= maxResults { break }
+            let snap = snapshot(of: w, pid: pid, depth: 1, table: table)
+            // Some apps (notably Terminal) include non-AXWindow nodes —
+            // AXScrollArea for the scrollback, AXSheet for modal sheets —
+            // in kAXWindowsAttribute. Filter to actual AXWindow for clean
+            // --role AXWindow semantics.
+            if snap.role != "AXWindow" { continue }
+            if let r = region, let b = snap.bounds, !r.intersects(b) { continue }
+            out.append(snap)
+        }
         return out
     }
 

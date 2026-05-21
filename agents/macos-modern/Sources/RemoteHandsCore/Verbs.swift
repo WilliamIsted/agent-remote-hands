@@ -1208,7 +1208,12 @@ private func handleElementList(_ request: WireRequest, table: ElementTable) -> V
             region = CGRect(x: parts[0], y: parts[1], width: parts[2], height: parts[3])
         }
     }
-    return elementResult({ try Element.list(table: table, region: region) }, encode: encodeSnapshots)
+    let role = parsed.flags["role"]            // pass-through; nil = default interactable set
+    let limit = parsed.intFlag("limit") ?? 256
+    return elementResult(
+        { try Element.list(table: table, region: region, role: role, maxResults: limit) },
+        encode: encodeSnapshots
+    )
 }
 
 private func handleElementTree(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
