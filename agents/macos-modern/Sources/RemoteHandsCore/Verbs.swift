@@ -74,9 +74,13 @@ public enum VerbTable {
 
         // Screen capture — read-tier.
         "screen.capture":        VerbSpec(tier: .read, preHelloOK: false),
+
+        // Clipboard — get is read, set is update and consumes a payload.
+        "clipboard.get":         VerbSpec(tier: .read,   preHelloOK: false),
+        "clipboard.set":         VerbSpec(tier: .update, preHelloOK: false, consumesPayload: true),
     ]
 
-    public static let implementedNamespaces: [String] = ["connection", "system", "screen"]
+    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard"]
     public static let implementedVerbs: [String] = Array(specs.keys)
 }
 
@@ -113,6 +117,8 @@ public func dispatchVerb(
     case "system.capabilities": return handleSystemCapabilities()
     case "system.verbs":       return handleSystemVerbs()
     case "screen.capture":     return handleScreenCapture(request)
+    case "clipboard.get":      return handleClipboardGet()
+    case "clipboard.set":      return handleClipboardSet(request)
     default:
         // Unreachable — VerbTable.specs guard covers everything above.
         return .err(code: "internal_error", detail: ["verb": request.verb])
@@ -257,5 +263,29 @@ private func handleScreenCapture(_ request: WireRequest) -> VerbOutcome {
         return .err(code: "capture_failed", detail: ["message": msg])
     } catch {
         return .err(code: "capture_failed", detail: ["message": "\(error)"])
+    }
+}
+
+// MARK: clipboard.*
+
+private func handleClipboardGet() -> VerbOutcome {
+    do {
+        let bytes = try Clipboard.getText()
+        return .ok(payload: bytes)
+    } catch ClipboardError.empty {
+        return .err(code: "clipboard_empty", detail: [:])
+    } catch ClipboardError.formatUnavailable {
+        return .err(code: "clipboard_format_unavailable", detail: [:])
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
+}
+
+private func handleClipboardSet(_ request: WireRequest) -> VerbOutcome {
+    do {
+        try Clipboard.setText(request.payload)
+        return .ok(payload: Data())
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
     }
 }
