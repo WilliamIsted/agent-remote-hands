@@ -110,6 +110,13 @@ public enum VerbTable {
         "input.send_message":       VerbSpec(tier: .update, preHelloOK: false),
         "input.post_message":       VerbSpec(tier: .update, preHelloOK: false),
 
+        // Process.
+        "process.list":             VerbSpec(tier: .read,   preHelloOK: false),
+        "process.start":            VerbSpec(tier: .create, preHelloOK: false, consumesPayload: true),
+        "process.shell":            VerbSpec(tier: .create, preHelloOK: false),
+        "process.kill":             VerbSpec(tier: .delete, preHelloOK: false),
+        "process.wait":             VerbSpec(tier: .read,   preHelloOK: false),
+
         // File + directory.
         "file.create":              VerbSpec(tier: .create, preHelloOK: false),
         "file.read":                VerbSpec(tier: .read,   preHelloOK: false),
@@ -145,7 +152,7 @@ public enum VerbTable {
         "element.at_invoke":        VerbSpec(tier: .update, preHelloOK: false),
     ]
 
-    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element", "file", "directory"]
+    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element", "file", "directory", "process"]
     public static let implementedVerbs: [String] = Array(specs.keys)
 }
 
@@ -204,6 +211,11 @@ public func dispatchVerb(
     case "input.position":          return handleInputPosition()
     case "input.send_message", "input.post_message":
         return .err(code: "not_supported_by_target", detail: ["verb": request.verb])
+    case "process.list":         return handleProcessList(request)
+    case "process.start":        return handleProcessStart(request)
+    case "process.shell":        return handleProcessShell(request)
+    case "process.kill":         return handleProcessKill(request)
+    case "process.wait":         return handleProcessWait(request)
     case "file.create":          return handleFileCreate(request)
     case "file.read":            return handleFileRead(request)
     case "file.write":           return handleFileWrite(request)
@@ -663,6 +675,99 @@ private func handleInputPosition() -> VerbOutcome {
     let body: [String: Any] = ["x": Int(p.x.rounded()), "y": Int(p.y.rounded())]
     let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     return .ok(payload: data)
+}
+
+// MARK: process.*
+
+private func procResult<T>(_ op: () throws -> T, encode: (T) -> Data) -> VerbOutcome {
+    do {
+        let v = try op()
+        return .ok(payload: encode(v))
+    } catch let e as ProcError {
+        return procErrorOutcome(e)
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
+}
+
+private func procErrorOutcome(_ e: ProcError) -> VerbOutcome {
+    switch e {
+    case .notFound:         return .err(code: "not_found", detail: [:])
+    case .permissionDenied: return .err(code: "permission_denied", detail: [:])
+    case .timeout:          return .err(code: "timeout", detail: [:])
+    case .spawnFailed(let m): return .err(code: "spawn_failed", detail: ["message": m])
+    case .io(let m):        return .err(code: "io_error", detail: ["message": m])
+    }
+}
+
+private func handleProcessList(_ r: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(r.args)
+    let filter = parsed.flags["filter"]
+    let entries = ProcOps.list(filter: filter)
+    let body: [String: Any] = ["processes": entries.map { $0.jsonObject }]
+    let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    return .ok(payload: data)
+}
+
+private func handleProcessStart(_ r: WireRequest) -> VerbOutcome {
+    // Grammar: process.start <executable> [args...] [--stdin <length>]
+    // For MVP the executable is positional and remaining positionals are
+    // argv. --stdin presence + non-zero length triggers payload-read; the
+    // stdin payload is in r.payload.
+    let parsed = ParsedArgs(r.args)
+    guard let exe = parsed.positionals.first else {
+        return .err(code: "invalid_args", detail: ["message": "process.start requires <executable>"])
+    }
+    let argv = Array(parsed.positionals.dropFirst())
+    let stdinPayload: Data? = r.payload.isEmpty ? nil : r.payload
+    return procResult({
+        let pid = try ProcOps.start(executable: exe, args: argv, stdinPayload: stdinPayload)
+        return pid
+    }, encode: { pid in
+        let body: [String: Any] = ["pid": Int(pid)]
+        return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    })
+}
+
+private func handleProcessShell(_ r: WireRequest) -> VerbOutcome {
+    // Grammar: process.shell <command-string>  (whole tail is the command;
+    // for now we join positionals with spaces — caller should quote the
+    // command if it has spaces, per wire-format §1.2.5).
+    let parsed = ParsedArgs(r.args)
+    let command = parsed.positionals.joined(separator: " ")
+    guard !command.isEmpty else {
+        return .err(code: "invalid_args", detail: ["message": "process.shell requires a command"])
+    }
+    return procResult({ try ProcOps.shell(command) }, encode: { result in
+        let body: [String: Any] = [
+            "exit_code": Int(result.exitCode),
+            "stdout": String(data: result.stdout, encoding: .utf8) ?? "",
+            "stderr": String(data: result.stderr, encoding: .utf8) ?? "",
+        ]
+        return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    })
+}
+
+private func handleProcessKill(_ r: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(r.args)
+    guard let pidStr = parsed.positionals.first, let pid = Int32(pidStr) else {
+        return .err(code: "invalid_args", detail: ["message": "process.kill requires <pid>"])
+    }
+    let force = parsed.flags["force"] != nil
+    return procResult({ try ProcOps.kill(pid: pid, force: force); return () }, encode: { _ in Data() })
+}
+
+private func handleProcessWait(_ r: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(r.args)
+    guard let pidStr = parsed.positionals.first, let pid = Int32(pidStr) else {
+        return .err(code: "invalid_args", detail: ["message": "process.wait requires <pid>"])
+    }
+    let now = Int(Date().timeIntervalSince1970 * 1000)
+    let deadline = parsed.intFlag("deadline") ?? (now + 30_000)
+    return procResult({ try ProcOps.waitFor(pid: pid, deadlineMs: deadline) }, encode: { status in
+        let body: [String: Any] = ["exit_code": Int(status)]
+        return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    })
 }
 
 // MARK: file.* + directory.*
