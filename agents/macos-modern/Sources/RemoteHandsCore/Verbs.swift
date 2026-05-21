@@ -113,6 +113,16 @@ public enum VerbTable {
         // Vision.
         "vision.ocr":               VerbSpec(tier: .read,        preHelloOK: false, consumesPayload: true),
 
+        // Registry — Windows-only namespace; all return not_supported_by_target
+        // but are advertised so clients see them in system.capabilities
+        // (per the macos-modern planning).
+        "registry.key.read":        VerbSpec(tier: .read,   preHelloOK: false),
+        "registry.key.delete":      VerbSpec(tier: .delete, preHelloOK: false),
+        "registry.value.read":      VerbSpec(tier: .read,   preHelloOK: false),
+        "registry.value.create":    VerbSpec(tier: .create, preHelloOK: false),
+        "registry.value.update":    VerbSpec(tier: .update, preHelloOK: false),
+        "registry.value.delete":    VerbSpec(tier: .delete, preHelloOK: false),
+
         // Watch — all read-tier (subscriptions are observational).
         "watch.region":             VerbSpec(tier: .read,        preHelloOK: false),
         "watch.window":             VerbSpec(tier: .read,        preHelloOK: false),
@@ -174,7 +184,7 @@ public enum VerbTable {
         "element.at_invoke":        VerbSpec(tier: .update, preHelloOK: false),
     ]
 
-    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element", "file", "directory", "process", "vision", "watch"]
+    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element", "file", "directory", "process", "vision", "watch", "registry"]
     public static let implementedVerbs: [String] = Array(specs.keys)
 }
 
@@ -240,8 +250,14 @@ public func dispatchVerb(
     case "watch.process":         return handleWatchProcess(request, context: context)
     case "watch.element":         return handleWatchElement(request, context: context)
     case "watch.file":            return handleWatchFile(request, context: context)
-    case "watch.registry":
-        return .err(code: "not_supported_by_target", detail: ["verb": "watch.registry"])
+    case "watch.registry",
+         "registry.key.read", "registry.key.delete",
+         "registry.value.read", "registry.value.create",
+         "registry.value.update", "registry.value.delete":
+        return .err(code: "not_supported_by_target", detail: [
+            "verb": request.verb,
+            "reason": "Windows registry has no macOS equivalent",
+        ])
     case "watch.cancel":          return handleWatchCancel(request, context: context)
     case "system.power.blockers": return handlePowerBlockers()
     case "system.power.lock":     return powerResult { try Power.lock() }
