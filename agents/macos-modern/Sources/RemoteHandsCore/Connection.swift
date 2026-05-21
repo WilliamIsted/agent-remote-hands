@@ -28,6 +28,7 @@ public final class ConnectionSession {
     private var state: ConnectionState = .preHello
     private var tier: Tier = .read
     private let frameReader: FrameReader
+    private let elementTable = ElementTable()
     private let label: String
     private let logger: (String) -> Void
 
@@ -91,7 +92,7 @@ public final class ConnectionSession {
             }
         }
 
-        let outcome = dispatchVerb(request, currentTier: tier)
+        let outcome = dispatchVerb(request, currentTier: tier, elementTable: elementTable)
         switch outcome {
         case .ok(let payload):
             sendOK(payload: payload)

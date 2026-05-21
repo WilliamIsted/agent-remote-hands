@@ -109,9 +109,25 @@ public enum VerbTable {
         // wire surface includes them but always returns not_supported_by_target.
         "input.send_message":       VerbSpec(tier: .update, preHelloOK: false),
         "input.post_message":       VerbSpec(tier: .update, preHelloOK: false),
+
+        // Element (AX) — 7 read + 7 update.
+        "element.list":             VerbSpec(tier: .read,   preHelloOK: false),
+        "element.tree":             VerbSpec(tier: .read,   preHelloOK: false),
+        "element.at":               VerbSpec(tier: .read,   preHelloOK: false),
+        "element.find":             VerbSpec(tier: .read,   preHelloOK: false),
+        "element.wait":             VerbSpec(tier: .read,   preHelloOK: false),
+        "element.text":             VerbSpec(tier: .read,   preHelloOK: false),
+        "element.invoke":           VerbSpec(tier: .update, preHelloOK: false),
+        "element.toggle":           VerbSpec(tier: .update, preHelloOK: false),
+        "element.expand":           VerbSpec(tier: .update, preHelloOK: false),
+        "element.collapse":         VerbSpec(tier: .update, preHelloOK: false),
+        "element.focus":            VerbSpec(tier: .update, preHelloOK: false),
+        "element.set_text":         VerbSpec(tier: .update, preHelloOK: false, consumesPayload: true),
+        "element.find_invoke":      VerbSpec(tier: .update, preHelloOK: false),
+        "element.at_invoke":        VerbSpec(tier: .update, preHelloOK: false),
     ]
 
-    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input"]
+    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element"]
     public static let implementedVerbs: [String] = Array(specs.keys)
 }
 
@@ -122,7 +138,8 @@ public enum VerbTable {
 /// the relevant pieces in.
 public func dispatchVerb(
     _ request: WireRequest,
-    currentTier: Tier
+    currentTier: Tier,
+    elementTable: ElementTable
 ) -> VerbOutcome {
     guard let spec = VerbTable.specs[request.verb] else {
         return .err(code: "not_supported_by_target", detail: ["verb": request.verb])
@@ -169,6 +186,20 @@ public func dispatchVerb(
     case "input.position":          return handleInputPosition()
     case "input.send_message", "input.post_message":
         return .err(code: "not_supported_by_target", detail: ["verb": request.verb])
+    case "element.list":         return handleElementList(request, table: elementTable)
+    case "element.tree":         return handleElementTree(request, table: elementTable)
+    case "element.at":           return handleElementAt(request, table: elementTable)
+    case "element.find":         return handleElementFind(request, table: elementTable)
+    case "element.wait":         return handleElementWait(request, table: elementTable)
+    case "element.text":         return handleElementText(request, table: elementTable)
+    case "element.invoke":       return handleElementInvoke(request, table: elementTable)
+    case "element.toggle":       return handleElementToggle(request, table: elementTable)
+    case "element.expand":       return handleElementExpand(request, table: elementTable)
+    case "element.collapse":     return handleElementCollapse(request, table: elementTable)
+    case "element.focus":        return handleElementFocus(request, table: elementTable)
+    case "element.set_text":     return handleElementSetText(request, table: elementTable)
+    case "element.find_invoke":  return handleElementFindInvoke(request, table: elementTable)
+    case "element.at_invoke":    return handleElementAtInvoke(request, table: elementTable)
     default:
         // Unreachable — VerbTable.specs guard covers everything above.
         return .err(code: "internal_error", detail: ["verb": request.verb])
@@ -598,4 +629,176 @@ private func handleInputPosition() -> VerbOutcome {
     let body: [String: Any] = ["x": Int(p.x.rounded()), "y": Int(p.y.rounded())]
     let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     return .ok(payload: data)
+}
+
+// MARK: element.*
+
+private func elementResult<T>(_ op: () throws -> T, encode: (T) -> Data) -> VerbOutcome {
+    do {
+        let r = try op()
+        return .ok(payload: encode(r))
+    } catch let e as ElementError {
+        return elementErrorOutcome(e)
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
+}
+
+private func elementErrorOutcome(_ e: ElementError) -> VerbOutcome {
+    switch e {
+    case .axDisabled:
+        return .err(code: "ax_disabled", detail: [
+            "category": "accessibility",
+            "hint": "Grant in System Settings → Privacy & Security → Accessibility, then restart the agent",
+        ])
+    case .invalidId(let s):
+        return .err(code: "invalid_args", detail: ["message": "expected elt:<n>, got \"\(s)\""])
+    case .notFound:        return .err(code: "not_found", detail: [:])
+    case .noMatch:         return .err(code: "not_found", detail: [:])
+    case .readonly(let a): return .err(code: "readonly", detail: ["attribute": a])
+    case .actionUnsupported:
+        return .err(code: "not_supported_by_target", detail: ["message": "element has no such action / attribute is unsupported"])
+    case .timeout:         return .err(code: "timeout", detail: [:])
+    case .axError(let m):  return .err(code: "ax_error", detail: ["message": m])
+    }
+}
+
+private func encodeSnapshots(_ snaps: [Element.Snapshot]) -> Data {
+    let body: [String: Any] = ["elements": snaps.map { $0.jsonObject }]
+    return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+}
+
+private func encodeSnapshot(_ snap: Element.Snapshot) -> Data {
+    return (try? JSONSerialization.data(withJSONObject: snap.jsonObject, options: [.sortedKeys])) ?? Data()
+}
+
+private func handleElementList(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    var region: CGRect? = nil
+    if let raw = parsed.flags["region"] {
+        let parts = raw.split(separator: ",").compactMap { Double($0) }
+        if parts.count == 4 {
+            region = CGRect(x: parts[0], y: parts[1], width: parts[2], height: parts[3])
+        }
+    }
+    return elementResult({ try Element.list(table: table, region: region) }, encode: encodeSnapshots)
+}
+
+private func handleElementTree(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard let id = parsed.positionals.first else {
+        return .err(code: "invalid_args", detail: ["message": "element.tree requires <elt:N>"])
+    }
+    let maxDepth = parsed.intFlag("max-depth") ?? 16
+    return elementResult({ try Element.tree(table: table, idStr: id, maxDepth: maxDepth) }, encode: encodeSnapshots)
+}
+
+private func handleElementAt(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard let pt = parsePoint(parsed.positionals) else {
+        return .err(code: "invalid_args", detail: ["message": "element.at requires <x> <y>"])
+    }
+    return elementResult({ try Element.elementAt(table: table, point: pt) }, encode: encodeSnapshot)
+}
+
+private func handleElementFind(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard parsed.positionals.count >= 2 else {
+        return .err(code: "invalid_args", detail: ["message": "element.find requires <role> <name-pattern>"])
+    }
+    return elementResult({
+        try Element.find(table: table, role: parsed.positionals[0], pattern: parsed.positionals[1])
+    }, encode: encodeSnapshot)
+}
+
+private func handleElementWait(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard parsed.positionals.count >= 2 else {
+        return .err(code: "invalid_args", detail: ["message": "element.wait requires <role> <name-pattern>"])
+    }
+    let interval = parsed.intFlag("interval") ?? 100
+    let now = Int(Date().timeIntervalSince1970 * 1000)
+    let deadline = parsed.intFlag("deadline") ?? (now + 10_000)
+    return elementResult({
+        try Element.wait(table: table, role: parsed.positionals[0], pattern: parsed.positionals[1],
+                         intervalMs: interval, deadlineMs: deadline)
+    }, encode: encodeSnapshot)
+}
+
+private func handleElementText(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    guard let id = request.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "element.text requires <elt:N>"])
+    }
+    return elementResult({ Data(try Element.text(table: table, idStr: id).utf8) }, encode: { $0 })
+}
+
+private func handleElementInvoke(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    guard let id = request.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "element.invoke requires <elt:N>"])
+    }
+    return elementResult({ try Element.invoke(table: table, idStr: id); return () }, encode: { _ in Data() })
+}
+
+private func handleElementToggle(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    guard let id = request.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "element.toggle requires <elt:N>"])
+    }
+    return elementResult({ try Element.toggle(table: table, idStr: id) }, encode: { state in
+        (try? JSONSerialization.data(withJSONObject: ["state": state], options: [.sortedKeys])) ?? Data()
+    })
+}
+
+private func handleElementExpand(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    guard let id = request.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "element.expand requires <elt:N>"])
+    }
+    return elementResult({ try Element.expand(table: table, idStr: id); return () }, encode: { _ in Data() })
+}
+
+private func handleElementCollapse(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    guard let id = request.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "element.collapse requires <elt:N>"])
+    }
+    return elementResult({ try Element.collapse(table: table, idStr: id); return () }, encode: { _ in Data() })
+}
+
+private func handleElementFocus(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    guard let id = request.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "element.focus requires <elt:N>"])
+    }
+    return elementResult({ try Element.focus(table: table, idStr: id); return () }, encode: { _ in Data() })
+}
+
+private func handleElementSetText(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    guard let id = request.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "element.set_text requires <elt:N> <length>"])
+    }
+    guard let text = String(data: request.payload, encoding: .utf8) else {
+        return .err(code: "invalid_args", detail: ["message": "element.set_text payload must be UTF-8"])
+    }
+    return elementResult({ try Element.setText(table: table, idStr: id, text: text); return () }, encode: { _ in Data() })
+}
+
+private func handleElementFindInvoke(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard parsed.positionals.count >= 2 else {
+        return .err(code: "invalid_args", detail: ["message": "element.find_invoke requires <role> <name-pattern>"])
+    }
+    return elementResult({
+        let snap = try Element.find(table: table, role: parsed.positionals[0], pattern: parsed.positionals[1])
+        try Element.invoke(table: table, idStr: snap.id)
+        return snap
+    }, encode: encodeSnapshot)
+}
+
+private func handleElementAtInvoke(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    guard let pt = parsePoint(parsed.positionals) else {
+        return .err(code: "invalid_args", detail: ["message": "element.at_invoke requires <x> <y>"])
+    }
+    return elementResult({
+        let snap = try Element.elementAt(table: table, point: pt)
+        try Element.invoke(table: table, idStr: snap.id)
+        return snap
+    }, encode: encodeSnapshot)
 }

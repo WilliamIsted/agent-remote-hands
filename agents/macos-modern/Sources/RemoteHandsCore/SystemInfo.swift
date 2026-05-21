@@ -53,7 +53,7 @@ public func systemInfoBody(currentTier: Tier, implementedNamespaces: [String], i
         "namespaces": implementedNamespaces,
         "capabilities": [
             "capture": "screencapturekit",
-            "ui_automation": "none",  // AX lands with element.*
+            "ui_automation": "ax",
             "image_formats": CaptureFormat.allCases.map { $0.rawValue },
             "discovery": "none",      // Bonjour lands with mDNS module
             "implemented_verbs": implementedVerbs.sorted(),
