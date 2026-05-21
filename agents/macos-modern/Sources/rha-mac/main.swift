@@ -36,6 +36,11 @@ struct CLI {
     /// convention from ldoc-104-mdns-default-on-no-discoverable); pass
     /// --no-discoverable to opt out.
     var discoverable: Bool = true
+    /// Gate on `system.power.{shutdown,reboot,logoff,sleep,hibernate}`.
+    /// Default OFF so a remote session — including the conformance suite
+    /// — cannot shut down the host machine. Operator must explicitly
+    /// pass `--allow-power-state-changes` to enable.
+    var allowPowerStateChanges: Bool = false
 }
 
 func parseArgv(_ argv: [String]) -> CLI {
@@ -56,6 +61,9 @@ func parseArgv(_ argv: [String]) -> CLI {
         case "--no-discoverable":
             cli.discoverable = false
             i += 1
+        case "--allow-power-state-changes":
+            cli.allowPowerStateChanges = true
+            i += 1
         case "-h", "--help":
             printUsage()
             exit(0)
@@ -75,11 +83,14 @@ func printUsage() {
     \(exe) — Agent Remote Hands, macos-modern family (v\(AgentIdentity.version), protocol \(AgentIdentity.protocolVersion))
 
     Usage:
-      \(exe) [--host <addr>] [--port <n>] [--no-discoverable]
+      \(exe) [--host <addr>] [--port <n>] [--no-discoverable] [--allow-power-state-changes]
       \(exe) --version
       \(exe) --help
 
-    Defaults: --host 127.0.0.1 --port 8765 (Bonjour advertising on)
+    Defaults:
+      --host 127.0.0.1, --port 8765, Bonjour advertising on, power state
+      changes (shutdown/reboot/logoff/sleep/hibernate) DISABLED. Pass
+      --allow-power-state-changes to opt those verbs in.
     """)
 }
 
@@ -141,6 +152,14 @@ func log(_ message: String) {
 }
 
 log("\(AgentIdentity.name) \(AgentIdentity.version) starting (\(AgentIdentity.osFamily))")
+
+// Apply the power-policy gate before the server starts accepting verbs.
+PowerPolicy.allowStateChanges = cli.allowPowerStateChanges
+if cli.allowPowerStateChanges {
+    log("WARNING: --allow-power-state-changes is set — system.power.{shutdown,reboot,logoff,sleep,hibernate} will execute on the host")
+} else {
+    log("system.power.{shutdown,reboot,logoff,sleep,hibernate} are DISABLED (default); pass --allow-power-state-changes to enable")
+}
 
 let tokenStore: TokenStore?
 do {

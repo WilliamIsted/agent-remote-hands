@@ -174,9 +174,10 @@ public enum Element {
         return snapshot(of: el, pid: pid, depth: 0, table: table)
     }
 
-    /// Find first element matching `<role> <name-pattern>`. Returns
-    /// `ElementError.noMatch` if walk completes without a hit; AX errors
-    /// surface as `axDisabled` / `axError`.
+    /// Find first element matching `<role> <name-pattern>`. Empty `role`
+    /// means "any role" — useful for callers that only know the target's
+    /// title/name. Returns `ElementError.noMatch` if walk completes
+    /// without a hit; AX errors surface as `axDisabled` / `axError`.
     public static func find(table: ElementTable, role: String, pattern: String, scope: AXUIElement? = nil) throws -> Snapshot {
         try probeTCC()
         let root: AXUIElement
@@ -191,11 +192,14 @@ public enum Element {
             root = AXUIElementCreateApplication(frontPID)
             pid = frontPID
         }
+        let roleEmpty = role.isEmpty
         var hit: Snapshot? = nil
         walk(root, pid: pid, depth: 0, maxDepth: 16, table: table, into: nil, filter: { snap in
-            if snap.role.caseInsensitiveCompare(role) == .orderedSame {
+            let roleOK = roleEmpty || (snap.role.caseInsensitiveCompare(role) == .orderedSame)
+            if roleOK {
                 let target = snap.title.isEmpty ? snap.value : snap.title
-                if Window.globMatch(pattern: pattern, in: target) {
+                if Window.globMatch(pattern: pattern, in: target) ||
+                   Window.substringMatch(pattern: pattern, in: target) {
                     hit = snap
                     return true  // stops the walk via the cap
                 }

@@ -16,7 +16,20 @@ public enum PowerError: Error, Equatable {
     case permissionDenied
     case notFound
     case unsupported
+    /// Power verbs that change machine state (shutdown / reboot / logoff /
+    /// sleep / hibernate) are GATED OFF by default and require the agent
+    /// to be started with `--allow-power-state-changes`. Without that
+    /// flag, the verbs refuse — protects the host from accidental or
+    /// conformance-suite-driven state changes.
+    case powerStateChangesDisabled
     case io(String)
+}
+
+/// Process-wide flag that gates the genuinely destructive power verbs.
+/// Set once at startup by main.swift if the user passes
+/// `--allow-power-state-changes`. Default: disabled.
+public enum PowerPolicy {
+    nonisolated(unsafe) public static var allowStateChanges: Bool = false
 }
 
 public struct PowerBlocker: Sendable {
@@ -80,34 +93,47 @@ public enum Power {
         try run(executable: "/usr/bin/pmset", args: ["displaysleepnow"])
     }
 
-    // MARK: shutdown / reboot / logoff (X)
+    // MARK: shutdown / reboot / logoff (X) — gated
+
+    /// All of shutdown / reboot / logoff / sleep / hibernate are gated on
+    /// `PowerPolicy.allowStateChanges`. By default the agent REFUSES any
+    /// machine-state-changing power verb regardless of tier — protects the
+    /// host from conformance suites + accidental remote sessions. Operator
+    /// passes `--allow-power-state-changes` to the agent to opt in.
 
     public static func shutdown(force: Bool = false) throws {
+        try requirePolicy()
         try runOsascript("tell application \"System Events\" to shut down")
     }
 
     public static func reboot(force: Bool = false) throws {
+        try requirePolicy()
         try runOsascript("tell application \"System Events\" to restart")
     }
 
     public static func logoff(force: Bool = false) throws {
+        try requirePolicy()
         try runOsascript("tell application \"System Events\" to log out")
     }
 
-    // MARK: hibernate / sleep (X)
-
-    /// macOS doesn't have a separate hibernate verb from the user's
-    /// perspective — `pmset sleepnow` after setting hibernate mode = 25
-    /// achieves S4-style hibernate. Setting hibernate mode requires admin,
-    /// so on unprivileged callers we fall back to plain sleep.
     public static func hibernate() throws {
-        // For an unprivileged dev binary, the cleanest path is plain sleep
-        // (which on portable Macs will hibernate after the standby delay).
-        try sleep()
+        try requirePolicy()
+        try sleepImpl()
     }
 
     public static func sleep() throws {
+        try requirePolicy()
+        try sleepImpl()
+    }
+
+    private static func sleepImpl() throws {
         try run(executable: "/usr/bin/pmset", args: ["sleepnow"])
+    }
+
+    private static func requirePolicy() throws {
+        if !PowerPolicy.allowStateChanges {
+            throw PowerError.powerStateChangesDisabled
+        }
     }
 
     // MARK: helpers

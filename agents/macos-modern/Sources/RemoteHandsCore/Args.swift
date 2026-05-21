@@ -63,4 +63,14 @@ public struct ParsedArgs: Sendable {
         guard let raw = flags[name] else { return nil }
         return Int(raw)
     }
+
+    /// Return the first flag name that isn't in `allowed`, or nil if all
+    /// flags are valid. Verb handlers call this at the top to reject
+    /// `--bogus-flag` etc. with ERR invalid_args.
+    public func unknownFlag(allowed: Set<String>) -> String? {
+        for k in flags.keys where !allowed.contains(k) {
+            return k
+        }
+        return nil
+    }
 }

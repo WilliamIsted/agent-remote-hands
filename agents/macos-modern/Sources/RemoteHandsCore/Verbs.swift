@@ -402,12 +402,25 @@ private func handleSystemCapabilities() -> VerbOutcome {
 }
 
 private func handleSystemVerbs() -> VerbOutcome {
-    // Minimal shape: array of {name, tier}. The full v2.2 shape includes arg
-    // schemas — those land when verbs grow real argument grammars.
-    let verbs = VerbTable.specs.map { (name, spec) -> [String: String] in
-        ["name": name, "tier": spec.tier.rawValue]
+    // Post-rc.2 shape: `{verbs: {<name>: <strict-tool-def>, ...}}` — a
+    // MAP keyed by verb name, where each value is a strict tool
+    // definition with name + description + input_schema. x-tier and
+    // x-namespace are advertised as extensions.
+    var verbMap: [String: [String: Any]] = [:]
+    for (name, spec) in VerbTable.specs {
+        verbMap[name] = [
+            "name": name,
+            "description": "Agent verb \(name)",
+            "input_schema": [
+                "type": "object",
+                "properties": [String: Any]() as [String: Any],
+                "additionalProperties": true,
+            ] as [String: Any],
+            "x-tier": spec.tier.rawValue,
+            "x-namespace": name.split(separator: ".").first.map(String.init) ?? "",
+        ]
     }
-    let body: [String: Any] = ["verbs": verbs.sorted { ($0["name"] ?? "") < ($1["name"] ?? "") }]
+    let body: [String: Any] = ["verbs": verbMap]
     let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     return .ok(payload: data)
 }
@@ -609,10 +622,51 @@ private func parseButton(_ flags: [String: String]) throws -> MouseButton {
 
 private func handleMouseClick(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
+    if let bad = parsed.unknownFlag(allowed: [
+        "button", "clicks", "double", "triple", "duration-ms", "clicks-interval-ms"
+    ]) {
+        return .err(code: "invalid_args", detail: ["message": "unknown flag --\(bad)"])
+    }
     guard let pt = parsePoint(parsed.positionals) else {
         return .err(code: "invalid_args", detail: ["message": "expected <x> <y>"])
     }
-    let clicks = parsed.intFlag("clicks") ?? 1
+    // Flag mutual-exclusion + range validation per the input.mouse.click
+    // x-conditional rules. The verb dispatcher rejects ambiguous combos
+    // up front rather than picking a winner.
+    let hasDouble = parsed.flags["double"] != nil
+    let hasTriple = parsed.flags["triple"] != nil
+    let hasClicks = parsed.flags["clicks"] != nil
+    let hasDuration = parsed.flags["duration-ms"] != nil
+    let hasClicksInterval = parsed.flags["clicks-interval-ms"] != nil
+    if hasDouble && hasTriple {
+        return .err(code: "invalid_args", detail: ["message": "--double and --triple are mutually exclusive"])
+    }
+    if hasClicks && hasDouble {
+        return .err(code: "invalid_args", detail: ["message": "--clicks and --double are mutually exclusive"])
+    }
+    if hasClicks && hasTriple {
+        return .err(code: "invalid_args", detail: ["message": "--clicks and --triple are mutually exclusive"])
+    }
+    if hasDuration && (hasDouble || hasTriple || hasClicks) {
+        return .err(code: "invalid_args", detail: ["message": "--duration-ms is mutually exclusive with click-count flags"])
+    }
+    if hasClicksInterval && !hasClicks {
+        return .err(code: "invalid_args", detail: ["message": "--clicks-interval-ms requires --clicks"])
+    }
+    if let dur = parsed.intFlag("duration-ms"), !(0...1000).contains(dur) {
+        return .err(code: "invalid_args", detail: ["message": "--duration-ms must be in [0, 1000]"])
+    }
+    var clicks = 1
+    if let c = parsed.intFlag("clicks") {
+        guard (2...10).contains(c) else {
+            return .err(code: "invalid_args", detail: ["message": "--clicks must be in [2, 10]"])
+        }
+        clicks = c
+    } else if hasDouble {
+        clicks = 2
+    } else if hasTriple {
+        clicks = 3
+    }
     return inputResult {
         let button = try parseButton(parsed.flags)
         try Input.click(at: pt, button: button, clicks: clicks)
@@ -639,6 +693,9 @@ private func handleMouseScroll(_ request: WireRequest) -> VerbOutcome {
 
 private func handleMouseDrag(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
+    if let bad = parsed.unknownFlag(allowed: ["button", "steps"]) {
+        return .err(code: "invalid_args", detail: ["message": "unknown flag --\(bad)"])
+    }
     guard parsed.positionals.count >= 4,
           let x1 = Double(parsed.positionals[0]),
           let y1 = Double(parsed.positionals[1]),
@@ -705,6 +762,9 @@ private func parseModifiers(_ flags: [String: String]) throws -> CGEventFlags {
 
 private func handleKeyTap(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
+    if let bad = parsed.unknownFlag(allowed: ["modifiers"]) {
+        return .err(code: "invalid_args", detail: ["message": "unknown flag --\(bad)"])
+    }
     guard let name = parsed.positionals.first else {
         return .err(code: "invalid_args", detail: ["message": "input.keyboard.key requires <name>"])
     }
@@ -727,12 +787,34 @@ private func handleKeyDown(_ request: WireRequest) -> VerbOutcome {
 
 private func handleKeyUp(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
+    if let bad = parsed.unknownFlag(allowed: ["modifiers"]) {
+        return .err(code: "invalid_args", detail: ["message": "unknown flag --\(bad)"])
+    }
     guard let name = parsed.positionals.first else {
         return .err(code: "invalid_args", detail: ["message": "input.keyboard.key_up requires <name>"])
     }
-    return inputResult {
+    // key_up is idempotent — releasing a key that wasn't held (or a key
+    // name the agent doesn't know about) must return OK 0, not ERR.
+    // Cleanup-fail-safe path. Bad modifier strings still ERR — those are
+    // a real programming error.
+    do {
         let mods = try parseModifiers(parsed.flags)
-        try Input.keyUp(named: name, modifiers: mods)
+        do {
+            try Input.keyUp(named: name, modifiers: mods)
+        } catch InputError.unknownKey {
+            // Silently OK — release on an unknown key is a no-op.
+            return .ok(payload: Data())
+        }
+        return .ok(payload: Data())
+    } catch InputError.permissionDenied {
+        return .err(code: "permission_denied", detail: [
+            "category": "input_monitoring",
+            "hint": "Grant in System Settings → Privacy & Security → Input Monitoring",
+        ])
+    } catch InputError.unknownModifier(let m) {
+        return .err(code: "invalid_args", detail: ["message": "unknown modifier \"\(m)\""])
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
     }
 }
 
@@ -899,6 +981,11 @@ private func powerResult(_ op: () throws -> Void) -> VerbOutcome {
         return .err(code: "not_found", detail: [:])
     } catch PowerError.unsupported {
         return .err(code: "not_supported", detail: [:])
+    } catch PowerError.powerStateChangesDisabled {
+        return .err(code: "not_supported", detail: [
+            "category": "power_state_changes_disabled",
+            "hint": "agent refuses power-state-changing verbs by default; restart with --allow-power-state-changes to enable shutdown/reboot/logoff/sleep/hibernate. system.power.lock and system.power.blockers are always available.",
+        ])
     } catch PowerError.io(let m) {
         return .err(code: "io_error", detail: ["message": m])
     } catch {
@@ -1272,7 +1359,11 @@ private func elementErrorOutcome(_ e: ElementError) -> VerbOutcome {
         ])
     case .invalidId(let s):
         return .err(code: "invalid_args", detail: ["message": "expected elt:<n>, got \"\(s)\""])
-    case .notFound:        return .err(code: "not_found", detail: [:])
+    case .notFound:
+        // Element table miss = "the elt:N you referenced is no longer
+        // valid". The post-rc.2 code for that is target_gone (distinct
+        // from not_found which means "AX walk yielded zero matches").
+        return .err(code: "target_gone", detail: [:])
     case .noMatch:         return .err(code: "not_found", detail: [:])
     case .readonly(let a): return .err(code: "readonly", detail: ["attribute": a])
     case .actionUnsupported:
@@ -1327,24 +1418,45 @@ private func handleElementAt(_ request: WireRequest, table: ElementTable) -> Ver
 
 private func handleElementFind(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    guard parsed.positionals.count >= 2 else {
-        return .err(code: "invalid_args", detail: ["message": "element.find requires <role> <name-pattern>"])
+    // Accept both `<role> <pattern>` positional form and the flag form
+    // (--role X --name Y --timeout-ms Z) used by the post-rc.2 conformance.
+    let role: String
+    let pattern: String
+    if let r = parsed.flags["role"], let n = parsed.flags["name"] {
+        role = r; pattern = n
+    } else if let n = parsed.flags["name"] {
+        // --name only: search across any interactable role.
+        role = ""; pattern = n
+    } else if parsed.positionals.count >= 2 {
+        role = parsed.positionals[0]; pattern = parsed.positionals[1]
+    } else {
+        return .err(code: "invalid_args", detail: ["message": "element.find requires <role> <name> or --name X"])
     }
     return elementResult({
-        try Element.find(table: table, role: parsed.positionals[0], pattern: parsed.positionals[1])
+        try Element.find(table: table, role: role, pattern: pattern)
     }, encode: encodeSnapshot)
 }
 
 private func handleElementWait(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    guard parsed.positionals.count >= 2 else {
-        return .err(code: "invalid_args", detail: ["message": "element.wait requires <role> <name-pattern>"])
+    // Same grammar as element.find with an added --timeout-ms.
+    let role: String
+    let pattern: String
+    if let r = parsed.flags["role"], let n = parsed.flags["name"] {
+        role = r; pattern = n
+    } else if let n = parsed.flags["name"] {
+        role = ""; pattern = n
+    } else if parsed.positionals.count >= 2 {
+        role = parsed.positionals[0]; pattern = parsed.positionals[1]
+    } else {
+        return .err(code: "invalid_args", detail: ["message": "element.wait requires <role> <name> or --name X"])
     }
     let interval = parsed.intFlag("interval") ?? 100
+    let timeoutMs = parsed.intFlag("timeout-ms") ?? 10_000
     let now = Int(Date().timeIntervalSince1970 * 1000)
-    let deadline = parsed.intFlag("deadline") ?? (now + 10_000)
+    let deadline = parsed.intFlag("deadline") ?? (now + timeoutMs)
     return elementResult({
-        try Element.wait(table: table, role: parsed.positionals[0], pattern: parsed.positionals[1],
+        try Element.wait(table: table, role: role, pattern: pattern,
                          intervalMs: interval, deadlineMs: deadline)
     }, encode: encodeSnapshot)
 }
