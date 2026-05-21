@@ -451,6 +451,13 @@ private func handleScreenCapture(_ request: WireRequest) -> VerbOutcome {
         quality = 75
     }
 
+    // The `binary` encoding (Shape-B side-channel — a raw blob trailing the
+    // JSON frame) is a windows-modern-only path. This family returns the
+    // image as an MCP image content item; reject the side-channel request.
+    if let encoding = args.flags["encoding"], encoding == "binary" {
+        return .err(code: "unsupported_format", detail: ["encoding": encoding])
+    }
+
     // Selectors not yet implemented in this slice. Reject explicitly so a
     // caller passing --region doesn't get a misleadingly-correct full-screen
     // capture back.
