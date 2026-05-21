@@ -110,6 +110,24 @@ public enum VerbTable {
         "input.send_message":       VerbSpec(tier: .update, preHelloOK: false),
         "input.post_message":       VerbSpec(tier: .update, preHelloOK: false),
 
+        // File + directory.
+        "file.create":              VerbSpec(tier: .create, preHelloOK: false),
+        "file.read":                VerbSpec(tier: .read,   preHelloOK: false),
+        "file.write":               VerbSpec(tier: .update, preHelloOK: false, consumesPayload: true),
+        "file.write_at":            VerbSpec(tier: .update, preHelloOK: false, consumesPayload: true),
+        "file.delete":              VerbSpec(tier: .delete, preHelloOK: false),
+        "file.rename":              VerbSpec(tier: .update, preHelloOK: false),
+        "file.stat":                VerbSpec(tier: .read,   preHelloOK: false),
+        "file.exists":              VerbSpec(tier: .read,   preHelloOK: false),
+        "file.wait":                VerbSpec(tier: .read,   preHelloOK: false),
+        "file.download":            VerbSpec(tier: .update, preHelloOK: false),
+        "directory.list":           VerbSpec(tier: .read,   preHelloOK: false),
+        "directory.stat":           VerbSpec(tier: .read,   preHelloOK: false),
+        "directory.exists":         VerbSpec(tier: .read,   preHelloOK: false),
+        "directory.create":         VerbSpec(tier: .create, preHelloOK: false),
+        "directory.rename":         VerbSpec(tier: .update, preHelloOK: false),
+        "directory.remove":         VerbSpec(tier: .delete, preHelloOK: false),
+
         // Element (AX) — 7 read + 7 update.
         "element.list":             VerbSpec(tier: .read,   preHelloOK: false),
         "element.tree":             VerbSpec(tier: .read,   preHelloOK: false),
@@ -127,7 +145,7 @@ public enum VerbTable {
         "element.at_invoke":        VerbSpec(tier: .update, preHelloOK: false),
     ]
 
-    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element"]
+    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element", "file", "directory"]
     public static let implementedVerbs: [String] = Array(specs.keys)
 }
 
@@ -186,6 +204,22 @@ public func dispatchVerb(
     case "input.position":          return handleInputPosition()
     case "input.send_message", "input.post_message":
         return .err(code: "not_supported_by_target", detail: ["verb": request.verb])
+    case "file.create":          return handleFileCreate(request)
+    case "file.read":            return handleFileRead(request)
+    case "file.write":           return handleFileWrite(request)
+    case "file.write_at":        return handleFileWriteAt(request)
+    case "file.delete":          return handleFileDelete(request)
+    case "file.rename":          return handleFileRename(request)
+    case "file.stat":            return handleFileStat(request)
+    case "file.exists":          return handleFileExists(request)
+    case "file.wait":            return handleFileWait(request)
+    case "file.download":        return handleFileDownload(request)
+    case "directory.list":       return handleDirList(request)
+    case "directory.stat":       return handleDirStat(request)
+    case "directory.exists":     return handleDirExists(request)
+    case "directory.create":     return handleDirCreate(request)
+    case "directory.rename":     return handleDirRename(request)
+    case "directory.remove":     return handleDirRemove(request)
     case "element.list":         return handleElementList(request, table: elementTable)
     case "element.tree":         return handleElementTree(request, table: elementTable)
     case "element.at":           return handleElementAt(request, table: elementTable)
@@ -629,6 +663,196 @@ private func handleInputPosition() -> VerbOutcome {
     let body: [String: Any] = ["x": Int(p.x.rounded()), "y": Int(p.y.rounded())]
     let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     return .ok(payload: data)
+}
+
+// MARK: file.* + directory.*
+
+private func fsResult<T>(_ op: () throws -> T, encode: (T) -> Data) -> VerbOutcome {
+    do {
+        let v = try op()
+        return .ok(payload: encode(v))
+    } catch let e as FSError {
+        return fsErrorOutcome(e)
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
+}
+
+private func fsErrorOutcome(_ e: FSError) -> VerbOutcome {
+    switch e {
+    case .notFound:         return .err(code: "not_found", detail: [:])
+    case .alreadyExists:    return .err(code: "already_exists", detail: [:])
+    case .notADirectory:    return .err(code: "not_a_directory", detail: [:])
+    case .notEmpty:         return .err(code: "not_empty", detail: [:])
+    case .permissionDenied: return .err(code: "permission_denied", detail: [:])
+    case .crossDevice:      return .err(code: "cross_device", detail: ["hint": "use --cross-fs to enable copy-then-remove fallback"])
+    case .timeout:          return .err(code: "timeout", detail: [:])
+    case .io(let m):        return .err(code: "io_error", detail: ["message": m])
+    }
+}
+
+private func handleFileCreate(_ r: WireRequest) -> VerbOutcome {
+    guard let path = r.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "file.create requires <path>"])
+    }
+    return fsResult({ try FileSystem.createFile(path); return () }, encode: { _ in Data() })
+}
+
+private func handleFileRead(_ r: WireRequest) -> VerbOutcome {
+    guard let path = r.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "file.read requires <path>"])
+    }
+    return fsResult({ try FileSystem.readFile(path) }, encode: { $0 })
+}
+
+private func handleFileWrite(_ r: WireRequest) -> VerbOutcome {
+    // Grammar: file.write <path> <length>
+    guard r.args.count >= 2 else {
+        return .err(code: "invalid_args", detail: ["message": "file.write requires <path> <length>"])
+    }
+    let path = r.args[0]
+    return fsResult({ try FileSystem.writeFile(path, payload: r.payload); return () }, encode: { _ in Data() })
+}
+
+private func handleFileWriteAt(_ r: WireRequest) -> VerbOutcome {
+    // Grammar: file.write_at <path> <offset> <length> [--truncate]
+    let parsed = ParsedArgs(r.args)
+    guard parsed.positionals.count >= 3,
+          let offset = Int64(parsed.positionals[1]) else {
+        return .err(code: "invalid_args", detail: ["message": "file.write_at requires <path> <offset> <length>"])
+    }
+    let truncate = parsed.flags["truncate"] != nil
+    return fsResult({
+        try FileSystem.writeAt(parsed.positionals[0], offset: offset, payload: r.payload, truncate: truncate)
+        return ()
+    }, encode: { _ in Data() })
+}
+
+private func handleFileDelete(_ r: WireRequest) -> VerbOutcome {
+    guard let path = r.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "file.delete requires <path>"])
+    }
+    return fsResult({ try FileSystem.deleteFile(path); return () }, encode: { _ in Data() })
+}
+
+private func handleFileRename(_ r: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(r.args)
+    guard parsed.positionals.count >= 2 else {
+        return .err(code: "invalid_args", detail: ["message": "file.rename requires <src> <dst>"])
+    }
+    let overwrite = parsed.flags["overwrite"] != nil
+    let crossfs = parsed.flags["cross-fs"] != nil
+    return fsResult({
+        try FileSystem.rename(src: parsed.positionals[0], dst: parsed.positionals[1],
+                              overwrite: overwrite, allowCrossFS: crossfs)
+        return ()
+    }, encode: { _ in Data() })
+}
+
+private func handleFileStat(_ r: WireRequest) -> VerbOutcome {
+    guard let path = r.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "file.stat requires <path>"])
+    }
+    return fsResult({ try FileSystem.stat(path) }, encode: { stat in
+        (try? JSONSerialization.data(withJSONObject: stat.jsonObject, options: [.sortedKeys])) ?? Data()
+    })
+}
+
+private func handleFileExists(_ r: WireRequest) -> VerbOutcome {
+    guard let path = r.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "file.exists requires <path>"])
+    }
+    let (exists, type) = FileSystem.exists(path)
+    var body: [String: Any] = ["exists": exists]
+    if let t = type { body["type"] = t.rawValue }
+    let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    return .ok(payload: data)
+}
+
+private func handleFileWait(_ r: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(r.args)
+    guard let glob = parsed.positionals.first else {
+        return .err(code: "invalid_args", detail: ["message": "file.wait requires <glob>"])
+    }
+    let interval = parsed.intFlag("interval") ?? 200
+    let now = Int(Date().timeIntervalSince1970 * 1000)
+    let deadline = parsed.intFlag("deadline") ?? (now + 10_000)
+    return fsResult({ try FileSystem.waitForPath(glob, intervalMs: interval, deadlineMs: deadline) }, encode: { stat in
+        (try? JSONSerialization.data(withJSONObject: stat.jsonObject, options: [.sortedKeys])) ?? Data()
+    })
+}
+
+private func handleFileDownload(_ r: WireRequest) -> VerbOutcome {
+    // Grammar: file.download <url> <destination>
+    guard r.args.count >= 2 else {
+        return .err(code: "invalid_args", detail: ["message": "file.download requires <url> <destination>"])
+    }
+    return fsResult({ try FileSystem.download(url: r.args[0], destination: r.args[1]) }, encode: { stat in
+        (try? JSONSerialization.data(withJSONObject: stat.jsonObject, options: [.sortedKeys])) ?? Data()
+    })
+}
+
+private func handleDirList(_ r: WireRequest) -> VerbOutcome {
+    guard let path = r.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "directory.list requires <path>"])
+    }
+    return fsResult({ try FileSystem.listDirectory(path) }, encode: { entries in
+        let body: [String: Any] = ["entries": entries.map { $0.jsonObject }]
+        return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    })
+}
+
+private func handleDirStat(_ r: WireRequest) -> VerbOutcome {
+    guard let path = r.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "directory.stat requires <path>"])
+    }
+    return fsResult({ try FileSystem.directoryStat(path) }, encode: { tuple in
+        let body: [String: Any] = ["entries": tuple.count, "mtime": tuple.mtime]
+        return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    })
+}
+
+private func handleDirExists(_ r: WireRequest) -> VerbOutcome {
+    guard let path = r.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "directory.exists requires <path>"])
+    }
+    let (exists, type) = FileSystem.exists(path)
+    let isDir = exists && type == .directory
+    let body: [String: Any] = ["exists": isDir]
+    let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    return .ok(payload: data)
+}
+
+private func handleDirCreate(_ r: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(r.args)
+    guard let path = parsed.positionals.first else {
+        return .err(code: "invalid_args", detail: ["message": "directory.create requires <path>"])
+    }
+    let parents = parsed.flags["parents"] != nil
+    return fsResult({ try FileSystem.createDirectory(path, withParents: parents); return () }, encode: { _ in Data() })
+}
+
+private func handleDirRename(_ r: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(r.args)
+    guard parsed.positionals.count >= 2 else {
+        return .err(code: "invalid_args", detail: ["message": "directory.rename requires <src> <dst>"])
+    }
+    let overwrite = parsed.flags["overwrite"] != nil
+    let crossfs = parsed.flags["cross-fs"] != nil
+    return fsResult({
+        try FileSystem.rename(src: parsed.positionals[0], dst: parsed.positionals[1],
+                              overwrite: overwrite, allowCrossFS: crossfs)
+        return ()
+    }, encode: { _ in Data() })
+}
+
+private func handleDirRemove(_ r: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(r.args)
+    guard let path = parsed.positionals.first else {
+        return .err(code: "invalid_args", detail: ["message": "directory.remove requires <path>"])
+    }
+    let recursive = parsed.flags["recursive"] != nil
+    return fsResult({ try FileSystem.removeDirectory(path, recursive: recursive); return () }, encode: { _ in Data() })
 }
 
 // MARK: element.*
