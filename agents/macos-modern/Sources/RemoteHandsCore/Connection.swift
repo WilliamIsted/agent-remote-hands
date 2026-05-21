@@ -23,12 +23,17 @@ public enum ConnectionState: Sendable {
 /// One connection — owns the socket, drives the read loop, and routes verbs
 /// through `dispatchVerb`. Designed to run on a single dispatch queue so
 /// state mutations need no locking.
-public final class ConnectionSession {
+public final class ConnectionSession: @unchecked Sendable {
     private let fd: Int32
     private var state: ConnectionState = .preHello
     private var tier: Tier = .read
     private let frameReader: FrameReader
     private let elementTable = ElementTable()
+    private let subscriptions = SubscriptionRegistry()
+    /// Serialises ALL writes to fd — OK/ERR replies from the read loop and
+    /// EVENT frames from subscription queues both go through `send()` which
+    /// takes this lock.
+    private let sendLock = NSLock()
     private let label: String
     private let logger: (String) -> Void
 
@@ -47,6 +52,10 @@ public final class ConnectionSession {
     public func run() {
         logger("[\(label)] connection opened, tier=\(tier.rawValue) state=preHello")
         defer {
+            // Cancel all subscriptions before closing the socket — pending
+            // EVENT writes from subscription queues need to find the fd
+            // still valid (or at least not have it closed mid-write).
+            subscriptions.cancelAll()
             close(fd)
             state = .closed
             logger("[\(label)] connection closed")
@@ -92,7 +101,15 @@ public final class ConnectionSession {
             }
         }
 
-        let outcome = dispatchVerb(request, currentTier: tier, elementTable: elementTable)
+        let context = DispatchContext(
+            currentTier: tier,
+            elementTable: elementTable,
+            subscriptions: subscriptions,
+            sendEvent: { [weak self] subID, payload in
+                self?.send(formatEvent(subID: subID, payload: payload))
+            }
+        )
+        let outcome = dispatchVerb(request, context: context)
         switch outcome {
         case .ok(let payload):
             sendOK(payload: payload)
@@ -127,6 +144,7 @@ public final class ConnectionSession {
     }
 
     private func send(_ data: Data) {
+        sendLock.lock(); defer { sendLock.unlock() }
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             var remaining = data.count

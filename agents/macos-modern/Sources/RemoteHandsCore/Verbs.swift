@@ -113,6 +113,15 @@ public enum VerbTable {
         // Vision.
         "vision.ocr":               VerbSpec(tier: .read,        preHelloOK: false, consumesPayload: true),
 
+        // Watch — all read-tier (subscriptions are observational).
+        "watch.region":             VerbSpec(tier: .read,        preHelloOK: false),
+        "watch.window":             VerbSpec(tier: .read,        preHelloOK: false),
+        "watch.process":            VerbSpec(tier: .read,        preHelloOK: false),
+        "watch.element":            VerbSpec(tier: .read,        preHelloOK: false),
+        "watch.file":               VerbSpec(tier: .read,        preHelloOK: false),
+        "watch.registry":           VerbSpec(tier: .read,        preHelloOK: false),
+        "watch.cancel":             VerbSpec(tier: .read,        preHelloOK: false),
+
         // System power.
         "system.power.blockers":    VerbSpec(tier: .read,        preHelloOK: false),
         "system.power.lock":        VerbSpec(tier: .read,        preHelloOK: false),
@@ -165,7 +174,7 @@ public enum VerbTable {
         "element.at_invoke":        VerbSpec(tier: .update, preHelloOK: false),
     ]
 
-    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element", "file", "directory", "process", "vision"]
+    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element", "file", "directory", "process", "vision", "watch"]
     public static let implementedVerbs: [String] = Array(specs.keys)
 }
 
@@ -176,9 +185,10 @@ public enum VerbTable {
 /// the relevant pieces in.
 public func dispatchVerb(
     _ request: WireRequest,
-    currentTier: Tier,
-    elementTable: ElementTable
+    context: DispatchContext
 ) -> VerbOutcome {
+    let currentTier = context.currentTier
+    let elementTable = context.elementTable
     guard let spec = VerbTable.specs[request.verb] else {
         return .err(code: "not_supported_by_target", detail: ["verb": request.verb])
     }
@@ -225,6 +235,14 @@ public func dispatchVerb(
     case "input.send_message", "input.post_message":
         return .err(code: "not_supported_by_target", detail: ["verb": request.verb])
     case "vision.ocr":            return handleVisionOCR(request)
+    case "watch.region":          return handleWatchRegion(request, context: context)
+    case "watch.window":          return handleWatchWindow(request, context: context)
+    case "watch.process":         return handleWatchProcess(request, context: context)
+    case "watch.element":         return handleWatchElement(request, context: context)
+    case "watch.file":            return handleWatchFile(request, context: context)
+    case "watch.registry":
+        return .err(code: "not_supported_by_target", detail: ["verb": "watch.registry"])
+    case "watch.cancel":          return handleWatchCancel(request, context: context)
     case "system.power.blockers": return handlePowerBlockers()
     case "system.power.lock":     return powerResult { try Power.lock() }
     case "system.power.shutdown": return powerResult { try Power.shutdown() }
@@ -697,6 +715,89 @@ private func handleKeyType(_ request: WireRequest) -> VerbOutcome {
 private func handleInputPosition() -> VerbOutcome {
     let p = Input.cursorPosition()
     let body: [String: Any] = ["x": Int(p.x.rounded()), "y": Int(p.y.rounded())]
+    let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    return .ok(payload: data)
+}
+
+// MARK: watch.*
+
+private func subscriptionResponse(_ id: String) -> VerbOutcome {
+    let body: [String: Any] = ["subscription_id": id]
+    let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+    return .ok(payload: data)
+}
+
+private func handleWatchRegion(_ r: WireRequest, context: DispatchContext) -> VerbOutcome {
+    let parsed = ParsedArgs(r.args)
+    let interval = parsed.intFlag("interval") ?? 500
+    let untilChange = parsed.flags["until-change"] != nil
+    let id = context.subscriptions.nextSubID()
+    let sub = RegionWatchSubscription(
+        id: id, intervalMs: interval, untilChange: untilChange,
+        registry: context.subscriptions, send: context.sendEvent
+    )
+    context.subscriptions.add(sub)
+    return subscriptionResponse(id)
+}
+
+private func handleWatchWindow(_ r: WireRequest, context: DispatchContext) -> VerbOutcome {
+    let parsed = ParsedArgs(r.args)
+    let prefix = parsed.flags["title-prefix"]
+    let id = context.subscriptions.nextSubID()
+    let sub = WindowWatchSubscription(id: id, titlePrefix: prefix, send: context.sendEvent)
+    context.subscriptions.add(sub)
+    return subscriptionResponse(id)
+}
+
+private func handleWatchProcess(_ r: WireRequest, context: DispatchContext) -> VerbOutcome {
+    guard let pidStr = r.args.first, let pid = Int32(pidStr) else {
+        return .err(code: "invalid_args", detail: ["message": "watch.process requires <pid>"])
+    }
+    let id = context.subscriptions.nextSubID()
+    guard let sub = ProcessExitSubscription(id: id, pid: pid, send: context.sendEvent) else {
+        return .err(code: "internal_error", detail: ["message": "DispatchSource.makeProcessSource failed"])
+    }
+    context.subscriptions.add(sub)
+    return subscriptionResponse(id)
+}
+
+private func handleWatchElement(_ r: WireRequest, context: DispatchContext) -> VerbOutcome {
+    guard let elt = r.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "watch.element requires <elt:N>"])
+    }
+    do {
+        let (pid, element) = try context.elementTable.lookup(id: elt)
+        let id = context.subscriptions.nextSubID()
+        guard let sub = ElementWatchSubscription(id: id, pid: pid, element: element, send: context.sendEvent) else {
+            return .err(code: "ax_error", detail: ["message": "AXObserver setup failed (check Accessibility TCC)"])
+        }
+        context.subscriptions.add(sub)
+        return subscriptionResponse(id)
+    } catch let e as ElementError {
+        return elementErrorOutcome(e)
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
+}
+
+private func handleWatchFile(_ r: WireRequest, context: DispatchContext) -> VerbOutcome {
+    guard let glob = r.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "watch.file requires <glob>"])
+    }
+    let id = context.subscriptions.nextSubID()
+    guard let sub = FileWatchSubscription(id: id, glob: glob, send: context.sendEvent) else {
+        return .err(code: "internal_error", detail: ["message": "FSEventStreamCreate failed"])
+    }
+    context.subscriptions.add(sub)
+    return subscriptionResponse(id)
+}
+
+private func handleWatchCancel(_ r: WireRequest, context: DispatchContext) -> VerbOutcome {
+    guard let id = r.args.first else {
+        return .err(code: "invalid_args", detail: ["message": "watch.cancel requires <sub:N>"])
+    }
+    let was = context.subscriptions.cancel(id: id)
+    let body: [String: Any] = ["cancelled": was]
     let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     return .ok(payload: data)
 }
