@@ -159,18 +159,58 @@ public enum FileSystem {
         }
     }
 
-    public static func deleteFile(_ path: String) throws {
+    /// Outcome of a delete operation — distinguishes Trash from permanent
+    /// so the wire response can confirm what actually happened.
+    public struct DeleteOutcome: Sendable {
+        public let mode: DeleteMode
+        /// `file://` URL of the file inside Trash. Always nil for
+        /// `.permanent`; sometimes nil for `.trashed` if FileManager
+        /// declines to surface it (rare).
+        public let trashURL: URL?
+    }
+
+    public enum DeleteMode: String, Sendable {
+        case trashed
+        case permanent
+    }
+
+    /// Delete a file or empty directory. Defaults to moving the target to
+    /// Trash (recoverable); `permanent: true` opts into `unlink(2)` /
+    /// `rmdir(2)` for an unrecoverable delete.
+    @discardableResult
+    public static func deleteFile(_ path: String, permanent: Bool = false) throws -> DeleteOutcome {
         try FileGuard.ensureAllowed(path)
+        if !permanent {
+            // Trash via FileManager. trashItem handles both files and
+            // directories (single-entry only — non-empty dirs go via
+            // directory.remove --recursive). It returns a resultingItemURL
+            // that names the moved file inside Trash.
+            var resultingURL: NSURL?
+            do {
+                try fm.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &resultingURL)
+                return DeleteOutcome(mode: .trashed, trashURL: resultingURL as URL?)
+            } catch let e as NSError {
+                switch e.code {
+                case NSFileNoSuchFileError, NSFileReadNoSuchFileError: throw FSError.notFound
+                case NSFileWriteNoPermissionError: throw FSError.permissionDenied
+                default: throw FSError.io(e.localizedDescription)
+                }
+            }
+        }
+        // permanent=true → POSIX hard delete.
         if unlink(path) != 0 {
             // unlink fails on directories with EPERM/EISDIR; if it's a dir,
             // try rmdir for empty-directory parity with PROTOCOL.md's
             // "file or empty directory" wording.
             if errno == EISDIR || errno == EPERM {
-                if rmdir(path) == 0 { return }
+                if rmdir(path) == 0 {
+                    return DeleteOutcome(mode: .permanent, trashURL: nil)
+                }
                 if errno == ENOTEMPTY { throw FSError.notEmpty }
             }
             throw errToFSError(errno: errno)
         }
+        return DeleteOutcome(mode: .permanent, trashURL: nil)
     }
 
     public static func rename(src: String, dst: String, overwrite: Bool = false, allowCrossFS: Bool = false) throws {
@@ -300,35 +340,65 @@ public enum FileSystem {
         }
     }
 
-    public static func removeDirectory(_ path: String, recursive: Bool) throws {
+    /// Remove a directory. Defaults to moving the directory (and its
+    /// contents) to Trash. `permanent: true` switches to POSIX rmdir / rm
+    /// -rf. `recursive` is still required for non-empty directories
+    /// regardless of mode — the flag preserves the "yes, I know there's
+    /// stuff in here" intent that Trash-recoverability doesn't undo.
+    @discardableResult
+    public static func removeDirectory(_ path: String, recursive: Bool, permanent: Bool = false) throws -> DeleteOutcome {
         try FileGuard.ensureAllowed(path)
+
+        if !permanent {
+            // Trash branch. Enforce the "non-empty needs --recursive" rule
+            // in both modes so callers can't accidentally trash a large
+            // tree they thought was empty.
+            if !recursive {
+                let entries = try listDirectory(path)
+                if !entries.isEmpty { throw FSError.notEmpty }
+            }
+            var resultingURL: NSURL?
+            do {
+                try fm.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &resultingURL)
+                return DeleteOutcome(mode: .trashed, trashURL: resultingURL as URL?)
+            } catch let e as NSError {
+                switch e.code {
+                case NSFileNoSuchFileError, NSFileReadNoSuchFileError: throw FSError.notFound
+                case NSFileWriteNoPermissionError: throw FSError.permissionDenied
+                default: throw FSError.io(e.localizedDescription)
+                }
+            }
+        }
+
+        // permanent=true → POSIX rmdir / recursive walk.
         if !recursive {
             if rmdir(path) != 0 {
                 if errno == ENOTEMPTY { throw FSError.notEmpty }
                 throw errToFSError(errno: errno)
             }
-            return
+            return DeleteOutcome(mode: .permanent, trashURL: nil)
         }
-        // Recursive remove — symlinks are NOT traversed (matches windows-
-        // modern semantics).
+        // Recursive permanent remove — symlinks are NOT traversed (matches
+        // windows-modern semantics).
         var st = Darwin.stat()
         if sysLstat(path, &st) != 0 { throw errToFSError(errno: errno) }
         let type = entryType(mode: mode_t(st.st_mode))
         if type == .symlink {
             if unlink(path) != 0 { throw errToFSError(errno: errno) }
-            return
+            return DeleteOutcome(mode: .permanent, trashURL: nil)
         }
         if type != .directory { throw FSError.notADirectory }
         let entries = try listDirectory(path)
         for entry in entries {
             let child = (path as NSString).appendingPathComponent(entry.name)
             if entry.type == .directory {
-                try removeDirectory(child, recursive: true)
+                try removeDirectory(child, recursive: true, permanent: true)
             } else {
                 if unlink(child) != 0 { throw errToFSError(errno: errno) }
             }
         }
         if rmdir(path) != 0 { throw errToFSError(errno: errno) }
+        return DeleteOutcome(mode: .permanent, trashURL: nil)
     }
 
     // MARK: helpers

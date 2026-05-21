@@ -331,17 +331,22 @@ private func handleReset(_ request: WireRequest) -> VerbOutcome {
 }
 
 private func handleTierRaise(_ request: WireRequest, currentTier: Tier, tokenStore: TokenStore?) -> VerbOutcome {
-    // Grammar: connection.tier_raise <tier> <token>
-    guard request.args.count >= 2 else {
-        return .err(code: "invalid_args", detail: ["message": "expected <tier> <token>"])
+    // Accept both `<tier> <token>` positional form (ARH bootstrap clients)
+    // and `--tier <tier> --token <token>` flag form (the conformance
+    // WireClient + MCP tools/call shape).
+    let parsed = ParsedArgs(request.args)
+    let tierStr = parsed.flags["tier"] ?? parsed.positionals.first
+    let tokenStr = parsed.flags["token"] ?? (parsed.positionals.count >= 2 ? parsed.positionals[1] : nil)
+    guard let tierStr = tierStr, let tokenStr = tokenStr else {
+        return .err(code: "invalid_args", detail: ["message": "expected <tier> <token> or --tier T --token X"])
     }
-    guard let target = Tier(rawValue: request.args[0]) else {
-        return .err(code: "invalid_args", detail: ["message": "unknown tier \"\(request.args[0])\""])
+    guard let target = Tier(rawValue: tierStr) else {
+        return .err(code: "invalid_args", detail: ["message": "unknown tier \"\(tierStr)\""])
     }
     guard let store = tokenStore else {
         return .err(code: "not_supported_by_target", detail: ["message": "agent started without token store"])
     }
-    if !store.matches(request.args[1]) {
+    if !store.matches(tokenStr) {
         return .err(code: "auth_failed", detail: ["message": "token mismatch"])
     }
     // Token valid — grant requested tier. Per PROTOCOL.md §2.3 the new tier
@@ -1032,10 +1037,20 @@ private func handleFileWriteAt(_ r: WireRequest) -> VerbOutcome {
 }
 
 private func handleFileDelete(_ r: WireRequest) -> VerbOutcome {
-    guard let path = r.args.first else {
+    let parsed = ParsedArgs(r.args)
+    guard let path = parsed.positionals.first else {
         return .err(code: "invalid_args", detail: ["message": "file.delete requires <path>"])
     }
-    return fsResult({ try FileSystem.deleteFile(path); return () }, encode: { _ in Data() })
+    let permanent = parsed.flags["permanent"] != nil
+    return fsResult({ try FileSystem.deleteFile(path, permanent: permanent) }, encode: encodeDeleteOutcome)
+}
+
+private func encodeDeleteOutcome(_ outcome: FileSystem.DeleteOutcome) -> Data {
+    var body: [String: Any] = ["mode": outcome.mode.rawValue]
+    if let url = outcome.trashURL {
+        body["trash_url"] = url.absoluteString
+    }
+    return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
 }
 
 private func handleFileRename(_ r: WireRequest) -> VerbOutcome {
@@ -1155,7 +1170,10 @@ private func handleDirRemove(_ r: WireRequest) -> VerbOutcome {
         return .err(code: "invalid_args", detail: ["message": "directory.remove requires <path>"])
     }
     let recursive = parsed.flags["recursive"] != nil
-    return fsResult({ try FileSystem.removeDirectory(path, recursive: recursive); return () }, encode: { _ in Data() })
+    let permanent = parsed.flags["permanent"] != nil
+    return fsResult({
+        try FileSystem.removeDirectory(path, recursive: recursive, permanent: permanent)
+    }, encode: encodeDeleteOutcome)
 }
 
 // MARK: element.*
