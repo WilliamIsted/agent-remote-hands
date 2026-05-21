@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import AppKit
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -22,35 +23,39 @@ public enum AgentIdentity {
     public static let osFamily = "macos-modern"
 }
 
-/// Build the `system.info` response body. Returned shape matches PROTOCOL.md
-/// §3.1. Fields that don't apply to the macOS family (`integrity`,
-/// `uiaccess`, `privileges`) are populated with macOS-appropriate values or
-/// `null`.
+/// Build the `system.info` response body. Field names match the post-rc.2
+/// schema used by the v2.2 conformance suite — `family`/`agent`/
+/// `agent_protocol`/`os_name`+`os_version`/`cpu_arch`/`screens`/`framings`
+/// — rather than the older PROTOCOL.md §3.1 names (`os`/`name`/`protocol`/
+/// `arch`/`monitors`).
 public func systemInfoBody(currentTier: Tier, implementedNamespaces: [String], implementedVerbs: [String]) -> [String: Any] {
     let proc = ProcessInfo.processInfo
     let host = Host.current().localizedName ?? proc.hostName
     let user = NSUserName()
-    let arch = currentArchString()
 
     return [
-        "name": AgentIdentity.name,
-        "version": AgentIdentity.version,
-        "protocol": AgentIdentity.protocolVersion,
-        "os": AgentIdentity.osFamily,
-        "arch": arch,
+        "family": AgentIdentity.osFamily,
+        "agent": AgentIdentity.name,
+        "agent_version": AgentIdentity.version,
+        "agent_protocol": AgentIdentity.protocolVersion,
+        "os_name": "macOS",
+        "os_version": proc.operatingSystemVersionString,
+        "cpu_arch": currentArchString(),
         "hostname": host,
         "user": user,
-        // macOS has no Windows-style mandatory integrity control. Report null
-        // so callers can distinguish "doesn't apply" from "unknown".
-        "integrity": NSNull(),
+        // macOS has no Windows-style mandatory integrity control. The
+        // conformance enum permits "none".
+        "integrity": "none",
         "uiaccess": false,
-        "monitors": monitorCount(),
+        "screens": screens(),
         "privileges": [String](),
         "tiers": Tier.allCases.map { $0.rawValue },
         "current_tier": currentTier.rawValue,
         "auth": ["token"],
         "max_connections": 4,
         "namespaces": implementedNamespaces,
+        // Supported framings post-hello. WebSocket isn't yet implemented.
+        "framings": ["mcp"],
         "capabilities": [
             "capture": "screencapturekit",
             "ui_automation": "ax",
@@ -70,16 +75,24 @@ private func currentArchString() -> String {
     #if arch(arm64)
     return "arm64"
     #elseif arch(x86_64)
-    return "x86_64"
+    return "x64"
     #else
     return "unknown"
     #endif
 }
 
-private func monitorCount() -> Int {
-    // The MVP slice does not link AppKit, so we cannot query NSScreen here
-    // without bloating the binary. Capture-related verbs will pull this from
-    // ScreenCaptureKit when they land. Until then report 0 — capture-gated
-    // clients should consult `capabilities.capture` instead.
-    return 0
+private func screens() -> [[String: Any]] {
+    return NSScreen.screens.enumerated().map { idx, screen in
+        let f = screen.frame
+        return [
+            "index": idx,
+            "bounds": [
+                "x": Int(f.origin.x),
+                "y": Int(f.origin.y),
+                "w": Int(f.size.width),
+                "h": Int(f.size.height),
+            ] as [String: Int],
+            "scale": Double(screen.backingScaleFactor),
+        ]
+    }
 }

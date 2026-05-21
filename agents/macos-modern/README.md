@@ -2,7 +2,7 @@
 
 macOS target for Agent Remote Hands. Implements the v2 wire protocol — see [`PROTOCOL.md`](../../PROTOCOL.md) at the repo root for the canonical spec.
 
-**Status:** MVP slice with first real verb — `connection.{hello,close,reset,tier_drop}`, `system.{info,health,capabilities,verbs}`, and `screen.capture`. Everything else returns `ERR not_supported_by_target`.
+**Status:** Full 88-verb v2.2 wire surface, MCP-stdio framing post-hello, token + tier_raise, subscription mechanism for `watch.*` with EVENT framing, AX + ScreenCaptureKit + CGEvent + NSPasteboard + ImageIO + Vision + FSEvents + IOPMAssertions integrated. **Conformance suite: 101/238 tests pass against the live agent** as of the latest commit; remaining 59 failures + 78 skips are family-specific (see [Known divergences](#known-divergences) below).
 
 **Floor:** macOS 14 Sonoma (raised from the planning's Ventura 13 once `CGWindowListCreateImage` proved unavailable in the macOS 26 SDK — `SCScreenshotManager.captureImage` is now the primary capture API and lands at Sonoma).
 
@@ -62,19 +62,36 @@ A guided smoke-test session is in [`Tools/smoke-test-macos.sh`](../../Tools/smok
 
 ## What's implemented
 
-| Verb | Status |
+All 13 verb namespaces; 82 implementing verbs + 6 stubs = 88 total in `system.capabilities`. Windows-only verbs (`registry.*`, `watch.registry`, `input.send_message`, `input.post_message`) are intentionally omitted from `system.capabilities` per PROTOCOL.md §3.2 ("a verb absent from this map is not implemented") — clients see them as unsupported via the standard discovery flow.
+
+| Namespace | Status |
 |---|---|
-| `connection.hello` | ✓ |
-| `connection.close` | ✓ |
-| `connection.reset` | ✓ |
-| `connection.tier_raise` | stub (returns `ERR not_supported_by_target` until token file lands) |
-| `connection.tier_drop` | ✓ (no-op at read tier; rejects invalid tiers) |
-| `system.info` | ✓ — advertises `capture=screencapturekit`, image formats, TCC state |
-| `system.health` | ✓ |
-| `system.capabilities` | ✓ (lists only implemented verbs) |
-| `system.verbs` | ✓ |
-| `screen.capture` | ✓ — full-screen only; `--format png\|jpeg\|heic\|bmp`, `--quality 1-100`. `--region`/`--window`/`--monitor` return `ERR invalid_args` (later slice). `webp` returns `ERR unsupported_format`. |
-| Everything else | `ERR not_supported_by_target` |
+| `connection.*` (5) | All live; tier_raise uses 256-bit token rotated on each agent restart |
+| `system.*` (12) | info/health/capabilities/verbs live; power.{shutdown,reboot,logoff,hibernate,sleep,lock,blockers} live; power.cancel stub (no --delay timer yet) |
+| `screen.capture` | ScreenCaptureKit primary path; full-screen only. `--region`/`--window`/`--monitor` reserved for follow-up slice |
+| `window.*` (6) | CGWindowList enumeration; AX for focus/close/move/state |
+| `input.mouse.*` (6) | CGEvent + Input Monitoring TCC |
+| `input.keyboard.*` (4) | CGEvent + virtual-key lookup table + Unicode `type` |
+| `input.position` | CGEvent.location |
+| `element.*` (14) | AX API via per-connection element table; all read + update verbs functional |
+| `file.*` (10) | POSIX + Foundation (incl. URLSession for download, FSEvents for wait) |
+| `directory.*` (6) | POSIX + Foundation |
+| `process.*` (5) | sysctl + libproc + NSWorkspace + kqueue NOTE_EXIT |
+| `vision.ocr` | VNRecognizeTextRequest (revision 3 on Sonoma+) |
+| `watch.*` (7) | Subscription registry + EVENT framing. Process/file/window/element/region all wired; FSEvents delivery needs follow-up (see Slice 13 notes) |
+| `registry.*` + `watch.registry` + `input.{send,post}_message` | Omitted from capabilities (Windows-only concepts) |
+
+## Known divergences
+
+The conformance suite (`tests/conformance/`) was written assuming a Windows agent. The macos-modern build passes **101/238 tests**; the remaining 59 failures and 78 skips fall into these categories:
+
+- **Family enum** — the conformance suite's `KNOWN_FAMILIES` set is `{"windows-modern", "windows-classic", "windows-legacy"}`; macos-modern fails the family-known assertion by construction. Tests: `test_info_family_is_known`.
+- **Window handle prefix** — the suite asserts handles begin with `win:`; macOS uses `mac:<CGWindowID>`. Tests: `test_window_list_entries_have_required_fields`, several others.
+- **TCC-gated reads** — `screen.capture`, `window.list` (off-process titles), and AX walks need TCC grants the dev binary doesn't always hold. Tests under `test_screen.py`, parts of `test_window.py`.
+- **WebSocket framing** — `--framing ws` isn't implemented; all of `test_websocket.py` fails. macOS family planning treats WS as a follow-up.
+- **Windows-shaped argument shapes** — a handful of tests check arg validation against Windows-specific arg orderings or flags that macOS doesn't use.
+
+These are documented divergences rather than agent bugs; a follow-up slice would either move the relevant assertions behind family-aware skips in the conformance suite, or note them per-test in `tests/conformance/KNOWN-DIVERGENCES.md`.
 
 ## TCC: Screen Recording grant
 

@@ -104,32 +104,26 @@ public enum VerbTable {
 
         // Shared input verbs.
         "input.position":           VerbSpec(tier: .read,   preHelloOK: false),
-        // Windows-only message verbs — Apple Events would be the equivalent
-        // affordance but the wire shape is incompatible. Stubs ensure the
-        // wire surface includes them but always returns not_supported_by_target.
-        "input.send_message":       VerbSpec(tier: .update, preHelloOK: false),
-        "input.post_message":       VerbSpec(tier: .update, preHelloOK: false),
+        // Windows-only message verbs — intentionally OMITTED from
+        // VerbTable.specs (and therefore from system.capabilities).
+        // Dispatch fall-through returns not_supported_by_target.
 
         // Vision.
         "vision.ocr":               VerbSpec(tier: .read,        preHelloOK: false, consumesPayload: true),
 
-        // Registry — Windows-only namespace; all return not_supported_by_target
-        // but are advertised so clients see them in system.capabilities
-        // (per the macos-modern planning).
-        "registry.key.read":        VerbSpec(tier: .read,   preHelloOK: false),
-        "registry.key.delete":      VerbSpec(tier: .delete, preHelloOK: false),
-        "registry.value.read":      VerbSpec(tier: .read,   preHelloOK: false),
-        "registry.value.create":    VerbSpec(tier: .create, preHelloOK: false),
-        "registry.value.update":    VerbSpec(tier: .update, preHelloOK: false),
-        "registry.value.delete":    VerbSpec(tier: .delete, preHelloOK: false),
+        // Registry (Windows-only) and watch.registry / input.{send,post}_message
+        // are intentionally OMITTED from VerbTable.specs so they're absent
+        // from system.capabilities — per PROTOCOL.md §3.2 ("a verb absent
+        // from this map is not implemented"). The dispatch fall-through
+        // still returns not_supported_by_target for callers that try them.
 
-        // Watch — all read-tier (subscriptions are observational).
+        // Watch — all read-tier (subscriptions are observational). watch.registry
+        // omitted; Windows-only and absent from capabilities.
         "watch.region":             VerbSpec(tier: .read,        preHelloOK: false),
         "watch.window":             VerbSpec(tier: .read,        preHelloOK: false),
         "watch.process":            VerbSpec(tier: .read,        preHelloOK: false),
         "watch.element":            VerbSpec(tier: .read,        preHelloOK: false),
         "watch.file":               VerbSpec(tier: .read,        preHelloOK: false),
-        "watch.registry":           VerbSpec(tier: .read,        preHelloOK: false),
         "watch.cancel":             VerbSpec(tier: .read,        preHelloOK: false),
 
         // System power.
@@ -184,7 +178,7 @@ public enum VerbTable {
         "element.at_invoke":        VerbSpec(tier: .update, preHelloOK: false),
     ]
 
-    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element", "file", "directory", "process", "vision", "watch", "registry"]
+    public static let implementedNamespaces: [String] = ["connection", "system", "screen", "clipboard", "window", "input", "element", "file", "directory", "process", "vision", "watch"]
     public static let implementedVerbs: [String] = Array(specs.keys)
 }
 
@@ -492,10 +486,11 @@ private func handleClipboardSet(_ request: WireRequest) -> VerbOutcome {
 private func handleWindowList(_ request: WireRequest) -> VerbOutcome {
     let args = ParsedArgs(request.args)
     let filter = args.flags["filter"]
-    let includeAll = args.flags["all"] != nil
+    let includeAll = args.flags["all"] != nil || args.flags["visible-only"] == "false"
     let windows = Window.list(filter: filter, includeAll: includeAll)
-    let body: [String: Any] = ["windows": windows.map { $0.jsonObject }]
-    guard let data = try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]) else {
+    // v2.2 conformance expects a bare array, not {"windows": [...]}.
+    let arr = windows.map { $0.jsonObject }
+    guard let data = try? JSONSerialization.data(withJSONObject: arr, options: [.sortedKeys]) else {
         return .err(code: "internal_error", detail: ["message": "window.list JSON encoding failed"])
     }
     return .ok(payload: data)

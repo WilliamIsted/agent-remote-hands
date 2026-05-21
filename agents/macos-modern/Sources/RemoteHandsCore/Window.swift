@@ -24,9 +24,13 @@ public struct WindowInfo: Sendable {
 
     public var idString: String { "mac:\(id)" }
 
+    /// JSON object per the v2.2 conformance schema: `handle`, `title`,
+    /// `pid` (int), `bounds: {x, y, w, h}`, `owner`, `layer`. macOS uses
+    /// `mac:` prefix in `handle` — the conformance suite asserts `win:`
+    /// (windows-only); that assertion is documented as a known-divergence.
     public var jsonObject: [String: Any] {
         [
-            "id": idString,
+            "handle": idString,
             "title": title,
             "pid": Int(pid),
             "owner": owner,
