@@ -112,17 +112,56 @@ public final class MCPSession {
         }
     }
 
-    /// Wrap a successful verb body as an MCP `tools/call` result. The
-    /// verb's JSON body is the single text content item (conformance suite
-    /// extracts `result.content[0].text` and `json.loads()` it).
+    /// Wrap a successful verb body as an MCP `tools/call` result.
+    ///
+    /// JSON / text verbs produce UTF-8 bodies — emitted as a single text
+    /// content item (the conformance suite extracts `result.content[0].text`
+    /// and `json.loads()` it). Binary verbs (`screen.capture`) produce image
+    /// bytes that are not valid UTF-8; those are emitted as an MCP image
+    /// content item with base64 `data`, rather than being lost to a failed
+    /// `String(data:encoding:)` conversion.
     private func mcpContentOK(_ body: Data) -> [String: Any] {
-        let text = String(data: body, encoding: .utf8) ?? ""
+        if let text = String(data: body, encoding: .utf8) {
+            return [
+                "content": [
+                    ["type": "text", "text": text] as [String: String],
+                ],
+                "isError": false,
+            ]
+        }
         return [
             "content": [
-                ["type": "text", "text": text] as [String: String],
+                [
+                    "type": "image",
+                    "data": body.base64EncodedString(),
+                    "mimeType": sniffImageMimeType(body) ?? "application/octet-stream",
+                ] as [String: String],
             ],
             "isError": false,
         ]
+    }
+
+    /// Sniff an image MIME type from a body's leading magic bytes. Returns
+    /// nil if the bytes are not a recognised image format.
+    private func sniffImageMimeType(_ data: Data) -> String? {
+        let b = [UInt8](data.prefix(12))
+        if b.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+            return "image/png"
+        }
+        if b.starts(with: [0xFF, 0xD8, 0xFF]) {
+            return "image/jpeg"
+        }
+        if b.starts(with: [0x42, 0x4D]) {
+            return "image/bmp"
+        }
+        // HEIC: "ftyp" box at offset 4, an HEIF/HEIC brand at offset 8.
+        if b.count >= 12, b[4] == 0x66, b[5] == 0x74, b[6] == 0x79, b[7] == 0x70 {
+            let brand = String(bytes: b[8..<12], encoding: .ascii) ?? ""
+            if ["heic", "heix", "hevc", "hevx", "mif1", "msf1"].contains(brand) {
+                return "image/heic"
+            }
+        }
+        return nil
     }
 
     /// Wrap a verb-level ERR as MCP `tools/call` result with `isError:
