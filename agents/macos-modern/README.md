@@ -2,7 +2,9 @@
 
 macOS target for Agent Remote Hands. Implements the v2 wire protocol — see [`PROTOCOL.md`](../../PROTOCOL.md) at the repo root for the canonical spec.
 
-**Status:** MVP slice — only `connection.{hello,close,reset}`, `system.{info,health,capabilities,verbs}` implemented today. Everything else returns `ERR not_supported_by_target`. Track verb progression via the planning stubs alongside this file (see the agent rebuild planning index).
+**Status:** MVP slice with first real verb — `connection.{hello,close,reset,tier_drop}`, `system.{info,health,capabilities,verbs}`, and `screen.capture`. Everything else returns `ERR not_supported_by_target`.
+
+**Floor:** macOS 14 Sonoma (raised from the planning's Ventura 13 once `CGWindowListCreateImage` proved unavailable in the macOS 26 SDK — `SCScreenshotManager.captureImage` is now the primary capture API and lands at Sonoma).
 
 ## Build
 
@@ -67,11 +69,25 @@ A guided smoke-test session is in [`Tools/smoke-test-macos.sh`](../../Tools/smok
 | `connection.reset` | ✓ |
 | `connection.tier_raise` | stub (returns `ERR not_supported_by_target` until token file lands) |
 | `connection.tier_drop` | ✓ (no-op at read tier; rejects invalid tiers) |
-| `system.info` | ✓ |
+| `system.info` | ✓ — advertises `capture=screencapturekit`, image formats, TCC state |
 | `system.health` | ✓ |
 | `system.capabilities` | ✓ (lists only implemented verbs) |
 | `system.verbs` | ✓ |
+| `screen.capture` | ✓ — full-screen only; `--format png\|jpeg\|heic\|bmp`, `--quality 1-100`. `--region`/`--window`/`--monitor` return `ERR invalid_args` (later slice). `webp` returns `ERR unsupported_format`. |
 | Everything else | `ERR not_supported_by_target` |
+
+## TCC: Screen Recording grant
+
+`screen.capture` requires the Screen Recording TCC grant. The probe uses `CGPreflightScreenCaptureAccess()` and `screen.capture` returns `ERR permission_denied {"category":"screen_recording","hint":"…"}` if the grant is absent.
+
+**Granting on a dev machine:**
+
+1. Run the binary at least once (`swift run rha-mac --port 8765`).
+2. Open **System Settings → Privacy & Security → Screen Recording**.
+3. Find `rha-mac` (or `swift-frontend` if running via `swift run` — the embedded helper path varies). Toggle on.
+4. Restart the agent so the grant takes effect for the new process.
+
+For a stable signing identity (Developer ID Application + Hardened Runtime), the grant persists across rebuilds. Unsigned dev binaries reset whenever the binary's path or hash changes.
 
 ## Host vs VM
 

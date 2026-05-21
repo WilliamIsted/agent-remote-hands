@@ -14,7 +14,12 @@ import PackageDescription
 let package = Package(
     name: "remote-hands",
     platforms: [
-        .macOS(.v13),
+        // Was .v13 (Ventura) in the planning; raised to .v14 (Sonoma) once
+        // implementation discovered CGWindowListCreateImage is unavailable in
+        // the macOS 26 SDK, forcing ScreenCaptureKit's one-shot
+        // SCScreenshotManager API which lands at Sonoma. See screen.capture
+        // commit notes.
+        .macOS(.v14),
     ],
     products: [
         .library(name: "RemoteHandsCore", targets: ["RemoteHandsCore"]),

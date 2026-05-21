@@ -19,8 +19,11 @@ The current MVP slice does not yet use ScreenCaptureKit, AX, or CGEvent — it's
 | TCP listener (BSD sockets) | 10.4 Tiger | POSIX `socket`/`bind`/`listen`/`accept` |
 | Wire framing | n/a | Pure Swift |
 | `Foundation` (JSON, Date, hostnames) | 10.10 Yosemite | `JSONSerialization`, `ProcessInfo` |
+| `ScreenCaptureKit.SCScreenshotManager` | 14.0 Sonoma | One-shot capture; sets the family floor |
+| `ImageIO` encoders (PNG/JPEG/HEIC/BMP) | 10.4 Tiger | `CGImageDestination*` |
+| Screen Recording TCC probe | 10.15 Catalina | `CGPreflightScreenCaptureAccess` |
 
-The hardest current floor is set by the SwiftPM `Package.swift` declaration: `platforms: [.macOS(.v13)]`. Lowering it is straightforward until a verb lands that genuinely needs Ventura+ APIs (the first will be `screen.capture` via ScreenCaptureKit).
+The hardest current floor is **macOS 14 Sonoma**, set by `SCScreenshotManager.captureImage` (the simplest one-shot capture API). The planning originally targeted Ventura 13, but implementation discovered `CGWindowListCreateImage` is unavailable in the macOS 26 SDK — Apple removed it entirely after deprecating it in Sequoia. The remaining ScreenCaptureKit path on Ventura 13 is `SCStream`-based, requires an async frame-callback wrapper, and is omitted from the MVP for simplicity. A Ventura-supporting slice can re-add it later if demand emerges.
 
 ## Planned API floor (full surface)
 

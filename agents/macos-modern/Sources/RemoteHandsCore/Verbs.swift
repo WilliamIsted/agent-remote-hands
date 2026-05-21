@@ -59,9 +59,12 @@ public enum VerbTable {
         "system.health":         VerbSpec(tier: .read, preHelloOK: false),
         "system.capabilities":   VerbSpec(tier: .read, preHelloOK: false),
         "system.verbs":          VerbSpec(tier: .read, preHelloOK: false),
+
+        // Screen capture — read-tier.
+        "screen.capture":        VerbSpec(tier: .read, preHelloOK: false),
     ]
 
-    public static let implementedNamespaces: [String] = ["connection", "system"]
+    public static let implementedNamespaces: [String] = ["connection", "system", "screen"]
     public static let implementedVerbs: [String] = Array(specs.keys)
 }
 
@@ -97,6 +100,7 @@ public func dispatchVerb(
     case "system.health":      return handleSystemHealth()
     case "system.capabilities": return handleSystemCapabilities()
     case "system.verbs":       return handleSystemVerbs()
+    case "screen.capture":     return handleScreenCapture(request)
     default:
         // Unreachable — VerbTable.specs guard covers everything above.
         return .err(code: "internal_error", detail: ["verb": request.verb])
@@ -187,4 +191,59 @@ private func handleSystemVerbs() -> VerbOutcome {
     let body: [String: Any] = ["verbs": verbs.sorted { ($0["name"] ?? "") < ($1["name"] ?? "") }]
     let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     return .ok(payload: data)
+}
+
+// MARK: screen.*
+
+private func handleScreenCapture(_ request: WireRequest) -> VerbOutcome {
+    let args = ParsedArgs(request.args)
+
+    // --format <png|jpeg|heic|bmp|webp>. Default: png. webp is in the
+    // protocol enum for forward compatibility but not implemented here.
+    let formatStr = args.flags["format"] ?? "png"
+    if formatStr == "webp" {
+        return .err(code: "unsupported_format", detail: ["format": formatStr])
+    }
+    guard let format = CaptureFormat(rawValue: formatStr) else {
+        return .err(code: "unsupported_format", detail: ["format": formatStr])
+    }
+
+    // --quality 1..100. Default 75. Lossless formats (png, bmp) ignore it.
+    let quality: Int
+    if let raw = args.flags["quality"] {
+        guard let q = Int(raw), (1...100).contains(q) else {
+            return .err(code: "invalid_args", detail: ["message": "quality must be an integer 1-100"])
+        }
+        quality = q
+    } else {
+        quality = 75
+    }
+
+    // Selectors not yet implemented in this slice. Reject explicitly so a
+    // caller passing --region doesn't get a misleadingly-correct full-screen
+    // capture back.
+    for sel in ["region", "window", "monitor"] {
+        if args.flags[sel] != nil {
+            return .err(
+                code: "invalid_args",
+                detail: ["message": "--\(sel) not yet implemented in MVP slice; full-screen capture only"]
+            )
+        }
+    }
+
+    do {
+        let bytes = try ScreenCapture.captureFullScreen(format: format, quality: quality)
+        return .ok(payload: bytes)
+    } catch CaptureError.permissionDenied {
+        return .err(code: "permission_denied", detail: [
+            "category": "screen_recording",
+            "hint": "Grant in System Settings → Privacy & Security → Screen Recording, then restart the agent",
+        ])
+    } catch CaptureError.unsupportedFormat(let f) {
+        return .err(code: "unsupported_format", detail: ["format": f])
+    } catch CaptureError.captureFailed(let msg) {
+        return .err(code: "capture_failed", detail: ["message": msg])
+    } catch {
+        return .err(code: "capture_failed", detail: ["message": "\(error)"])
+    }
 }

@@ -52,11 +52,16 @@ public func systemInfoBody(currentTier: Tier, implementedNamespaces: [String], i
         "max_connections": 4,
         "namespaces": implementedNamespaces,
         "capabilities": [
-            "capture": "none",        // ScreenCaptureKit lands with screen.capture
+            "capture": "screencapturekit",
             "ui_automation": "none",  // AX lands with element.*
-            "image_formats": [String](),
+            "image_formats": CaptureFormat.allCases.map { $0.rawValue },
             "discovery": "none",      // Bonjour lands with mDNS module
             "implemented_verbs": implementedVerbs.sorted(),
+            "tcc": [
+                "screen_recording": ScreenCapture.hasScreenRecordingPermission() ? "granted" : "denied",
+                "accessibility": "unknown",      // probed once AX verbs land
+                "input_monitoring": "unknown",   // probed once input.* lands
+            ] as [String: String],
         ] as [String: Any],
     ]
 }
