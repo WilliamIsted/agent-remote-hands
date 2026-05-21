@@ -28,6 +28,10 @@ public final class ConnectionSession: @unchecked Sendable {
     private var state: ConnectionState = .preHello
     private var tier: Tier = .read
     private let frameReader: FrameReader
+    private let mcpReader = MCPFrameReader()
+    private let mcp = MCPSession()
+    /// Once the hello OK body is sent, switch all subsequent framing to MCP-stdio.
+    private var usingMCP = false
     private let elementTable = ElementTable()
     private let subscriptions = SubscriptionRegistry()
     private let tokenStore: TokenStore?
@@ -72,25 +76,90 @@ public final class ConnectionSession: @unchecked Sendable {
                 // 0 = peer EOF; <0 = error. Either way: end.
                 return
             }
-            frameReader.append(Array(readBuf[0..<n]))
-
-            // Drain as many complete frames as the buffer holds. `nextFrame`
-            // returns `.incomplete` when more bytes are needed; we stop and
-            // wait for the next read.
-            drainLoop: while true {
-                let result = frameReader.nextFrame()
-                switch result {
-                case .incomplete:
-                    break drainLoop
-                case .headerTooLong:
-                    sendErr(code: "header_too_long")
-                case .parseError(let code, let detail):
-                    sendErr(code: code, detail: detail)
-                case .ok(let request):
-                    process(request: request)
-                    if state == .closed { return }
+            let chunk = Array(readBuf[0..<n])
+            if usingMCP {
+                mcpReader.append(chunk)
+                drainLoopMCP: while true {
+                    let result = mcpReader.nextFrame()
+                    switch result {
+                    case .incomplete:
+                        break drainLoopMCP
+                    case .parseError(let msg):
+                        // Parse errors at MCP level go back as a JSON-RPC
+                        // error with id=null (no id known).
+                        send(MCPFrame.encode(JSONRPC.error(id: 0, code: JSONRPC.parseError, message: msg)))
+                    case .ok(let frame):
+                        processMCPFrame(frame)
+                        if state == .closed { return }
+                    }
+                }
+            } else {
+                frameReader.append(chunk)
+                drainLoop: while true {
+                    let result = frameReader.nextFrame()
+                    switch result {
+                    case .incomplete:
+                        break drainLoop
+                    case .headerTooLong:
+                        sendErr(code: "header_too_long")
+                    case .parseError(let code, let detail):
+                        sendErr(code: code, detail: detail)
+                    case .ok(let request):
+                        process(request: request)
+                        if state == .closed { return }
+                        // The hello reply triggers the MCP switch.
+                        if state == .connected && request.verb == "connection.hello" {
+                            usingMCP = true
+                            // Any extra bytes already in the bootstrap reader's
+                            // buffer might be the start of MCP frames — but
+                            // FrameReader doesn't expose its buffer. The wire
+                            // protocol's clients in the conformance suite send
+                            // one bootstrap then wait for OK before MCP, so
+                            // we don't expect leftover bytes here. Note for
+                            // follow-up if mixed-buffering surfaces.
+                            logger("[\(label)] switched to MCP-stdio framing")
+                            break drainLoop
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    private func processMCPFrame(_ frame: [String: AnyHashable]) {
+        let context = DispatchContext(
+            currentTier: tier,
+            elementTable: elementTable,
+            subscriptions: subscriptions,
+            sendEvent: { [weak self] subID, payload in
+                // EVENT frames over MCP — emit as JSON-RPC notification.
+                guard let self = self else { return }
+                let body = String(data: payload, encoding: .utf8) ?? ""
+                let notif: [String: Any] = [
+                    "jsonrpc": "2.0",
+                    "method": "notifications/event",
+                    "params": [
+                        "subscription_id": subID,
+                        "payload": body,
+                    ] as [String: String],
+                ]
+                self.send(MCPFrame.encode(notif))
+            },
+            tokenStore: tokenStore
+        )
+        let action = mcp.handle(frame: frame, context: context)
+        switch action {
+        case .send(let obj):
+            send(MCPFrame.encode(obj))
+        case .noResponse:
+            break
+        case .tierChange(let newTier, let obj):
+            send(MCPFrame.encode(obj))
+            tier = newTier
+            logger("[\(label)] tier changed to \(newTier.rawValue)")
+        case .sendThenClose(let obj):
+            send(MCPFrame.encode(obj))
+            state = .closed
         }
     }
 
