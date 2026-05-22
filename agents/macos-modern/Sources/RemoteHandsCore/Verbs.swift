@@ -1234,8 +1234,90 @@ private func handleVisionDescribe(_ request: WireRequest) -> VerbOutcome {
 }
 
 private func handleVisionCalibrate(_ request: WireRequest) -> VerbOutcome {
-    // Implemented in Task 10.
-    return .err(code: "internal_error", detail: ["message": "vision.calibrate not yet implemented"])
+    let parsed = ParsedArgs(request.args)
+    let allowed: Set<String> = ["image", "prompt", "language", "endpoint",
+                                "model", "max-tokens", "timeout-ms"]
+    if let unknown = parsed.unknownFlag(allowed: allowed) {
+        return .err(code: "invalid_args", detail: ["unknown_flag": "--\(unknown)"])
+    }
+
+    // image: REQUIRED, base64 PNG/JPEG/BMP.
+    guard let imageB64 = parsed.flags["image"], !imageB64.isEmpty else {
+        return .err(code: "invalid_args", detail: [
+            "message": "vision.calibrate requires --image (base64 PNG/JPEG/BMP)"])
+    }
+    guard let imageData = Data(base64Encoded: imageB64) else {
+        return .err(code: "invalid_args", detail: ["reason": "bad_base64"])
+    }
+    guard let format = VisionLLM.detectImageFormat(imageData) else {
+        return .err(code: "invalid_args", detail: ["reason": "unsupported_image_format"])
+    }
+
+    let prompt = parsed.flags["prompt"] ?? kVisionDefaultPrompt
+    let language = parsed.flags["language"]
+    let model = parsed.flags["model"] ?? ""
+    var maxTokens = 512
+    if let raw = parsed.flags["max-tokens"] {
+        guard let v = Int(raw), (16...4096).contains(v) else {
+            return .err(code: "invalid_args", detail: ["message": "max-tokens must be 16..4096"])
+        }
+        maxTokens = v
+    }
+    var timeoutMs = 30000
+    if let raw = parsed.flags["timeout-ms"] {
+        guard let v = Int(raw), (1000...300000).contains(v) else {
+            return .err(code: "invalid_args", detail: ["message": "timeout-ms must be 1000..300000"])
+        }
+        timeoutMs = v
+    }
+
+    let start = Date()
+
+    // --- OCR side ---
+    var ocrBlock: [String: Any]? = nil
+    if let result = try? VisionOps.ocr(imageData: imageData, language: language) {
+        ocrBlock = [
+            "text": result.observations.map { $0.text }.joined(separator: "\n"),
+            "lines": result.observations.map { obs -> [String: Any] in
+                ["text": obs.text, "confidence": obs.confidence]
+            },
+            "language_used": result.languageUsed,
+        ]
+    }
+
+    // --- Vision-LLM side ---
+    var visionBlock: [String: Any]? = nil
+    let endpointStr = parsed.flags["endpoint"] ?? VisionConfig.defaultEndpoint
+    if !endpointStr.isEmpty, case .success(let endpoint) = VisionLLM.validateEndpoint(endpointStr) {
+        let dataURL = "data:image/\(format);base64," + imageData.base64EncodedString()
+        let body = VisionLLM.buildRequestBody(
+            model: model, prompt: prompt, imageDataURL: dataURL,
+            maxTokens: maxTokens, temperature: 0.2)
+        if case .success(let respData) = VisionLLM.post(
+                endpoint: endpoint, body: body, timeoutMs: timeoutMs),
+           case .success(let llm) = VisionLLM.parseResponse(respData) {
+            var vb: [String: Any] = ["description": llm.description, "model": llm.model]
+            if let ti = llm.tokensIn  { vb["tokens_in"]  = ti }
+            if let to = llm.tokensOut { vb["tokens_out"] = to }
+            visionBlock = vb
+        }
+    }
+
+    // --- Fusion ---
+    // Both failed -> hard error. Otherwise OK with the partial-failure shape.
+    if ocrBlock == nil && visionBlock == nil {
+        return .err(code: "transfer_failed", detail: [
+            "message": "both OCR and the vision-LLM failed"])
+    }
+    let elapsedMs = max(1, Int(Date().timeIntervalSince(start) * 1000))
+    var out: [String: Any] = [
+        "ocr": ocrBlock ?? NSNull(),
+        "vision": visionBlock ?? NSNull(),
+        "elapsed_ms": elapsedMs,
+    ]
+    if parsed.flags["prompt"] != nil { out["prompt"] = prompt }
+    let data = (try? JSONSerialization.data(withJSONObject: out, options: [.sortedKeys])) ?? Data()
+    return .ok(payload: data)
 }
 
 // MARK: system.power.*

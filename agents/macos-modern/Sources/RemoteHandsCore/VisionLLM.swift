@@ -97,6 +97,25 @@ public enum VisionLLM {
             tokensIn: tokensIn, tokensOut: tokensOut))
     }
 
+    /// Detect a supported image format from magic bytes. Returns the format
+    /// token ("png"/"jpeg"/"bmp") or nil. Used by vision.calibrate to
+    /// reject non-image payloads before any expensive decode.
+    public static func detectImageFormat(_ data: Data) -> String? {
+        let b = [UInt8](data.prefix(8))
+        if b.count >= 8,
+           b[0] == 0x89, b[1] == 0x50, b[2] == 0x4E, b[3] == 0x47,
+           b[4] == 0x0D, b[5] == 0x0A, b[6] == 0x1A, b[7] == 0x0A {
+            return "png"
+        }
+        if b.count >= 3, b[0] == 0xFF, b[1] == 0xD8, b[2] == 0xFF {
+            return "jpeg"
+        }
+        if b.count >= 2, b[0] == 0x42, b[1] == 0x4D {
+            return "bmp"
+        }
+        return nil
+    }
+
     /// POST `body` to `endpoint` and return the raw response bytes. Runs
     /// URLSession asynchronously but blocks the calling worker thread on a
     /// semaphore — safe because the connection model is per-thread and the
