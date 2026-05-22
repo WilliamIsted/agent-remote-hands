@@ -112,6 +112,8 @@ public enum VerbTable {
 
         // Vision.
         "vision.ocr":               VerbSpec(tier: .read,        preHelloOK: false, consumesPayload: true),
+        "vision.describe":          VerbSpec(tier: .update,      preHelloOK: false),
+        "vision.calibrate":         VerbSpec(tier: .update,      preHelloOK: false),
 
         // Registry (Windows-only) and watch.registry / input.{send,post}_message
         // are intentionally OMITTED from VerbTable.specs so they're absent
@@ -248,6 +250,8 @@ public func dispatchVerb(
     case "input.send_message", "input.post_message":
         return .err(code: "not_supported_by_target", detail: ["verb": request.verb])
     case "vision.ocr":            return handleVisionOCR(request)
+    case "vision.describe":       return handleVisionDescribe(request)
+    case "vision.calibrate":      return handleVisionCalibrate(request)
     case "watch.region":          return handleWatchRegion(request, context: context)
     case "watch.window":          return handleWatchWindow(request, context: context)
     case "watch.process":         return handleWatchProcess(request, context: context)
@@ -1109,6 +1113,126 @@ private func handleVisionOCR(_ r: WireRequest) -> VerbOutcome {
     } catch {
         return .err(code: "internal_error", detail: ["message": "\(error)"])
     }
+}
+
+// MARK: vision.describe / vision.calibrate
+
+/// The R6 default prompt — verbatim from the windows-modern brief.
+private let kVisionDefaultPrompt =
+    "Describe what is visible on this screen, including UI elements and any "
+    + "visible text. Be concise."
+
+/// Map a VisionLLMError to a verb outcome. `transfer_failed` / `timeout`
+/// are the network codes; `invalid_args` covers configuration faults.
+private func visionLLMErrorOutcome(_ e: VisionLLMError) -> VerbOutcome {
+    switch e {
+    case .invalidURL(let u):
+        return .err(code: "invalid_args", detail: ["message": "endpoint is not a valid URL: \(u)"])
+    case .badScheme(let s):
+        return .err(code: "invalid_args", detail: ["message": "endpoint scheme must be http or https, got \(s)"])
+    case .transferFailed(let m):
+        return .err(code: "transfer_failed", detail: ["message": m])
+    case .httpStatus(let code):
+        return .err(code: "transfer_failed", detail: ["status_code": "\(code)"])
+    case .timeout:
+        return .err(code: "timeout", detail: [:])
+    case .badResponse(let m):
+        return .err(code: "transfer_failed", detail: ["message": m])
+    }
+}
+
+private func handleVisionDescribe(_ request: WireRequest) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    let allowed: Set<String> = ["prompt", "model", "max-tokens", "temperature",
+                                "timeout-ms", "endpoint", "region", "window", "monitor"]
+    if let unknown = parsed.unknownFlag(allowed: allowed) {
+        return .err(code: "invalid_args", detail: ["unknown_flag": "--\(unknown)"])
+    }
+
+    // Endpoint: per-call --endpoint wins over the configured default.
+    let endpointStr = parsed.flags["endpoint"] ?? VisionConfig.defaultEndpoint
+    if endpointStr.isEmpty {
+        return .err(code: "invalid_args", detail: ["reason": "vision_endpoint_missing"])
+    }
+    let endpoint: URL
+    switch VisionLLM.validateEndpoint(endpointStr) {
+    case .success(let u): endpoint = u
+    case .failure(let e): return visionLLMErrorOutcome(e)
+    }
+
+    let prompt = parsed.flags["prompt"] ?? kVisionDefaultPrompt
+    let model = parsed.flags["model"] ?? ""
+    var maxTokens = 512
+    if let raw = parsed.flags["max-tokens"] {
+        guard let v = Int(raw), (16...4096).contains(v) else {
+            return .err(code: "invalid_args", detail: ["message": "max-tokens must be 16..4096"])
+        }
+        maxTokens = v
+    }
+    var temperature = 0.2
+    if let raw = parsed.flags["temperature"], let v = Double(raw) {
+        temperature = v
+    }
+    var timeoutMs = 30000
+    if let raw = parsed.flags["timeout-ms"] {
+        guard let v = Int(raw), (1000...300000).contains(v) else {
+            return .err(code: "invalid_args", detail: ["message": "timeout-ms must be 1000..300000"])
+        }
+        timeoutMs = v
+    }
+
+    // Capture + PNG-encode via the existing vision source resolver.
+    let pngData: Data
+    do {
+        let source = try VisionSource.resolve(parsed, payload: Data())
+        pngData = try ScreenCapture.encodePNG(source.cgImage)
+    } catch let e as VisionSourceError {
+        switch e {
+        case .invalidArgs(let m): return .err(code: "invalid_args", detail: ["message": m])
+        case .notFound(let m):    return .err(code: "not_found", detail: ["message": m])
+        }
+    } catch CaptureError.permissionDenied {
+        return .err(code: "permission_denied", detail: [
+            "category": "screen_recording",
+            "hint": "Grant in System Settings → Privacy & Security → Screen Recording, then restart the agent",
+        ])
+    } catch {
+        return .err(code: "capture_failed", detail: ["message": "\(error)"])
+    }
+
+    let dataURL = "data:image/png;base64," + pngData.base64EncodedString()
+    let body = VisionLLM.buildRequestBody(
+        model: model, prompt: prompt, imageDataURL: dataURL,
+        maxTokens: maxTokens, temperature: temperature)
+
+    let start = Date()
+    let postResult = VisionLLM.post(endpoint: endpoint, body: body, timeoutMs: timeoutMs)
+    let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+
+    switch postResult {
+    case .failure(let e):
+        return visionLLMErrorOutcome(e)
+    case .success(let respData):
+        switch VisionLLM.parseResponse(respData) {
+        case .failure(let e):
+            return visionLLMErrorOutcome(e)
+        case .success(let llm):
+            var out: [String: Any] = [
+                "description": llm.description,
+                "model": llm.model,
+                "elapsed_ms": max(1, elapsedMs),
+            ]
+            if let ti = llm.tokensIn  { out["tokens_in"]  = ti }
+            if let to = llm.tokensOut { out["tokens_out"] = to }
+            let data = (try? JSONSerialization.data(withJSONObject: out, options: [.sortedKeys])) ?? Data()
+            return .ok(payload: data)
+        }
+    }
+}
+
+private func handleVisionCalibrate(_ request: WireRequest) -> VerbOutcome {
+    // Implemented in Task 10.
+    return .err(code: "internal_error", detail: ["message": "vision.calibrate not yet implemented"])
 }
 
 // MARK: system.power.*

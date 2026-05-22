@@ -79,6 +79,12 @@ public enum ScreenCapture {
         return try encode(image, format: format, quality: Double(quality) / 100.0)
     }
 
+    /// PNG-encode an already-captured CGImage. Used by vision.describe to
+    /// turn a VisionSource-resolved frame into request-body bytes.
+    public static func encodePNG(_ image: CGImage) throws -> Data {
+        return try encode(image, format: .png, quality: 1.0)
+    }
+
     /// Returns true if the binary currently holds Screen Recording TCC.
     /// Exposed for `system.info.capabilities.tcc.screen_recording` once
     /// that block lands in SystemInfo.
