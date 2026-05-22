@@ -851,7 +851,7 @@ private func parseModifiers(_ flags: [String: String]) throws -> CGEventFlags {
 
 private func handleKeyTap(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    if let bad = parsed.unknownFlag(allowed: ["modifiers"]) {
+    if let bad = parsed.unknownFlag(allowed: ["vk", "modifiers"]) {
         return .err(code: "invalid_args", detail: ["unknown_flag": "--\(bad)"])
     }
     guard let name = parsed.arg("vk") else {
@@ -876,7 +876,7 @@ private func handleKeyDown(_ request: WireRequest) -> VerbOutcome {
 
 private func handleKeyUp(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    if let bad = parsed.unknownFlag(allowed: ["modifiers"]) {
+    if let bad = parsed.unknownFlag(allowed: ["vk", "modifiers"]) {
         return .err(code: "invalid_args", detail: ["unknown_flag": "--\(bad)"])
     }
     guard let name = parsed.arg("vk") else {
