@@ -1363,7 +1363,7 @@ private func handleFileDownload(_ r: WireRequest) -> VerbOutcome {
 }
 
 private func handleDirList(_ r: WireRequest) -> VerbOutcome {
-    guard let path = r.args.first else {
+    guard let path = ParsedArgs(r.args).arg("path") else {
         return .err(code: "invalid_args", detail: ["message": "directory.list requires <path>"])
     }
     return fsResult({ try FileSystem.listDirectory(path) }, encode: { entries in
@@ -1373,7 +1373,7 @@ private func handleDirList(_ r: WireRequest) -> VerbOutcome {
 }
 
 private func handleDirStat(_ r: WireRequest) -> VerbOutcome {
-    guard let path = r.args.first else {
+    guard let path = ParsedArgs(r.args).arg("path") else {
         return .err(code: "invalid_args", detail: ["message": "directory.stat requires <path>"])
     }
     return fsResult({ try FileSystem.directoryStat(path) }, encode: { tuple in
@@ -1383,7 +1383,7 @@ private func handleDirStat(_ r: WireRequest) -> VerbOutcome {
 }
 
 private func handleDirExists(_ r: WireRequest) -> VerbOutcome {
-    guard let path = r.args.first else {
+    guard let path = ParsedArgs(r.args).arg("path") else {
         return .err(code: "invalid_args", detail: ["message": "directory.exists requires <path>"])
     }
     let (exists, type) = FileSystem.exists(path)
@@ -1395,7 +1395,7 @@ private func handleDirExists(_ r: WireRequest) -> VerbOutcome {
 
 private func handleDirCreate(_ r: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(r.args)
-    guard let path = parsed.positionals.first else {
+    guard let path = parsed.arg("path") else {
         return .err(code: "invalid_args", detail: ["message": "directory.create requires <path>"])
     }
     let parents = parsed.flags["parents"] != nil
@@ -1407,13 +1407,14 @@ private func handleDirCreate(_ r: WireRequest) -> VerbOutcome {
 
 private func handleDirRename(_ r: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(r.args)
-    guard parsed.positionals.count >= 2 else {
+    guard let src = parsed.arg("src", positional: 0),
+          let dst = parsed.arg("dst", positional: 1) else {
         return .err(code: "invalid_args", detail: ["message": "directory.rename requires <src> <dst>"])
     }
     let overwrite = parsed.flags["overwrite"] != nil
     let crossfs = parsed.flags["cross-fs"] != nil
     return fsResult({
-        try FileSystem.rename(src: parsed.positionals[0], dst: parsed.positionals[1],
+        try FileSystem.rename(src: src, dst: dst,
                               overwrite: overwrite, allowCrossFS: crossfs)
         return ["renamed": true] as [String: Any]
     }, encode: encodeJSON)
@@ -1421,7 +1422,7 @@ private func handleDirRename(_ r: WireRequest) -> VerbOutcome {
 
 private func handleDirRemove(_ r: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(r.args)
-    guard let path = parsed.positionals.first else {
+    guard let path = parsed.arg("path") else {
         return .err(code: "invalid_args", detail: ["message": "directory.remove requires <path>"])
     }
     let recursive = parsed.flags["recursive"] != nil
