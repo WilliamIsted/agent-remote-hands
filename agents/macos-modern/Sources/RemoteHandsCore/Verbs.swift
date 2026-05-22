@@ -430,6 +430,15 @@ private func handleSystemVerbs() -> VerbOutcome {
 private func handleScreenCapture(_ request: WireRequest) -> VerbOutcome {
     let args = ParsedArgs(request.args)
 
+    // Reject unknown flags rather than silently ignoring them — a typo
+    // such as `--cursor` for `--no-cursor` must fail loudly.
+    let knownFlags: Set<String> = [
+        "format", "quality", "region", "window", "monitor", "no-cursor", "encoding",
+    ]
+    if let unknown = args.flags.keys.first(where: { !knownFlags.contains($0) }) {
+        return .err(code: "invalid_args", detail: ["unknown_flag": "--\(unknown)"])
+    }
+
     // --format <png|jpeg|heic|bmp|webp>. Default: png. webp is in the
     // protocol enum for forward compatibility but not implemented here.
     let formatStr = args.flags["format"] ?? "png"
@@ -527,7 +536,14 @@ private func handleWindowList(_ request: WireRequest) -> VerbOutcome {
 }
 
 private func handleWindowFind(_ request: WireRequest) -> VerbOutcome {
-    guard let pattern = request.args.first else {
+    let parsed = ParsedArgs(request.args)
+    // window.find takes a single positional <title-pattern> (glob-matched,
+    // case-insensitive) and no flags — reject any flag explicitly so a
+    // caller passing e.g. an unknown --match mode fails loudly.
+    if let unknown = parsed.flags.keys.first {
+        return .err(code: "invalid_args", detail: ["unknown_flag": "--\(unknown)"])
+    }
+    guard let pattern = parsed.positionals.first else {
         return .err(code: "invalid_args", detail: ["message": "window.find requires a title pattern"])
     }
     do {
