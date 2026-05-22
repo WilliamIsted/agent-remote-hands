@@ -1337,11 +1337,22 @@ private func handleFileWait(_ r: WireRequest) -> VerbOutcome {
 }
 
 private func handleFileDownload(_ r: WireRequest) -> VerbOutcome {
-    // Grammar: file.download <url> <destination>
-    guard r.args.count >= 2 else {
-        return .err(code: "invalid_args", detail: ["message": "file.download requires <url> <destination>"])
+    // URL + destination: --url / --local-path flags (spec form) or two
+    // leading positionals.
+    let parsed = ParsedArgs(r.args)
+    guard let url = parsed.flags["url"] ?? parsed.positionals.first else {
+        return .err(code: "invalid_args", detail: ["message": "file.download requires --url"])
     }
-    return fsResult({ try FileSystem.download(url: r.args[0], destination: r.args[1]) }, encode: { stat in
+    guard let dest = parsed.flags["local-path"] ?? parsed.positionals.dropFirst().first else {
+        return .err(code: "invalid_args", detail: ["message": "file.download requires --local-path"])
+    }
+    // Only http/https are downloadable — reject other schemes up front
+    // rather than failing deep inside URLSession.
+    let scheme = URL(string: url)?.scheme?.lowercased()
+    guard scheme == "http" || scheme == "https" else {
+        return .err(code: "invalid_args", detail: ["message": "file.download supports only http/https URLs"])
+    }
+    return fsResult({ try FileSystem.download(url: url, destination: dest) }, encode: { stat in
         (try? JSONSerialization.data(withJSONObject: stat.jsonObject, options: [.sortedKeys])) ?? Data()
     })
 }
