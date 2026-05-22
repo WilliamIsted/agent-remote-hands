@@ -229,7 +229,7 @@ public func dispatchVerb(
     case "window.close":       return handleWindowClose(request)
     case "window.move":        return handleWindowMove(request)
     case "window.state":       return handleWindowState(request)
-    case "input.mouse.click":  return handleMouseClick(request)
+    case "input.mouse.click":  return handleMouseClick(request, table: elementTable)
     case "input.mouse.move":   return handleMouseMove(request)
     case "input.mouse.scroll": return handleMouseScroll(request)
     case "input.mouse.drag":   return handleMouseDrag(request)
@@ -654,7 +654,38 @@ private func parseButton(_ flags: [String: String]) throws -> MouseButton {
     return try MouseButton(parsing: raw)
 }
 
-private func handleMouseClick(_ request: WireRequest) -> VerbOutcome {
+/// Build the input.mouse.click OK body (R5): the synthesised flag, the
+/// actual click position, the front-most window handle under the point,
+/// and an AX hit-test of the element there. `target_element.flags` is
+/// empty — populating element-state flags is a separate deferred feature.
+private func clickResultBody(point pt: CGPoint, table: ElementTable) -> Data {
+    var body: [String: Any] = [
+        "synthesised": true,
+        "actual_position": ["x": Int(pt.x), "y": Int(pt.y)] as [String: Int],
+    ]
+    if let win = Window.list().first(where: { $0.bounds.contains(pt) }) {
+        body["target_handle"] = win.idString
+    } else {
+        body["target_handle"] = NSNull()
+    }
+    if let snap = try? Element.elementAt(table: table, point: pt) {
+        var te: [String: Any] = [
+            "name": snap.title, "role": snap.role, "flags": [String](),
+        ]
+        if let b = snap.bounds {
+            te["bounds"] = [
+                "x": Int(b.origin.x), "y": Int(b.origin.y),
+                "w": Int(b.size.width), "h": Int(b.size.height),
+            ] as [String: Int]
+        }
+        body["target_element"] = te
+    } else {
+        body["target_element"] = NSNull()
+    }
+    return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+}
+
+private func handleMouseClick(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
     if let bad = parsed.unknownFlag(allowed: [
         "x", "y", "button", "clicks", "double", "triple", "duration-ms", "clicks-interval-ms"
@@ -701,9 +732,12 @@ private func handleMouseClick(_ request: WireRequest) -> VerbOutcome {
     } else if hasTriple {
         clicks = 3
     }
-    return inputResult {
+    return inputResultData {
         let button = try parseButton(parsed.flags)
+        // Resolve what is under the point before the click can change the UI.
+        let body = clickResultBody(point: pt, table: table)
         try Input.click(at: pt, button: button, clicks: clicks)
+        return body
     }
 }
 
@@ -765,9 +799,13 @@ private func handleMouseRelease(_ request: WireRequest) -> VerbOutcome {
 }
 
 private func inputResult(_ op: () throws -> Void) -> VerbOutcome {
+    return inputResultData { try op(); return Data() }
+}
+
+/// Like `inputResult`, but the operation produces the OK payload.
+private func inputResultData(_ op: () throws -> Data) -> VerbOutcome {
     do {
-        try op()
-        return .ok(payload: Data())
+        return .ok(payload: try op())
     } catch InputError.permissionDenied {
         return .err(code: "permission_denied", detail: [
             "category": "input_monitoring",
