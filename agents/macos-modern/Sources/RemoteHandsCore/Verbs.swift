@@ -73,6 +73,7 @@ public enum VerbTable {
         "system.health":         VerbSpec(tier: .read, preHelloOK: false),
         "system.capabilities":   VerbSpec(tier: .read, preHelloOK: false),
         "system.verbs":          VerbSpec(tier: .read, preHelloOK: false),
+        "system.ping":           VerbSpec(tier: .read, preHelloOK: false),
 
         // Screen capture — read-tier.
         "screen.capture":        VerbSpec(tier: .read, preHelloOK: false),
@@ -220,6 +221,7 @@ public func dispatchVerb(
     case "system.health":      return handleSystemHealth()
     case "system.capabilities": return handleSystemCapabilities()
     case "system.verbs":       return handleSystemVerbs()
+    case "system.ping":        return handleSystemPing()
     case "screen.capture":     return handleScreenCapture(request)
     case "clipboard.get":      return handleClipboardGet()
     case "clipboard.set":      return handleClipboardSet(request)
@@ -389,6 +391,13 @@ private func handleSystemInfo(currentTier: Tier) -> VerbOutcome {
 }
 
 private func handleSystemHealth() -> VerbOutcome {
+    return .ok(payload: Data())
+}
+
+private func handleSystemPing() -> VerbOutcome {
+    // Named liveness probe — empty OK body, distinct from system.health
+    // so callers can suppress it in logs. Mirrors windows-modern's
+    // system.ping (empty x-output-schema).
     return .ok(payload: Data())
 }
 
