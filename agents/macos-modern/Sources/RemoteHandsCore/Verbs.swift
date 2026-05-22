@@ -1258,8 +1258,11 @@ private func handleFileWait(_ r: WireRequest) -> VerbOutcome {
         return .err(code: "invalid_args", detail: ["message": "file.wait requires <glob>"])
     }
     let interval = parsed.intFlag("interval") ?? 200
+    // `--timeout-ms` is the protocol's relative-deadline arg; `--deadline`
+    // (absolute epoch-ms) wins if both are given. Mirrors element.wait.
+    let timeoutMs = parsed.intFlag("timeout-ms") ?? 10_000
     let now = Int(Date().timeIntervalSince1970 * 1000)
-    let deadline = parsed.intFlag("deadline") ?? (now + 10_000)
+    let deadline = parsed.intFlag("deadline") ?? (now + timeoutMs)
     return fsResult({ try FileSystem.waitForPath(glob, intervalMs: interval, deadlineMs: deadline) }, encode: { stat in
         (try? JSONSerialization.data(withJSONObject: stat.jsonObject, options: [.sortedKeys])) ?? Data()
     })
