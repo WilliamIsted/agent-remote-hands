@@ -174,6 +174,7 @@ public enum VerbTable {
         "element.wait":             VerbSpec(tier: .read,   preHelloOK: false),
         "element.text":             VerbSpec(tier: .read,   preHelloOK: false),
         "element.range_value":      VerbSpec(tier: .read,   preHelloOK: false),
+        "element.get_text":         VerbSpec(tier: .read,   preHelloOK: false),
         "element.invoke":           VerbSpec(tier: .update, preHelloOK: false),
         "element.toggle":           VerbSpec(tier: .update, preHelloOK: false),
         "element.expand":           VerbSpec(tier: .update, preHelloOK: false),
@@ -299,6 +300,7 @@ public func dispatchVerb(
     case "element.wait":         return handleElementWait(request, table: elementTable)
     case "element.text":         return handleElementText(request, table: elementTable)
     case "element.range_value":  return handleElementRangeValue(request, table: elementTable)
+    case "element.get_text":     return handleElementGetText(request, table: elementTable)
     case "element.invoke":       return handleElementInvoke(request, table: elementTable)
     case "element.toggle":       return handleElementToggle(request, table: elementTable)
     case "element.expand":       return handleElementExpand(request, table: elementTable)
@@ -1664,6 +1666,41 @@ private func encodeRangeValue(_ rv: Element.RangeValue) -> Data {
     var body: [String: Any] = ["min": rv.min, "max": rv.max, "value": rv.value]
     if let s = rv.smallChange { body["small_change"] = s }
     if let ro = rv.readonly { body["readonly"] = ro }
+    return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+}
+
+private func handleElementGetText(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    if let unknown = parsed.unknownFlag(allowed: ["handle", "max-length", "offset"]) {
+        return .err(code: "invalid_args", detail: ["unknown_flag": "--\(unknown)"])
+    }
+    guard let id = parsed.arg("handle") else {
+        return .err(code: "invalid_args", detail: ["message": "element.get_text requires <elt:N>"])
+    }
+    var maxLength = 16384
+    if let raw = parsed.flags["max-length"] {
+        guard let v = Int(raw), (1...262144).contains(v) else {
+            return .err(code: "invalid_args", detail: ["message": "max-length must be an integer 1..262144"])
+        }
+        maxLength = v
+    }
+    var offset = 0
+    if let raw = parsed.flags["offset"] {
+        guard let v = Int(raw), v >= 0 else {
+            return .err(code: "invalid_args", detail: ["message": "offset must be an integer >= 0"])
+        }
+        offset = v
+    }
+    return elementResult(
+        { try Element.getText(table: table, idStr: id, offset: offset, maxLength: maxLength) },
+        encode: encodeTextSlice)
+}
+
+private func encodeTextSlice(_ s: Element.TextSlice) -> Data {
+    let body: [String: Any] = [
+        "text": s.text, "length": s.length,
+        "truncated": s.truncated, "offset": s.offset,
+    ]
     return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
 }
 

@@ -269,6 +269,43 @@ public enum Element {
                           smallChange: small, readonly: readonly)
     }
 
+    /// Result of element.get_text — a slice of the element's full text.
+    public struct TextSlice: Sendable, Equatable {
+        public let text: String
+        /// The FULL underlying length, so callers can paginate.
+        public let length: Int
+        public let truncated: Bool
+        /// The effective start offset actually used (clamped to length).
+        public let offset: Int
+    }
+
+    /// Pure pagination: slice `full` from `offset`, capped at `maxLength`.
+    /// Offsets count Characters (grapheme clusters). `offset` past the end
+    /// clamps to the end (empty slice). Exposed for unit testing.
+    public static func sliceText(_ full: String, offset: Int, maxLength: Int) -> TextSlice {
+        let chars = Array(full)
+        let length = chars.count
+        let start = max(0, min(offset, length))
+        let end = min(length, start + max(0, maxLength))
+        let slice = String(chars[start..<end])
+        return TextSlice(text: slice, length: length,
+                         truncated: end < length, offset: start)
+    }
+
+    /// element.get_text — resolve the element's text via the AX analogue of
+    /// windows-modern's TextPattern -> ValuePattern -> Name ladder:
+    /// kAXValue -> kAXTitle -> kAXDescription. Returns a paginated slice.
+    public static func getText(table: ElementTable, idStr: String,
+                               offset: Int, maxLength: Int) throws -> TextSlice {
+        try probeTCC()
+        let (_, el) = try table.lookup(id: idStr)
+        let full = axString(el, attribute: kAXValueAttribute as String)
+            ?? axString(el, attribute: kAXTitleAttribute as String)
+            ?? axString(el, attribute: kAXDescriptionAttribute as String)
+            ?? ""
+        return sliceText(full, offset: offset, maxLength: maxLength)
+    }
+
     // MARK: actions (update-tier)
 
     public static func invoke(table: ElementTable, idStr: String) throws {
