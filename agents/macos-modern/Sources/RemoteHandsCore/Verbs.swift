@@ -1477,6 +1477,20 @@ private func handleElementWait(_ request: WireRequest, table: ElementTable) -> V
     } else {
         return .err(code: "invalid_args", detail: ["message": "element.wait requires <role> <name> or --name X"])
     }
+
+    // --flags-required: comma-separated element states from the universal
+    // state enum (#92). Validate every entry. (Gating the wait on those
+    // states is a separate, not-yet-implemented feature.)
+    let universalStates: Set<String> = ["enabled", "focused", "offscreen", "password", "required"]
+    if let raw = parsed.flags["flags-required"] {
+        for state in raw.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) })
+        where !universalStates.contains(state) {
+            return .err(code: "invalid_args", detail: [
+                "message": "unknown --flags-required state \"\(state)\"; allowed: \(universalStates.sorted().joined(separator: ", "))",
+            ])
+        }
+    }
+
     let interval = parsed.intFlag("interval") ?? 100
     let timeoutMs = parsed.intFlag("timeout-ms") ?? 10_000
     let now = Int(Date().timeIntervalSince1970 * 1000)
