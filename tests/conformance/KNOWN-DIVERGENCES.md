@@ -1,29 +1,36 @@
 # Conformance — Known Divergences
 
-Operational note for anyone running the conformance suite against a v0.3.0
-agent. A clean VM-hosted run currently reports **26 failed / 167 passed /
-9 skipped** plus **`test_rebuild_v030.py` 36/37 passed** (one environmental
-skip — the R5 `verify_enabled` test that gates on finding a disabled element
-in the foreground window). **None of the 26 failures is a v0.3.0 (R1–R4)
-regression** — each is classified below; the class-F entry now scopes
-R5+R6+R7 agent-ahead-of-spec verbs.
+The conformance suite under `tests/conformance/` is shared across all
+agent families. This file records, **per family**, which suite failures
+are known divergences — suite-side issues, harness limitations, or
+deliberate scope gaps — rather than agent defects.
 
 Run it the sanctioned way (never the host PC):
 
 ```
-python -m pytest tests/conformance/ --host <vm-ip> --port 8765 --token-path <tok>
+python -m pytest tests/conformance/ --host <vm-ip> --port 8765 [--token-path <tok>]
 ```
 
-The suite under `tests/conformance/` (except `test_rebuild_v030.py` and
-`fixtures/`) is a **verbatim resync of the pinned `protocol/` submodule
-suite** (sha256-identical). It is intentionally NOT hand-patched: where a
-submodule test is wrong, the agent is spec-correct and the *test* needs a
-Protocol-repo PR — out of scope for the v0.3.0 agent rebuild. Re-resync
+The suite (except `test_rebuild_v030.py` and `fixtures/`) is a **verbatim
+resync of the pinned `protocol/` submodule suite** (sha256-identical). It
+is intentionally NOT hand-patched: where a submodule test is wrong, the
+agent is spec-correct and the *test* needs a Protocol-repo PR. Re-resync
 from the submodule whenever the submodule pin is bumped.
 
-## Classification
+---
 
-### A — Agent spec-correct; submodule test stale (needs Protocol-repo PR)
+## windows-modern
+
+A clean VM-hosted run currently reports **26 failed / 167 passed /
+9 skipped** plus **`test_rebuild_v030.py` 36/37 passed** (one
+environmental skip — the R5 `verify_enabled` test that gates on finding a
+disabled element in the foreground window). **None of the 26 failures is
+a v0.3.0 (R1–R4) regression** — each is classified below; the class-F
+entry now scopes R5+R6+R7 agent-ahead-of-spec verbs.
+
+### Classification
+
+#### A — Agent spec-correct; submodule test stale (needs Protocol-repo PR)
 
 | Test(s) | Why the agent is right |
 |---|---|
@@ -32,19 +39,19 @@ from the submodule whenever the submodule pin is bumped.
 | `test_vision.py::test_vision_ocr_region_returns_required_shape` | Same `region` string-vs-object stale-test issue as screen. |
 | `test_system.py::test_power_cancel_requires_extra_risky_tier` | Task 0 intentionally set `system.power.cancel` → `Tier::Update` per spec `x-crudx:"U"`. Agent is spec-correct; the test asserts the old `extra_risky`. |
 
-### B — Out-of-scope architecture (not fixable in the v0.3.0 agent rebuild)
+#### B — Out-of-scope architecture (not fixable in the v0.3.0 agent rebuild)
 
 | Test(s) | Why |
 |---|---|
 | `test_system.py::test_verbs_returns_verbs_object / _entries_are_strict_tool_defs / _superset_of_capabilities` | `system.verbs` is implemented on the wire but not exposed on the MCP `tools/*` surface. That surface is the `mcp-server/` bridge, explicitly out of scope for this run (and not yet built). |
 
-### C — Genuinely-deferred behaviour (Phase-2b content delivery)
+#### C — Genuinely-deferred behaviour (Phase-2b content delivery)
 
 | Test(s) | Why |
 |---|---|
 | `test_file.py::test_file_create_then_write_then_read` | Composite; `file.create` works (R2), but the `file.write` step exercises content delivery which is genuinely Phase-2b-deferred (`invalid_args {reason:file_content_phase2b}`). R4a fixed the *missing-path* case (`not_found`); content delivery remains deferred by design. |
 
-### D — Pre-existing, in the R1 baseline; NOT a v0.3.0 regression; root-cause triage deferred
+#### D — Pre-existing, in the R1 baseline; NOT a v0.3.0 regression; root-cause triage deferred
 
 These failed on the clean R1-committed baseline (verified by a stash→rebuild→run
 comparison) and are unchanged by R1–R4. Per-test agent-vs-test root-causing was
@@ -56,27 +63,58 @@ not done this run — flagged for a follow-up triage pass, not a v0.3.0 blocker.
 - `test_vision.py::test_vision_ocr_path_source` (composite; tangled in the screen/region stale-suite issues above)
 - `test_watch.py::test_watch_window_requires_title_prefix`, `::test_watch_process_returns_subscription_id`, `::test_watch_region_returns_subscription_id`
 
-### E — Suite-internal fragility (non-deterministic)
+#### E — Suite-internal fragility (non-deterministic)
 
 `test_clipboard.py::test_clipboard_get_at_read_tier` passes in isolation but
 fails inside the full run depending on suite ordering/clipboard state — a
 canonical-suite coupling artifact, not agent code. May appear/disappear
 between runs (27 vs 26 total depending on ordering).
 
-### F — Agent-ahead-of-spec (new verb/feature not yet in pinned submodule spec)
+#### F — Agent-ahead-of-spec (new verb/feature not yet in pinned submodule spec)
 
 | Test(s) | Why |
 |---|---|
 | `test_websocket.py::test_mcp_tools_list_superset_of_capabilities` | R6 added `vision.describe` and R7 added `vision.calibrate` to `system.capabilities` (registered in `kVerbs`). The `system.verbs` / MCP `tools/list` output is generated from the spec JSON corpus in the pinned submodule, which doesn't have either verb yet. Result: capabilities is a strict superset of tools/list, failing the superset assertion. Resolves when the deferred Protocol-repo PR for R5+R6+R7 lands and the submodule is bumped. Same pattern applies to R5's `element_disabled` discriminator and `verify_enabled` arg. |
 
-## Fixed this run (no longer failing)
+### Fixed this run (no longer failing)
 
 - `test_file.py::test_file_read_missing_returns_not_found`, `::test_file_write_missing_returns_not_found` — R4a added the existence probe → `not_found`.
 - The unknown-flag rejection tests across input/keyboard/screen — R2's systemic `SchemaArgs` fix.
 
-## Follow-up issues to file (out of scope this run)
+### Follow-up issues to file (out of scope this run)
 
 1. Protocol-repo PR: fix the stale submodule tests in class **A** (clipboard.get shape, screen.capture image-content-item + region object, vision.ocr region, power.cancel tier) and teach `wire.py` to extract image content items.
 2. `mcp-server/` bridge: expose `system.verbs` on the MCP tools surface (class **B**).
 3. Triage pass for class **D** (agent-bug vs stale-test, per test).
 4. `tests/conformance/fixtures/` is vestigial from the v2.0 fork (no resynced v2.2 test references it) — confirm and remove in a follow-up.
+
+---
+
+## macos-modern
+
+A full VM-hosted run (macOS Monterey 12.7.6, 2026-05-22, `macos-build`
+branch with B1–B6 and D1/D4/D6/D7 fixed) reports **129 passed / 30 failed
+/ 80 skipped**. **All 30 failures are divergences — zero genuine agent
+defects remain.** The 80 skips are capability-gated (verbs the macos
+family does not advertise). Categories below; see
+`Research/` `macos-modern-conformance-bug-report.md` in the project
+workspace for the full triage history.
+
+| Category | Tests | Why it is a divergence, not an agent defect |
+|---|---|---|
+| **VM-absent paths (9)** | `test_directory.py::test_directory_list_on_known_path`, `::test_directory_list_entries_have_required_fields`, `::test_directory_list_pattern_filter`, `::test_directory_list_limit_caps_result`, `::test_directory_stat_on_known_path`, `::test_directory_stat_rejects_files`, `::test_directory_exists_on_known_dir`; `test_file.py::test_file_exists_on_known_path`, `::test_file_stat_on_known_path` | The suite's "known path" fixture does not exist on the macOS VM; the agent correctly returns `not_found` / `exists:false`. |
+| **`wire.py` text-only payload (3)** | `test_screen.py::test_screen_capture_full`, `::test_screen_capture_png_signature`, `::test_screen_capture_bmp_signature` | The agent emits a spec-correct MCP image content item; the submodule `wire.py.request()` only decodes `type:"text"` items, so it structurally cannot read the response. The authoritative `test_rebuild_v030.py::test_screen_capture_base64_image_content_item` passes. |
+| **WebSocket framing not implemented (4)** | `test_websocket.py::test_hello_body_has_framing_field`, `::test_hello_default_framing_is_mcp_for_v22`, `::test_hello_v21_gets_protocol_mismatch`, `::test_hello_unknown_framing_returns_error` | `--framing ws` is a deliberate unimplemented feature on macos-modern. |
+| **Pre-hello harness limitation (3)** | `test_connection.py::test_hello_returns_session_id`, `::test_pre_hello_rejects_other_verbs`, `::test_protocol_mismatch_on_wrong_major` | `wire.py.request()` refuses to issue pre-hello calls, so these tests fail inside the harness before reaching the agent. |
+| **v2.1 ARH-post-hello not implemented (1)** | `test_connection.py::test_unmatched_quote_returns_invalid_args` | The test does a `2.1` hello then sends an ARH-framed header; macos-modern uses MCP framing post-hello, so `MCPFrameReader` waits for a `Content-Length` frame the test never sends. The ARH `FrameReader` *does* reject unmatched quotes — the test never reaches it. |
+| **`--region` capture MVP gap (2)** | `test_screen.py::test_screen_capture_region`, `::test_screen_capture_no_cursor_flag_accepted` | `screen.capture --region` is a documented MVP gap; both tests exercise it. |
+| **jpeg/heic forward-compat (2)** | `test_screen.py::test_screen_capture_forward_compat_format_returns_unsupported[jpeg]`, `[heic]` | The suite assumes jpeg/heic are unsupported "forward-compat" formats; macos-modern supports them. |
+| **Agent spec-correct error code (2)** | `test_screen.py::test_screen_capture_invalid_format` (D2), `::test_screen_capture_webp_n_shorthand_rejected` (D3) | `unsupported_format` is the code in `screen.capture`'s spec `x-errors` for both a bad `--format` and declared-but-unimplemented webp; the tests' `not_supported` / `invalid_args` expectations are stale. |
+| **macOS-vs-Windows concept gap (2)** | `test_system.py::test_power_blockers_returns_array` (D5), `test_element.py::test_element_find_name_and_automation_id_mutually_exclusive` (D8) | D5: the spec's per-blocker `handle` is a `win:0x…` *window* handle; macOS `IOPMAssertion` blockers are process-based (`pid`), with no window to reference (the `{blockers:[…]}` wrapper itself was fixed). D8: `automation_id` is a UIA/Windows concept the macOS AX family does not model. |
+| **Test does not pre-populate state (1)** | `test_clipboard.py::test_clipboard_get_at_read_tier` (D7) | The agent correctly returns `ERR empty` for an empty clipboard (`empty` is in `clipboard.get`'s spec `x-errors`); the test expects `OkResponse` and does not put content on the clipboard first. |
+| **Family enum (1)** | `test_system.py::test_info_family_is_known` | The suite's `KNOWN_FAMILIES` set is `{windows-modern, windows-classic, windows-legacy}`; `macos-modern` fails by construction. |
+
+### Follow-up (macos-modern)
+
+1. Protocol-repo PR / suite work: teach `wire.py.request()` to extract image content items; add a cross-platform path fixture; add `macos-modern` to `KNOWN_FAMILIES`; give the suite family-aware skips for WebSocket and the `--region` MVP gap.
+2. `element.wait` validates `--flags-required` but does not yet *gate* the wait on those states — a deferred feature, not a divergence.
