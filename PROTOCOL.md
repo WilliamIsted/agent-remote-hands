@@ -880,6 +880,26 @@ First ratified release of the 2.0 spec.
 
 ---
 
+## macOS ahead-of-spec verbs
+
+The `macos-modern` agent advertises six verbs that are not yet in the pinned
+`protocol/` submodule. They mirror the equivalent `windows-modern` verbs;
+promotion into the canonical spec is a tracked follow-up.
+
+| Verb | Tier | Notes |
+|---|---|---|
+| `system.ping` | read | Empty-body liveness probe. |
+| `element.range_value` | read | AX `kAXValue/MinValue/MaxValue/ValueIncrement`. Output `{min,max,value,small_change?,readonly?}`. No `large_change` — AX has no equivalent. `ERR not_supported_by_target {pattern:"RangeValuePattern"}` when the element is not range-valued. |
+| `element.get_text` | read | Args `handle`, `max-length` (1..262144, default 16384), `offset` (>=0). Output `{text,length,truncated,offset}`. AX ladder: `kAXValue` -> `kAXTitle` -> `kAXDescription`. |
+| `element.search` | read | Args `root`, `patterns` (JSON-array string, 1..16 entries), `match` (substring\|regex), `case-sensitive`, `context-chars` (0..4096), `max-hits-per-pattern` (1..100), `include-bounds`. Regex is ICU (`NSRegularExpression`). Output `{hits[],patterns_unmatched[],total_text_searched,truncated}`. |
+| `vision.describe` | update | Captures a frame, POSTs to an OpenAI-compatible endpoint, returns `{description,model,tokens_in?,tokens_out?,elapsed_ms}`. Endpoint: per-call `--endpoint` > `--vision-endpoint` / `REMOTE_HANDS_VISION_ENDPOINT`. Missing -> `ERR invalid_args {reason:"vision_endpoint_missing"}`. |
+| `vision.calibrate` | update | Args `image` (base64 PNG/JPEG/BMP, required), `prompt`, `language`, `endpoint`, `model`, `max-tokens`, `timeout-ms`. Runs OCR + the vision-LLM; output `{ocr:<block>|null,vision:<block>|null,prompt?,elapsed_ms}`. A vision-LLM failure nulls `vision` rather than failing the verb. |
+
+The vision endpoint is keyless (a local/LAN OpenAI-compatible server); the
+agent sends no `Authorization` header.
+
+---
+
 ## Appendix A: Verb summary
 
 A flat list of all Protocol 2.1 verbs for quick reference. CRUDX shorthand: **R** = read, **C** = create, **U** = update, **D** = delete, **X** = extra_risky, **—** = lifecycle (any tier).

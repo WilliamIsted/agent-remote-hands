@@ -42,6 +42,7 @@ The hard technical floor is **macOS 12.0**, set by the Swift concurrency runtime
 | Bonjour mDNS | 10.0 | `NetService` / `dns_sd.h` |
 | Token entropy | 10.7 Lion | `SecRandomCopyBytes` |
 | Service mode | 10.10 Yosemite | launchd LaunchAgent (NOT LaunchDaemon — needs Aqua session) |
+| Outbound HTTP (`vision.describe`/`.calibrate`) | 10.9 Mavericks | `URLSession`; POSTs to a keyless LAN OpenAI-compatible endpoint. No new TCC category. |
 
 The hard technical floor is **macOS 12.0** (Swift concurrency); the deployment target is pinned at **12.3 Monterey** as the deliberate family target. Everything else is comfortably below.
 

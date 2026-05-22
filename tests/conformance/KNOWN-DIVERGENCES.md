@@ -118,3 +118,10 @@ workspace for the full triage history.
 
 1. Protocol-repo PR / suite work: teach `wire.py.request()` to extract image content items; add a cross-platform path fixture; add `macos-modern` to `KNOWN_FAMILIES`; give the suite family-aware skips for WebSocket and the `--region` MVP gap.
 2. `element.wait` validates `--flags-required` but does not yet *gate* the wait on those states — a deferred feature, not a divergence.
+3. The six ahead-of-spec verbs (`system.ping`, `element.range_value`,
+   `element.get_text`, `element.search`, `vision.describe`,
+   `vision.calibrate`) are now advertised. Their conformance coverage lives
+   in `test_rebuild_v030.py` (locally owned); the R6/R7 vision tests there
+   activate automatically. Promotion of these verbs into the `protocol/`
+   submodule is a tracked follow-up — until then they are agent-ahead-of-spec
+   exactly as on `windows-modern`.
