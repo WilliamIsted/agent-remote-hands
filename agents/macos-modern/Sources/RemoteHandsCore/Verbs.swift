@@ -836,7 +836,7 @@ private func handleKeyTap(_ request: WireRequest) -> VerbOutcome {
     if let bad = parsed.unknownFlag(allowed: ["modifiers"]) {
         return .err(code: "invalid_args", detail: ["unknown_flag": "--\(bad)"])
     }
-    guard let name = parsed.positionals.first else {
+    guard let name = parsed.arg("vk") else {
         return .err(code: "invalid_args", detail: ["message": "input.keyboard.key requires <name>"])
     }
     return inputResult {
@@ -847,7 +847,7 @@ private func handleKeyTap(_ request: WireRequest) -> VerbOutcome {
 
 private func handleKeyDown(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    guard let name = parsed.positionals.first else {
+    guard let name = parsed.arg("vk") else {
         return .err(code: "invalid_args", detail: ["message": "input.keyboard.key_down requires <name>"])
     }
     return inputResult {
@@ -861,7 +861,7 @@ private func handleKeyUp(_ request: WireRequest) -> VerbOutcome {
     if let bad = parsed.unknownFlag(allowed: ["modifiers"]) {
         return .err(code: "invalid_args", detail: ["unknown_flag": "--\(bad)"])
     }
-    guard let name = parsed.positionals.first else {
+    guard let name = parsed.arg("vk") else {
         return .err(code: "invalid_args", detail: ["message": "input.keyboard.key_up requires <name>"])
     }
     // key_up is idempotent — releasing a key that wasn't held (or a key
