@@ -646,12 +646,19 @@ private func parseButton(_ flags: [String: String]) throws -> MouseButton {
 private func handleMouseClick(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
     if let bad = parsed.unknownFlag(allowed: [
-        "button", "clicks", "double", "triple", "duration-ms", "clicks-interval-ms"
+        "x", "y", "button", "clicks", "double", "triple", "duration-ms", "clicks-interval-ms"
     ]) {
         return .err(code: "invalid_args", detail: ["unknown_flag": "--\(bad)"])
     }
-    guard let pt = parsePoint(parsed.positionals) else {
-        return .err(code: "invalid_args", detail: ["message": "expected <x> <y>"])
+    // Coordinates: --x/--y flags (spec form) or two leading positionals.
+    let pt: CGPoint
+    if let xs = parsed.flags["x"], let ys = parsed.flags["y"],
+       let x = Double(xs), let y = Double(ys) {
+        pt = CGPoint(x: x, y: y)
+    } else if let p = parsePoint(parsed.positionals) {
+        pt = p
+    } else {
+        return .err(code: "invalid_args", detail: ["message": "expected <x> <y> or --x/--y"])
     }
     // Flag mutual-exclusion + range validation per the input.mouse.click
     // x-conditional rules. The verb dispatcher rejects ambiguous combos
