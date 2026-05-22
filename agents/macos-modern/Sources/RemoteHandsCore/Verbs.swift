@@ -716,13 +716,12 @@ private func handleMouseMove(_ request: WireRequest) -> VerbOutcome {
 
 private func handleMouseScroll(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    guard parsed.positionals.count >= 3,
-          let x = Double(parsed.positionals[0]),
-          let y = Double(parsed.positionals[1]),
-          let notches = Int(parsed.positionals[2]) else {
-        return .err(code: "invalid_args", detail: ["message": "expected <x> <y> <notches>"])
+    guard let pt = parsePoint(parsed),
+          let deltaStr = parsed.arg("delta", positional: 2),
+          let notches = Int(deltaStr) else {
+        return .err(code: "invalid_args", detail: ["message": "expected <x> <y> <delta>"])
     }
-    return inputResult { try Input.scroll(at: CGPoint(x: x, y: y), notches: notches) }
+    return inputResult { try Input.scroll(at: pt, notches: notches) }
 }
 
 private func handleMouseDrag(_ request: WireRequest) -> VerbOutcome {
@@ -1148,7 +1147,7 @@ private func handleProcessShell(_ r: WireRequest) -> VerbOutcome {
 
 private func handleProcessKill(_ r: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(r.args)
-    guard let pidStr = parsed.positionals.first, let pid = Int32(pidStr) else {
+    guard let pidStr = parsed.arg("pid"), let pid = Int32(pidStr) else {
         return .err(code: "invalid_args", detail: ["message": "process.kill requires <pid>"])
     }
     let force = parsed.flags["force"] != nil
@@ -1157,7 +1156,7 @@ private func handleProcessKill(_ r: WireRequest) -> VerbOutcome {
 
 private func handleProcessWait(_ r: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(r.args)
-    guard let pidStr = parsed.positionals.first, let pid = Int32(pidStr) else {
+    guard let pidStr = parsed.arg("pid"), let pid = Int32(pidStr) else {
         return .err(code: "invalid_args", detail: ["message": "process.wait requires <pid>"])
     }
     let now = Int(Date().timeIntervalSince1970 * 1000)
