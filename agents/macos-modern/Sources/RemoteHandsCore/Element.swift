@@ -23,6 +23,9 @@ public enum ElementError: Error, Equatable {
     case noMatch
     /// AX attribute is not settable on the target.
     case readonly(String)
+    /// AX element does not expose a queried pattern/capability (e.g. it is
+    /// not a slider, so it has no value/min/max). Carries the pattern name.
+    case patternUnsupported(String)
     /// Element has no action of the requested kind.
     case actionUnsupported
     /// Poll timed out without a match.
@@ -234,6 +237,38 @@ public enum Element {
             ?? ""
     }
 
+    /// Result of element.range_value — UIA RangeValuePattern's AX analogue.
+    public struct RangeValue: Sendable {
+        public let min: Double
+        public let max: Double
+        public let value: Double
+        /// kAXValueIncrement — optional; nil when the element has no step.
+        public let smallChange: Double?
+        /// nil when AXUIElementIsAttributeSettable could not be probed.
+        public let readonly: Bool?
+    }
+
+    /// Read a range-valued element (slider, stepper, progress indicator).
+    /// Throws ElementError.patternUnsupported("RangeValuePattern") when the
+    /// element exposes no value/min/max — the same discriminator
+    /// windows-modern emits, for one cross-platform wire shape. There is no
+    /// AX equivalent of UIA large_change, so it is never reported.
+    public static func rangeValue(table: ElementTable, idStr: String) throws -> RangeValue {
+        try probeTCC()
+        let (_, el) = try table.lookup(id: idStr)
+        guard let value = axNumber(el, attribute: kAXValueAttribute as String),
+              let lo = axNumber(el, attribute: kAXMinValueAttribute as String),
+              let hi = axNumber(el, attribute: kAXMaxValueAttribute as String) else {
+            throw ElementError.patternUnsupported("RangeValuePattern")
+        }
+        let small = axNumber(el, attribute: kAXValueIncrementAttribute as String)
+        var settable: DarwinBoolean = false
+        let probe = AXUIElementIsAttributeSettable(el, kAXValueAttribute as CFString, &settable)
+        let readonly: Bool? = (probe == .success) ? !settable.boolValue : nil
+        return RangeValue(min: lo, max: hi, value: value,
+                          smallChange: small, readonly: readonly)
+    }
+
     // MARK: actions (update-tier)
 
     public static func invoke(table: ElementTable, idStr: String) throws {
@@ -373,6 +408,16 @@ public enum Element {
         let err = AXUIElementCopyAttributeValue(element, attribute as CFString, &ref)
         if err != .success { return nil }
         if let s = ref as? String { return s }
+        return nil
+    }
+
+    /// Read a numeric AX attribute as a Double. AX wraps slider / stepper
+    /// values in a CFNumber; returns nil if absent or non-numeric.
+    private static func axNumber(_ element: AXUIElement, attribute: String) -> Double? {
+        var ref: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(element, attribute as CFString, &ref)
+        if err != .success { return nil }
+        if let n = ref as? NSNumber { return n.doubleValue }
         return nil
     }
 

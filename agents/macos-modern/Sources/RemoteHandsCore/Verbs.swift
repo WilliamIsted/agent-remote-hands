@@ -173,6 +173,7 @@ public enum VerbTable {
         "element.find":             VerbSpec(tier: .read,   preHelloOK: false),
         "element.wait":             VerbSpec(tier: .read,   preHelloOK: false),
         "element.text":             VerbSpec(tier: .read,   preHelloOK: false),
+        "element.range_value":      VerbSpec(tier: .read,   preHelloOK: false),
         "element.invoke":           VerbSpec(tier: .update, preHelloOK: false),
         "element.toggle":           VerbSpec(tier: .update, preHelloOK: false),
         "element.expand":           VerbSpec(tier: .update, preHelloOK: false),
@@ -297,6 +298,7 @@ public func dispatchVerb(
     case "element.find":         return handleElementFind(request, table: elementTable)
     case "element.wait":         return handleElementWait(request, table: elementTable)
     case "element.text":         return handleElementText(request, table: elementTable)
+    case "element.range_value":  return handleElementRangeValue(request, table: elementTable)
     case "element.invoke":       return handleElementInvoke(request, table: elementTable)
     case "element.toggle":       return handleElementToggle(request, table: elementTable)
     case "element.expand":       return handleElementExpand(request, table: elementTable)
@@ -1526,6 +1528,8 @@ private func elementErrorOutcome(_ e: ElementError) -> VerbOutcome {
         return .err(code: "target_gone", detail: [:])
     case .noMatch:         return .err(code: "not_found", detail: [:])
     case .readonly(let a): return .err(code: "readonly", detail: ["attribute": a])
+    case .patternUnsupported(let p):
+        return .err(code: "not_supported_by_target", detail: ["pattern": p])
     case .actionUnsupported:
         return .err(code: "not_supported_by_target", detail: ["message": "element has no such action / attribute is unsupported"])
     case .timeout:         return .err(code: "timeout", detail: [:])
@@ -1642,6 +1646,25 @@ private func handleElementText(_ request: WireRequest, table: ElementTable) -> V
         return .err(code: "invalid_args", detail: ["message": "element.text requires <elt:N>"])
     }
     return elementResult({ Data(try Element.text(table: table, idStr: id).utf8) }, encode: { $0 })
+}
+
+private func handleElementRangeValue(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    if let unknown = parsed.unknownFlag(allowed: ["handle"]) {
+        return .err(code: "invalid_args", detail: ["unknown_flag": "--\(unknown)"])
+    }
+    guard let id = parsed.arg("handle") else {
+        return .err(code: "invalid_args", detail: ["message": "element.range_value requires <elt:N>"])
+    }
+    return elementResult({ try Element.rangeValue(table: table, idStr: id) },
+                         encode: encodeRangeValue)
+}
+
+private func encodeRangeValue(_ rv: Element.RangeValue) -> Data {
+    var body: [String: Any] = ["min": rv.min, "max": rv.max, "value": rv.value]
+    if let s = rv.smallChange { body["small_change"] = s }
+    if let ro = rv.readonly { body["readonly"] = ro }
+    return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
 }
 
 private func handleElementInvoke(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
