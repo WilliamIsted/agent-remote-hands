@@ -648,7 +648,7 @@ private func handleMouseClick(_ request: WireRequest) -> VerbOutcome {
     if let bad = parsed.unknownFlag(allowed: [
         "button", "clicks", "double", "triple", "duration-ms", "clicks-interval-ms"
     ]) {
-        return .err(code: "invalid_args", detail: ["message": "unknown flag --\(bad)"])
+        return .err(code: "invalid_args", detail: ["unknown_flag": "--\(bad)"])
     }
     guard let pt = parsePoint(parsed.positionals) else {
         return .err(code: "invalid_args", detail: ["message": "expected <x> <y>"])
@@ -717,7 +717,7 @@ private func handleMouseScroll(_ request: WireRequest) -> VerbOutcome {
 private func handleMouseDrag(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
     if let bad = parsed.unknownFlag(allowed: ["button", "steps"]) {
-        return .err(code: "invalid_args", detail: ["message": "unknown flag --\(bad)"])
+        return .err(code: "invalid_args", detail: ["unknown_flag": "--\(bad)"])
     }
     guard parsed.positionals.count >= 4,
           let x1 = Double(parsed.positionals[0]),
@@ -786,7 +786,7 @@ private func parseModifiers(_ flags: [String: String]) throws -> CGEventFlags {
 private func handleKeyTap(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
     if let bad = parsed.unknownFlag(allowed: ["modifiers"]) {
-        return .err(code: "invalid_args", detail: ["message": "unknown flag --\(bad)"])
+        return .err(code: "invalid_args", detail: ["unknown_flag": "--\(bad)"])
     }
     guard let name = parsed.positionals.first else {
         return .err(code: "invalid_args", detail: ["message": "input.keyboard.key requires <name>"])
@@ -811,7 +811,7 @@ private func handleKeyDown(_ request: WireRequest) -> VerbOutcome {
 private func handleKeyUp(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
     if let bad = parsed.unknownFlag(allowed: ["modifiers"]) {
-        return .err(code: "invalid_args", detail: ["message": "unknown flag --\(bad)"])
+        return .err(code: "invalid_args", detail: ["unknown_flag": "--\(bad)"])
     }
     guard let name = parsed.positionals.first else {
         return .err(code: "invalid_args", detail: ["message": "input.keyboard.key_up requires <name>"])
