@@ -272,7 +272,7 @@ public enum Window {
     }
 
     /// Resolve `mac:<n>` to a current WindowInfo (uses CGWindowList).
-    private static func resolveWindow(idStr: String) throws -> WindowInfo {
+    static func resolveWindow(idStr: String) throws -> WindowInfo {
         let target = try parseID(idStr)
         // Use includeAll so we can resolve windows users explicitly target
         // even if they're not interactable in the default list.

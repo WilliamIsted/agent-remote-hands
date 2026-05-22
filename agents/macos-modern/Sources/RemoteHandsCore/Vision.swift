@@ -36,18 +36,22 @@ public struct OCRObservation: Sendable {
     }
 }
 
+/// The full result of an OCR pass: the recognised text regions plus the
+/// pixel size of the image they were found in and the language Vision
+/// was asked to use.
+public struct OCRResult: Sendable {
+    public let observations: [OCRObservation]
+    public let imageSize: CGSize
+    public let languageUsed: String
+}
+
 public enum VisionOps {
 
-    /// Run OCR over the supplied image bytes (any format ImageIO recognises:
-    /// PNG, JPEG, HEIC, BMP, TIFF, GIF, etc.). Returns each text region
-    /// found with its confidence score and pixel bounds.
-    public static func ocr(imageData: Data, accurate: Bool = true) throws -> [OCRObservation] {
-        guard let src = CGImageSourceCreateWithData(imageData as CFData, nil) else {
-            throw VisionError.decodeFailed("CGImageSourceCreateWithData returned nil")
-        }
-        guard let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
-            throw VisionError.decodeFailed("CGImageSourceCreateImageAtIndex returned nil")
-        }
+    /// OCR a decoded image. `language` is an optional BCP-47 tag; when
+    /// supplied it is set as Vision's preferred recognition language.
+    /// Bounding boxes in the result are in image-pixel coordinates with a
+    /// top-left origin.
+    public static func ocr(cgImage cg: CGImage, language: String?, accurate: Bool = true) throws -> OCRResult {
         let imageWidth = CGFloat(cg.width)
         let imageHeight = CGFloat(cg.height)
 
@@ -57,6 +61,9 @@ public enum VisionOps {
             // Sonoma+ ships revision 3, with substantially better accuracy.
             request.revision = VNRecognizeTextRequestRevision3
         }
+        if let language = language, !language.isEmpty {
+            request.recognitionLanguages = [language]
+        }
 
         let handler = VNImageRequestHandler(cgImage: cg, options: [:])
         do {
@@ -65,8 +72,7 @@ public enum VisionOps {
             throw VisionError.ocrFailed("\(error)")
         }
 
-        guard let observations = request.results else { return [] }
-        return observations.compactMap { obs in
+        let observations: [OCRObservation] = (request.results ?? []).compactMap { obs in
             guard let top = obs.topCandidates(1).first else { return nil }
             // Vision returns boundingBox normalised (0-1) with origin
             // bottom-left. Convert to absolute pixel coords with origin
@@ -82,5 +88,23 @@ public enum VisionOps {
                 bounds: CGRect(x: pxX, y: pxY, width: pxW, height: pxH)
             )
         }
+        return OCRResult(
+            observations: observations,
+            imageSize: CGSize(width: imageWidth, height: imageHeight),
+            languageUsed: (language?.isEmpty == false) ? language! : "en-US"
+        )
+    }
+
+    /// OCR encoded image bytes (any format ImageIO recognises: PNG, JPEG,
+    /// HEIC, BMP, TIFF, GIF, …). Decodes, then delegates to the CGImage
+    /// path.
+    public static func ocr(imageData: Data, language: String?, accurate: Bool = true) throws -> OCRResult {
+        guard let src = CGImageSourceCreateWithData(imageData as CFData, nil) else {
+            throw VisionError.decodeFailed("CGImageSourceCreateWithData returned nil")
+        }
+        guard let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+            throw VisionError.decodeFailed("CGImageSourceCreateImageAtIndex returned nil")
+        }
+        return try ocr(cgImage: cg, language: language, accurate: accurate)
     }
 }

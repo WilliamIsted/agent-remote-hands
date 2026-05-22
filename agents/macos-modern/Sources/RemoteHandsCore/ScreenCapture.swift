@@ -115,15 +115,22 @@ public enum ScreenCapture {
         return unsafeBitCast(symbol, to: CGDisplayCreateImageFn.self)
     }()
 
-    /// Capture the main display at full backing-pixel resolution.
-    private static func captureMainDisplay() throws -> CGImage {
+    /// Capture a specific display at full backing-pixel resolution.
+    /// `internal` so the vision.ocr source resolver can capture any
+    /// display, not just the main one.
+    static func captureDisplay(_ displayID: CGDirectDisplayID) throws -> CGImage {
         guard let displayCreateImage = displayCreateImage else {
             throw CaptureError.captureFailed("CGDisplayCreateImage unavailable on this system")
         }
-        guard let image = displayCreateImage(CGMainDisplayID())?.takeRetainedValue() else {
+        guard let image = displayCreateImage(displayID)?.takeRetainedValue() else {
             throw CaptureError.captureFailed("CGDisplayCreateImage returned nil")
         }
         return image
+    }
+
+    /// Capture the main display at full backing-pixel resolution.
+    private static func captureMainDisplay() throws -> CGImage {
+        return try captureDisplay(CGMainDisplayID())
     }
 
     private static func encode(_ image: CGImage, format: CaptureFormat, quality: Double) throws -> Data {

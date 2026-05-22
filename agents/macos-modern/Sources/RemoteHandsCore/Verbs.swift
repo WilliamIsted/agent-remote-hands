@@ -970,11 +970,57 @@ private func handleWatchCancel(_ r: WireRequest, context: DispatchContext) -> Ve
 private func handleVisionOCR(_ r: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(r.args)
     let accurate = parsed.flags["fast"] == nil  // default accurate; --fast for speed
+    let language = parsed.flags["language"]
     do {
-        let observations = try VisionOps.ocr(imageData: r.payload, accurate: accurate)
-        let body: [String: Any] = ["observations": observations.map { $0.jsonObject }]
+        let source = try VisionSource.resolve(parsed, payload: r.payload)
+        let result = try VisionOps.ocr(cgImage: source.cgImage, language: language, accurate: accurate)
+
+        // Screen-space sources report boxes in screen points: scale the
+        // image-pixel boxes back to points and offset by the source
+        // origin. Image-space sources report image-pixel boxes unchanged.
+        let pointScale = source.coordinateSpace == "screen"
+            ? Double(NSScreen.main?.backingScaleFactor ?? 1.0) : 1.0
+        let ox = Double(source.origin.x)
+        let oy = Double(source.origin.y)
+
+        let lines: [[String: Any]] = result.observations.map { obs in
+            let bx = obs.bounds.origin.x / pointScale + ox
+            let by = obs.bounds.origin.y / pointScale + oy
+            let bw = obs.bounds.size.width / pointScale
+            let bh = obs.bounds.size.height / pointScale
+            return [
+                "text": obs.text,
+                "bbox": [
+                    "x": Int(bx.rounded()), "y": Int(by.rounded()),
+                    "w": Int(bw.rounded()), "h": Int(bh.rounded()),
+                ] as [String: Int],
+            ]
+        }
+        let body: [String: Any] = [
+            "text": result.observations.map { $0.text }.joined(separator: "\n"),
+            "lines": lines,
+            "language_used": result.languageUsed,
+            "coordinate_space": source.coordinateSpace,
+            "image_size": [
+                "w": Int(result.imageSize.width / pointScale),
+                "h": Int(result.imageSize.height / pointScale),
+            ] as [String: Int],
+            "text_angle": 0.0,
+        ]
         let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
         return .ok(payload: data)
+    } catch let e as VisionSourceError {
+        switch e {
+        case .invalidArgs(let m): return .err(code: "invalid_args", detail: ["message": m])
+        case .notFound(let m):    return .err(code: "not_found", detail: ["message": m])
+        }
+    } catch CaptureError.permissionDenied {
+        return .err(code: "permission_denied", detail: [
+            "category": "screen_recording",
+            "hint": "Grant in System Settings → Privacy & Security → Screen Recording, then restart the agent",
+        ])
+    } catch let e as CaptureError {
+        return .err(code: "capture_failed", detail: ["message": "\(e)"])
     } catch VisionError.decodeFailed(let m) {
         return .err(code: "invalid_args", detail: ["message": "image decode failed: \(m)"])
     } catch VisionError.ocrFailed(let m) {
