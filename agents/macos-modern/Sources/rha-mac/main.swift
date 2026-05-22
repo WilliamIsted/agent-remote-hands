@@ -41,6 +41,10 @@ struct CLI {
     /// — cannot shut down the host machine. Operator must explicitly
     /// pass `--allow-power-state-changes` to enable.
     var allowPowerStateChanges: Bool = false
+    /// Default endpoint for vision.describe/calibrate when the verb is
+    /// called without an --endpoint arg. Empty = no default. Precedence:
+    /// --vision-endpoint flag > REMOTE_HANDS_VISION_ENDPOINT env > empty.
+    var visionEndpoint: String = ""
 }
 
 func parseArgv(_ argv: [String]) -> CLI {
@@ -64,6 +68,10 @@ func parseArgv(_ argv: [String]) -> CLI {
         case "--allow-power-state-changes":
             cli.allowPowerStateChanges = true
             i += 1
+        case "--vision-endpoint":
+            guard i + 1 < argv.count else { exitUsage("--vision-endpoint requires a value") }
+            cli.visionEndpoint = argv[i + 1]
+            i += 2
         case "-h", "--help":
             printUsage()
             exit(0)
@@ -73,6 +81,12 @@ func parseArgv(_ argv: [String]) -> CLI {
         default:
             exitUsage("unknown argument: \(a)")
         }
+    }
+    // CLI flag wins; fall back to the environment variable.
+    if cli.visionEndpoint.isEmpty,
+       let env = ProcessInfo.processInfo.environment["REMOTE_HANDS_VISION_ENDPOINT"],
+       !env.isEmpty {
+        cli.visionEndpoint = env
     }
     return cli
 }
@@ -84,6 +98,7 @@ func printUsage() {
 
     Usage:
       \(exe) [--host <addr>] [--port <n>] [--no-discoverable] [--allow-power-state-changes]
+            [--vision-endpoint <url>]
       \(exe) --version
       \(exe) --help
 
@@ -159,6 +174,14 @@ if cli.allowPowerStateChanges {
     log("WARNING: --allow-power-state-changes is set — system.power.{shutdown,reboot,logoff,sleep,hibernate} will execute on the host")
 } else {
     log("system.power.{shutdown,reboot,logoff,sleep,hibernate} are DISABLED (default); pass --allow-power-state-changes to enable")
+}
+
+// Publish the vision-LLM endpoint default before the server starts.
+VisionConfig.defaultEndpoint = cli.visionEndpoint
+if cli.visionEndpoint.isEmpty {
+    log("vision.describe/calibrate: no default endpoint (pass --vision-endpoint or set REMOTE_HANDS_VISION_ENDPOINT, or supply --endpoint per call)")
+} else {
+    log("vision.describe/calibrate default endpoint: \(cli.visionEndpoint)")
 }
 
 // Trigger the macOS TCC consent dialogs (Screen Recording, Accessibility,
