@@ -1170,7 +1170,10 @@ private func handleVisionDescribe(_ request: WireRequest) -> VerbOutcome {
         maxTokens = v
     }
     var temperature = 0.2
-    if let raw = parsed.flags["temperature"], let v = Double(raw) {
+    if let raw = parsed.flags["temperature"] {
+        guard let v = Double(raw) else {
+            return .err(code: "invalid_args", detail: ["message": "temperature must be a number"])
+        }
         temperature = v
     }
     var timeoutMs = 30000
