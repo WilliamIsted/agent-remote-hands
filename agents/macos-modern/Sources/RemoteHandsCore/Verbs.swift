@@ -1033,10 +1033,10 @@ private func handleVisionOCR(_ r: WireRequest) -> VerbOutcome {
 // MARK: system.power.*
 
 private func handlePowerBlockers() -> VerbOutcome {
-    // Conformance expects a bare array; the wrapper-object was the old v2.0
-    // shape.
+    // Spec output schema wraps the list in a `blockers` array.
     let blockers = Power.blockers()
-    let data = (try? JSONSerialization.data(withJSONObject: blockers.map { $0.jsonObject }, options: [.sortedKeys])) ?? Data()
+    let body: [String: Any] = ["blockers": blockers.map { $0.jsonObject }]
+    let data = (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
     return .ok(payload: data)
 }
 
