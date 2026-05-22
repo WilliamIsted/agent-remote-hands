@@ -95,6 +95,17 @@ public enum VisionOps {
         )
     }
 
+    /// The recognition languages the on-device OCR engine supports. Used by
+    /// vision.calibrate to report engine capability. Returns [] on failure.
+    public static func supportedRecognitionLanguages() -> [String] {
+        // VNRecognizeTextRequest.supportedRecognitionLanguages(for:revision:)
+        // is available on macOS 10.15+. The instance method form
+        // (.supportedRecognitionLanguages()) requires macOS 13; use the class
+        // method to stay within the macOS 12.3 deployment target.
+        return (try? VNRecognizeTextRequest.supportedRecognitionLanguages(
+            for: .accurate, revision: VNRecognizeTextRequestRevision2)) ?? []
+    }
+
     /// OCR encoded image bytes (any format ImageIO recognises: PNG, JPEG,
     /// HEIC, BMP, TIFF, GIF, …). Decodes, then delegates to the CGImage
     /// path.

@@ -1275,31 +1275,47 @@ private func handleVisionCalibrate(_ request: WireRequest) -> VerbOutcome {
 
     // --- OCR side ---
     var ocrBlock: [String: Any]? = nil
+    let ocrStart = Date()
     if let result = try? VisionOps.ocr(imageData: imageData, language: language) {
+        let ocrElapsed = max(0, Int(Date().timeIntervalSince(ocrStart) * 1000))
         ocrBlock = [
             "text": result.observations.map { $0.text }.joined(separator: "\n"),
             "lines": result.observations.map { obs -> [String: Any] in
                 ["text": obs.text, "confidence": obs.confidence]
             },
+            "image_size": [
+                "w": Int(result.imageSize.width),
+                "h": Int(result.imageSize.height),
+            ],
+            "elapsed_ms": ocrElapsed,
+            "engine_languages": VisionOps.supportedRecognitionLanguages(),
             "language_used": result.languageUsed,
         ]
     }
 
     // --- Vision-LLM side ---
     var visionBlock: [String: Any]? = nil
+    let explicitEndpoint = parsed.flags["endpoint"] != nil
     let endpointStr = parsed.flags["endpoint"] ?? VisionConfig.defaultEndpoint
-    if !endpointStr.isEmpty, case .success(let endpoint) = VisionLLM.validateEndpoint(endpointStr) {
-        let dataURL = "data:image/\(format);base64," + imageData.base64EncodedString()
-        let body = VisionLLM.buildRequestBody(
-            model: model, prompt: prompt, imageDataURL: dataURL,
-            maxTokens: maxTokens, temperature: 0.2)
-        if case .success(let respData) = VisionLLM.post(
-                endpoint: endpoint, body: body, timeoutMs: timeoutMs),
-           case .success(let llm) = VisionLLM.parseResponse(respData) {
-            var vb: [String: Any] = ["description": llm.description, "model": llm.model]
-            if let ti = llm.tokensIn  { vb["tokens_in"]  = ti }
-            if let to = llm.tokensOut { vb["tokens_out"] = to }
-            visionBlock = vb
+    if !endpointStr.isEmpty {
+        switch VisionLLM.validateEndpoint(endpointStr) {
+        case .failure(let e):
+            // An explicitly-passed bad --endpoint is a caller error — surface
+            // it. A bad *configured default* is non-fatal: skip the LLM side.
+            if explicitEndpoint { return visionLLMErrorOutcome(e) }
+        case .success(let endpoint):
+            let dataURL = "data:image/\(format);base64," + imageData.base64EncodedString()
+            let body = VisionLLM.buildRequestBody(
+                model: model, prompt: prompt, imageDataURL: dataURL,
+                maxTokens: maxTokens, temperature: 0.2)
+            if case .success(let respData) = VisionLLM.post(
+                    endpoint: endpoint, body: body, timeoutMs: timeoutMs),
+               case .success(let llm) = VisionLLM.parseResponse(respData) {
+                var vb: [String: Any] = ["description": llm.description, "model": llm.model]
+                if let ti = llm.tokensIn  { vb["tokens_in"]  = ti }
+                if let to = llm.tokensOut { vb["tokens_out"] = to }
+                visionBlock = vb
+            }
         }
     }
 
