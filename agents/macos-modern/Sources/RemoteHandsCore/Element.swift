@@ -76,7 +76,9 @@ public enum Element {
         public let depth: Int
 
         public var jsonObject: [String: Any] {
-            var o: [String: Any] = ["id": id, "role": role, "title": title, "value": value, "depth": depth]
+            // Wire field is `handle` (spec output schema); the value is
+            // still the connection-scoped `elt:N` id.
+            var o: [String: Any] = ["handle": id, "role": role, "title": title, "value": value, "depth": depth]
             if let b = bounds {
                 o["bounds"] = ["x": Int(b.origin.x), "y": Int(b.origin.y), "w": Int(b.size.width), "h": Int(b.size.height)]
             }
