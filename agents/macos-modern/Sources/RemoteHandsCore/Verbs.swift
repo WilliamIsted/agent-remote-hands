@@ -503,7 +503,7 @@ private func handleClipboardGet() -> VerbOutcome {
         let bytes = try Clipboard.getText()
         return .ok(payload: bytes)
     } catch ClipboardError.empty {
-        return .err(code: "clipboard_empty", detail: [:])
+        return .err(code: "empty", detail: [:])
     } catch ClipboardError.formatUnavailable {
         return .err(code: "clipboard_format_unavailable", detail: [:])
     } catch {
