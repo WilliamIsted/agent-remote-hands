@@ -925,13 +925,11 @@ private func handleKeyUp(_ request: WireRequest) -> VerbOutcome {
             return .ok(payload: Data())
         }
         return .ok(payload: Data())
-    } catch InputError.permissionDenied {
-        return .err(code: "permission_denied", detail: [
-            "category": "input_monitoring",
-            "hint": "Grant in System Settings → Privacy & Security → Input Monitoring",
-        ])
-    } catch InputError.unknownModifier(let m) {
-        return .err(code: "invalid_args", detail: ["message": "unknown modifier \"\(m)\""])
+    } catch let e as InputError {
+        // Route permission/modifier errors through the shared mapping so
+        // handleKeyUp speaks the same wire shape as every other input
+        // verb (notably: category=accessibility, not input_monitoring).
+        return inputErrorOutcome(e)
     } catch {
         return .err(code: "internal_error", detail: ["message": "\(error)"])
     }
