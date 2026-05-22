@@ -135,15 +135,20 @@ public func arhFromMCPArguments(_ args: [String: Any]) -> (positionalsAndFlags: 
         payload = bytes
     }
     // All other keys are --key value pairs. Boolean true → just the flag.
+    // MCP argument keys are snake_case; ARH wire flags are kebab-case, and
+    // the verb handlers look up kebab-case names. `_args_to_dict` maps
+    // `-`→`_` on the way in, so reverse it here — otherwise hyphenated
+    // flags (`--timeout-ms`, `--title-prefix`, …) never reach the handler.
     for (key, value) in args {
         if key == "_args" || key == "content_b64" { continue }
+        let flag = "--" + key.replacingOccurrences(of: "_", with: "-")
         if let b = value as? Bool, b {
-            out.append("--\(key)")
+            out.append(flag)
         } else if let s = value as? String {
-            out.append("--\(key)")
+            out.append(flag)
             out.append(s)
         } else {
-            out.append("--\(key)")
+            out.append(flag)
             out.append(String(describing: value))
         }
     }
