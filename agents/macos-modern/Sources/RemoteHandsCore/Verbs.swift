@@ -154,7 +154,7 @@ public enum VerbTable {
         "file.stat":                VerbSpec(tier: .read,   preHelloOK: false),
         "file.exists":              VerbSpec(tier: .read,   preHelloOK: false),
         "file.wait":                VerbSpec(tier: .read,   preHelloOK: false),
-        "file.download":            VerbSpec(tier: .update, preHelloOK: false),
+        "file.download":            VerbSpec(tier: .create, preHelloOK: false),
         "directory.list":           VerbSpec(tier: .read,   preHelloOK: false),
         "directory.stat":           VerbSpec(tier: .read,   preHelloOK: false),
         "directory.exists":         VerbSpec(tier: .read,   preHelloOK: false),
