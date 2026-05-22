@@ -306,6 +306,100 @@ public enum Element {
         return sliceText(full, offset: offset, maxLength: maxLength)
     }
 
+    /// A span of the flattened search buffer contributed by one AX element.
+    public struct SearchHit: Sendable {
+        public let pattern: String
+        public let excerpt: String
+        public let offset: Int
+        public let matchStart: Int
+        public let matchLength: Int
+        public let handle: String
+        public let enclosingRole: String
+        public let bounds: CGRect?
+    }
+
+    public struct SearchResult: Sendable {
+        public let hits: [SearchHit]
+        public let patternsUnmatched: [String]
+        public let totalTextSearched: Int
+        public let truncated: Bool
+    }
+
+    /// element.search — flatten the AX subtree under `root` into one text
+    /// buffer (pre-order, kAXValue/kAXTitle/kAXDescription per node joined
+    /// by newlines), match `patterns`, and map each hit back to its
+    /// enclosing element. Traversal is bounded: kSearchMaxNodes nodes and
+    /// kSearchMaxChars characters; hitting either sets `truncated`.
+    private static let kSearchMaxNodes = 20000
+    private static let kSearchMaxChars = 1_000_000
+
+    public static func searchSubtree(
+        table: ElementTable, rootId: String, patterns: [String],
+        mode: SearchMatchMode, caseSensitive: Bool, contextChars: Int,
+        maxHitsPerPattern: Int, includeBounds: Bool
+    ) throws -> SearchResult {
+        try probeTCC()
+        let (pid, root) = try table.lookup(id: rootId)
+
+        // Flatten: build the buffer plus a span list mapping UTF-16 ranges
+        // back to the element that contributed them.
+        var buffer = ""
+        var spans: [(end: Int, element: AXUIElement)] = []  // end = exclusive UTF-16 offset
+        var nodeCount = 0
+        var truncated = false
+
+        func appendText(_ s: String, from element: AXUIElement) {
+            if s.isEmpty { return }
+            let chunk = buffer.isEmpty ? s : "\n" + s
+            buffer += chunk
+            spans.append((end: (buffer as NSString).length, element: element))
+        }
+
+        func collect(_ element: AXUIElement) {
+            if truncated { return }
+            if nodeCount >= kSearchMaxNodes || (buffer as NSString).length >= kSearchMaxChars {
+                truncated = true
+                return
+            }
+            nodeCount += 1
+            let nodeText = axString(element, attribute: kAXValueAttribute as String)
+                ?? axString(element, attribute: kAXTitleAttribute as String)
+                ?? axString(element, attribute: kAXDescriptionAttribute as String)
+                ?? ""
+            appendText(nodeText, from: element)
+            var childrenRef: CFTypeRef?
+            let err = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef)
+            if err == .success, let children = childrenRef as? [AXUIElement] {
+                for child in children {
+                    if truncated { return }
+                    collect(child)
+                }
+            }
+        }
+        collect(root)
+
+        let raw = try ElementSearch.findMatches(
+            in: buffer, patterns: patterns, mode: mode,
+            caseSensitive: caseSensitive, contextChars: contextChars,
+            maxHitsPerPattern: maxHitsPerPattern)
+
+        // Map each match offset to the element whose span contains it.
+        let hits: [SearchHit] = raw.matches.map { m in
+            let element = spans.first(where: { m.matchStart < $0.end })?.element ?? root
+            let handle = table.register(pid: pid, element: element)
+            let role = axString(element, attribute: kAXRoleAttribute as String) ?? ""
+            let bounds = includeBounds ? axRect(element) : nil
+            return SearchHit(
+                pattern: patterns[m.patternIndex], excerpt: m.excerpt,
+                offset: m.matchStart, matchStart: m.matchStart,
+                matchLength: m.matchLength, handle: handle,
+                enclosingRole: role, bounds: bounds)
+        }
+        return SearchResult(
+            hits: hits, patternsUnmatched: raw.unmatched,
+            totalTextSearched: (buffer as NSString).length, truncated: truncated)
+    }
+
     // MARK: actions (update-tier)
 
     public static func invoke(table: ElementTable, idStr: String) throws {

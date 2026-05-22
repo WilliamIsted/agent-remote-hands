@@ -175,6 +175,7 @@ public enum VerbTable {
         "element.text":             VerbSpec(tier: .read,   preHelloOK: false),
         "element.range_value":      VerbSpec(tier: .read,   preHelloOK: false),
         "element.get_text":         VerbSpec(tier: .read,   preHelloOK: false),
+        "element.search":           VerbSpec(tier: .read,   preHelloOK: false),
         "element.invoke":           VerbSpec(tier: .update, preHelloOK: false),
         "element.toggle":           VerbSpec(tier: .update, preHelloOK: false),
         "element.expand":           VerbSpec(tier: .update, preHelloOK: false),
@@ -301,6 +302,7 @@ public func dispatchVerb(
     case "element.text":         return handleElementText(request, table: elementTable)
     case "element.range_value":  return handleElementRangeValue(request, table: elementTable)
     case "element.get_text":     return handleElementGetText(request, table: elementTable)
+    case "element.search":       return handleElementSearch(request, table: elementTable)
     case "element.invoke":       return handleElementInvoke(request, table: elementTable)
     case "element.toggle":       return handleElementToggle(request, table: elementTable)
     case "element.expand":       return handleElementExpand(request, table: elementTable)
@@ -1700,6 +1702,97 @@ private func encodeTextSlice(_ s: Element.TextSlice) -> Data {
     let body: [String: Any] = [
         "text": s.text, "length": s.length,
         "truncated": s.truncated, "offset": s.offset,
+    ]
+    return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
+}
+
+private func handleElementSearch(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
+    let parsed = ParsedArgs(request.args)
+    let allowed: Set<String> = ["root", "patterns", "match", "case-sensitive",
+                                "context-chars", "max-hits-per-pattern", "include-bounds"]
+    if let unknown = parsed.unknownFlag(allowed: allowed) {
+        return .err(code: "invalid_args", detail: ["unknown_flag": "--\(unknown)"])
+    }
+    guard let rootId = parsed.arg("root") else {
+        return .err(code: "invalid_args", detail: ["message": "element.search requires --root <elt:N>"])
+    }
+    // patterns: a JSON-encoded array string of 1..16 non-empty strings.
+    guard let patternsRaw = parsed.flags["patterns"] else {
+        return .err(code: "invalid_args", detail: ["message": "element.search requires --patterns (JSON array)"])
+    }
+    guard let decoded = try? JSONSerialization.jsonObject(with: Data(patternsRaw.utf8)),
+          let patterns = decoded as? [String], !patterns.isEmpty, patterns.count <= 16,
+          patterns.allSatisfy({ !$0.isEmpty }) else {
+        return .err(code: "invalid_args", detail: ["message": "--patterns must be a JSON array of 1..16 non-empty strings"])
+    }
+    var mode: SearchMatchMode = .substring
+    if let raw = parsed.flags["match"] {
+        guard let m = SearchMatchMode(rawValue: raw) else {
+            return .err(code: "invalid_args", detail: ["message": "--match must be 'substring' or 'regex'"])
+        }
+        mode = m
+    }
+    let caseSensitive = boolFlag(parsed.flags["case-sensitive"], default: false)
+    var contextChars = 80
+    if let raw = parsed.flags["context-chars"] {
+        guard let v = Int(raw), (0...4096).contains(v) else {
+            return .err(code: "invalid_args", detail: ["message": "--context-chars must be 0..4096"])
+        }
+        contextChars = v
+    }
+    var maxHits = 5
+    if let raw = parsed.flags["max-hits-per-pattern"] {
+        guard let v = Int(raw), (1...100).contains(v) else {
+            return .err(code: "invalid_args", detail: ["message": "--max-hits-per-pattern must be 1..100"])
+        }
+        maxHits = v
+    }
+    let includeBounds = boolFlag(parsed.flags["include-bounds"], default: false)
+
+    do {
+        let result = try Element.searchSubtree(
+            table: table, rootId: rootId, patterns: patterns, mode: mode,
+            caseSensitive: caseSensitive, contextChars: contextChars,
+            maxHitsPerPattern: maxHits, includeBounds: includeBounds)
+        return .ok(payload: encodeSearchResult(result))
+    } catch let e as ElementSearchError {
+        if case .invalidRegex(let p) = e {
+            return .err(code: "invalid_args", detail: ["message": "invalid regex pattern: \(p)"])
+        }
+        return .err(code: "invalid_args", detail: ["message": "\(e)"])
+    } catch let e as ElementError {
+        return elementErrorOutcome(e)
+    } catch {
+        return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
+}
+
+/// Interpret a flag that may be a bare presence (`--flag`), an explicit
+/// `true`/`false`, or absent. Bare presence reads as true.
+private func boolFlag(_ raw: String?, default def: Bool) -> Bool {
+    guard let raw = raw else { return def }
+    if raw.isEmpty { return true }
+    return (raw as NSString).boolValue
+}
+
+private func encodeSearchResult(_ r: Element.SearchResult) -> Data {
+    let hits: [[String: Any]] = r.hits.map { h in
+        var o: [String: Any] = [
+            "pattern": h.pattern, "excerpt": h.excerpt, "offset": h.offset,
+            "match_start": h.matchStart, "match_length": h.matchLength,
+            "handle": h.handle, "enclosing_role": h.enclosingRole,
+        ]
+        if let b = h.bounds {
+            o["bounds"] = ["x": Int(b.origin.x), "y": Int(b.origin.y),
+                           "w": Int(b.size.width), "h": Int(b.size.height)]
+        }
+        return o
+    }
+    let body: [String: Any] = [
+        "hits": hits,
+        "patterns_unmatched": r.patternsUnmatched,
+        "total_text_searched": r.totalTextSearched,
+        "truncated": r.truncated,
     ]
     return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
 }
