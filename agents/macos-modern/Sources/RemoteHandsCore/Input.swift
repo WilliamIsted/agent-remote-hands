@@ -61,8 +61,9 @@ public enum MouseButton: String, Sendable {
 }
 
 public enum InputError: Error, Equatable {
-    /// Input Monitoring TCC not granted. Caller must visit System Settings
-    /// → Privacy & Security → Input Monitoring.
+    /// macOS Accessibility TCC not granted — synthetic CGEvent posting
+    /// requires it. Caller must enable the agent in System Settings →
+    /// Privacy & Security → Accessibility, then restart the agent.
     case permissionDenied
     case unknownButton(String)
     case unknownKey(String)

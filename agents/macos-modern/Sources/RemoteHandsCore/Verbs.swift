@@ -843,21 +843,32 @@ private func inputResult(_ op: () throws -> Void) -> VerbOutcome {
 private func inputResultData(_ op: () throws -> Data) -> VerbOutcome {
     do {
         return .ok(payload: try op())
-    } catch InputError.permissionDenied {
-        return .err(code: "permission_denied", detail: [
-            "category": "input_monitoring",
-            "hint": "Grant in System Settings → Privacy & Security → Input Monitoring, then restart the agent",
-        ])
-    } catch InputError.unknownButton(let b) {
-        return .err(code: "invalid_args", detail: ["message": "unknown button \"\(b)\"; expected left/right/middle"])
-    } catch InputError.unknownKey(let k) {
-        return .err(code: "invalid_args", detail: ["message": "unknown key \"\(k)\"; see Input.swift KeyName table"])
-    } catch InputError.unknownModifier(let m) {
-        return .err(code: "invalid_args", detail: ["message": "unknown modifier \"\(m)\"; expected cmd/shift/opt/ctrl/fn"])
-    } catch InputError.eventCreationFailed {
-        return .err(code: "internal_error", detail: ["message": "CGEvent creation failed"])
+    } catch let e as InputError {
+        return inputErrorOutcome(e)
     } catch {
         return .err(code: "internal_error", detail: ["message": "\(error)"])
+    }
+}
+
+/// Map an `InputError` to its wire outcome. Mirrors `elementErrorOutcome`.
+/// `internal` (not `private`) so the mapping is unit-testable.
+func inputErrorOutcome(_ e: InputError) -> VerbOutcome {
+    switch e {
+    case .permissionDenied:
+        // Synthetic CGEvent posting is gated by macOS Accessibility, NOT
+        // Input Monitoring — point the operator at the pane that works.
+        return .err(code: "permission_denied", detail: [
+            "category": "accessibility",
+            "hint": "Grant in System Settings → Privacy & Security → Accessibility, then restart the agent",
+        ])
+    case .unknownButton(let b):
+        return .err(code: "invalid_args", detail: ["message": "unknown button \"\(b)\"; expected left/right/middle"])
+    case .unknownKey(let k):
+        return .err(code: "invalid_args", detail: ["message": "unknown key \"\(k)\"; see Input.swift KeyName table"])
+    case .unknownModifier(let m):
+        return .err(code: "invalid_args", detail: ["message": "unknown modifier \"\(m)\"; expected cmd/shift/opt/ctrl/fn"])
+    case .eventCreationFailed:
+        return .err(code: "internal_error", detail: ["message": "CGEvent creation failed"])
     }
 }
 
