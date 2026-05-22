@@ -1225,7 +1225,7 @@ private func encodeJSON(_ obj: [String: Any]) -> Data {
 }
 
 private func handleFileRead(_ r: WireRequest) -> VerbOutcome {
-    guard let path = r.args.first else {
+    guard let path = ParsedArgs(r.args).arg("path") else {
         return .err(code: "invalid_args", detail: ["message": "file.read requires <path>"])
     }
     return fsResult({ try FileSystem.readFile(path) }, encode: { $0 })
@@ -1237,7 +1237,7 @@ private func handleFileWrite(_ r: WireRequest) -> VerbOutcome {
     // file.write is U-tier — it overwrites an existing file; it does NOT
     // create. Missing target → not_found (use file.create).
     let parsed = ParsedArgs(r.args)
-    guard let path = parsed.positionals.first else {
+    guard let path = parsed.arg("path") else {
         return .err(code: "invalid_args", detail: ["message": "file.write requires <path>"])
     }
     let payload: Data
@@ -1259,22 +1259,23 @@ private func handleFileWrite(_ r: WireRequest) -> VerbOutcome {
 }
 
 private func handleFileWriteAt(_ r: WireRequest) -> VerbOutcome {
-    // Grammar: file.write_at <path> <offset> <length> [--truncate]
+    // Grammar: file.write_at <path> <offset> [--truncate]; content via payload.
     let parsed = ParsedArgs(r.args)
-    guard parsed.positionals.count >= 3,
-          let offset = Int64(parsed.positionals[1]) else {
-        return .err(code: "invalid_args", detail: ["message": "file.write_at requires <path> <offset> <length>"])
+    guard let path = parsed.arg("path"),
+          let offsetStr = parsed.arg("offset", positional: 1),
+          let offset = Int64(offsetStr) else {
+        return .err(code: "invalid_args", detail: ["message": "file.write_at requires <path> <offset>"])
     }
     let truncate = parsed.flags["truncate"] != nil
     return fsResult({
-        try FileSystem.writeAt(parsed.positionals[0], offset: offset, payload: r.payload, truncate: truncate)
+        try FileSystem.writeAt(path, offset: offset, payload: r.payload, truncate: truncate)
         return ()
     }, encode: { _ in Data() })
 }
 
 private func handleFileDelete(_ r: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(r.args)
-    guard let path = parsed.positionals.first else {
+    guard let path = parsed.arg("path") else {
         return .err(code: "invalid_args", detail: ["message": "file.delete requires <path>"])
     }
     let permanent = parsed.flags["permanent"] != nil
@@ -1291,20 +1292,21 @@ private func encodeDeleteOutcome(_ outcome: FileSystem.DeleteOutcome) -> Data {
 
 private func handleFileRename(_ r: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(r.args)
-    guard parsed.positionals.count >= 2 else {
+    guard let src = parsed.arg("src", positional: 0),
+          let dst = parsed.arg("dst", positional: 1) else {
         return .err(code: "invalid_args", detail: ["message": "file.rename requires <src> <dst>"])
     }
     let overwrite = parsed.flags["overwrite"] != nil
     let crossfs = parsed.flags["cross-fs"] != nil
     return fsResult({
-        try FileSystem.rename(src: parsed.positionals[0], dst: parsed.positionals[1],
+        try FileSystem.rename(src: src, dst: dst,
                               overwrite: overwrite, allowCrossFS: crossfs)
         return ["renamed": true] as [String: Any]
     }, encode: encodeJSON)
 }
 
 private func handleFileStat(_ r: WireRequest) -> VerbOutcome {
-    guard let path = r.args.first else {
+    guard let path = ParsedArgs(r.args).arg("path") else {
         return .err(code: "invalid_args", detail: ["message": "file.stat requires <path>"])
     }
     return fsResult({ try FileSystem.stat(path) }, encode: { stat in
@@ -1313,7 +1315,7 @@ private func handleFileStat(_ r: WireRequest) -> VerbOutcome {
 }
 
 private func handleFileExists(_ r: WireRequest) -> VerbOutcome {
-    guard let path = r.args.first else {
+    guard let path = ParsedArgs(r.args).arg("path") else {
         return .err(code: "invalid_args", detail: ["message": "file.exists requires <path>"])
     }
     let (exists, type) = FileSystem.exists(path)
@@ -1325,7 +1327,7 @@ private func handleFileExists(_ r: WireRequest) -> VerbOutcome {
 
 private func handleFileWait(_ r: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(r.args)
-    guard let glob = parsed.positionals.first else {
+    guard let glob = parsed.arg("glob") else {
         return .err(code: "invalid_args", detail: ["message": "file.wait requires <glob>"])
     }
     let interval = parsed.intFlag("interval") ?? 200
