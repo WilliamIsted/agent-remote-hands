@@ -537,13 +537,18 @@ private func handleWindowList(_ request: WireRequest) -> VerbOutcome {
 
 private func handleWindowFind(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    // window.find takes a single positional <title-pattern> (glob-matched,
-    // case-insensitive) and no flags — reject any flag explicitly so a
-    // caller passing e.g. an unknown --match mode fails loudly.
-    if let unknown = parsed.flags.keys.first {
+    if let unknown = parsed.unknownFlag(allowed: ["pattern", "match"]) {
         return .err(code: "invalid_args", detail: ["unknown_flag": "--\(unknown)"])
     }
-    guard let pattern = parsed.positionals.first else {
+    // --match is a documented enum; an unknown mode is invalid_args. The
+    // agent matches by case-insensitive substring regardless of the
+    // requested mode — honouring prefix/exact/glob/regex is a separate
+    // feature.
+    if let m = parsed.flags["match"],
+       !["substring", "prefix", "exact", "glob", "regex"].contains(m) {
+        return .err(code: "invalid_args", detail: ["message": "unknown --match mode \"\(m)\""])
+    }
+    guard let pattern = parsed.arg("pattern") else {
         return .err(code: "invalid_args", detail: ["message": "window.find requires a title pattern"])
     }
     do {
@@ -558,15 +563,15 @@ private func handleWindowFind(_ request: WireRequest) -> VerbOutcome {
 }
 
 private func handleWindowFocus(_ request: WireRequest) -> VerbOutcome {
-    guard let id = request.args.first else {
-        return .err(code: "invalid_args", detail: ["message": "window.focus requires <id>"])
+    guard let id = ParsedArgs(request.args).arg("handle") else {
+        return .err(code: "invalid_args", detail: ["message": "window.focus requires <handle>"])
     }
     return windowActionResult { try Window.focus(idStr: id) }
 }
 
 private func handleWindowClose(_ request: WireRequest) -> VerbOutcome {
-    guard let id = request.args.first else {
-        return .err(code: "invalid_args", detail: ["message": "window.close requires <id>"])
+    guard let id = ParsedArgs(request.args).arg("handle") else {
+        return .err(code: "invalid_args", detail: ["message": "window.close requires <handle>"])
     }
     return windowActionResult { try Window.close(idStr: id) }
 }
@@ -588,8 +593,8 @@ private func handleWindowMove(_ request: WireRequest) -> VerbOutcome {
 }
 
 private func handleWindowState(_ request: WireRequest) -> VerbOutcome {
-    guard let id = request.args.first else {
-        return .err(code: "invalid_args", detail: ["message": "window.state requires <id>"])
+    guard let id = ParsedArgs(request.args).arg("handle") else {
+        return .err(code: "invalid_args", detail: ["message": "window.state requires <handle>"])
     }
     do {
         let s = try Window.state(idStr: id)
