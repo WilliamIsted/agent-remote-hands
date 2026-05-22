@@ -363,7 +363,7 @@ private func handleTierRaise(_ request: WireRequest, currentTier: Tier, tokenSto
 }
 
 private func handleTierDrop(_ request: WireRequest, currentTier: Tier) -> VerbOutcome {
-    guard let target = request.args.first.flatMap(Tier.init(rawValue:)) else {
+    guard let target = ParsedArgs(request.args).arg("tier").flatMap(Tier.init(rawValue:)) else {
         return .err(code: "invalid_args", detail: ["message": "missing or unknown tier"])
     }
     if target.rank > currentTier.rank {
@@ -923,7 +923,7 @@ private func handleWatchWindow(_ r: WireRequest, context: DispatchContext) -> Ve
 }
 
 private func handleWatchProcess(_ r: WireRequest, context: DispatchContext) -> VerbOutcome {
-    guard let pidStr = r.args.first, let pid = Int32(pidStr) else {
+    guard let pidStr = ParsedArgs(r.args).arg("pid"), let pid = Int32(pidStr) else {
         return .err(code: "invalid_args", detail: ["message": "watch.process requires <pid>"])
     }
     let id = context.subscriptions.nextSubID()
@@ -935,7 +935,7 @@ private func handleWatchProcess(_ r: WireRequest, context: DispatchContext) -> V
 }
 
 private func handleWatchElement(_ r: WireRequest, context: DispatchContext) -> VerbOutcome {
-    guard let elt = r.args.first else {
+    guard let elt = ParsedArgs(r.args).arg("handle") else {
         return .err(code: "invalid_args", detail: ["message": "watch.element requires <elt:N>"])
     }
     do {
@@ -954,7 +954,7 @@ private func handleWatchElement(_ r: WireRequest, context: DispatchContext) -> V
 }
 
 private func handleWatchFile(_ r: WireRequest, context: DispatchContext) -> VerbOutcome {
-    guard let glob = r.args.first else {
+    guard let glob = ParsedArgs(r.args).arg("glob") else {
         return .err(code: "invalid_args", detail: ["message": "watch.file requires <glob>"])
     }
     let id = context.subscriptions.nextSubID()
@@ -966,7 +966,7 @@ private func handleWatchFile(_ r: WireRequest, context: DispatchContext) -> Verb
 }
 
 private func handleWatchCancel(_ r: WireRequest, context: DispatchContext) -> VerbOutcome {
-    guard let id = r.args.first else {
+    guard let id = ParsedArgs(r.args).arg("subscription-id") else {
         return .err(code: "invalid_args", detail: ["message": "watch.cancel requires <sub:N>"])
     }
     let was = context.subscriptions.cancel(id: id)
@@ -1498,7 +1498,7 @@ private func handleElementList(_ request: WireRequest, table: ElementTable) -> V
 
 private func handleElementTree(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    guard let id = parsed.positionals.first else {
+    guard let id = parsed.arg("handle") else {
         return .err(code: "invalid_args", detail: ["message": "element.tree requires <elt:N>"])
     }
     let maxDepth = parsed.intFlag("max-depth") ?? 16
@@ -1573,21 +1573,21 @@ private func handleElementWait(_ request: WireRequest, table: ElementTable) -> V
 }
 
 private func handleElementText(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
-    guard let id = request.args.first else {
+    guard let id = ParsedArgs(request.args).arg("handle") else {
         return .err(code: "invalid_args", detail: ["message": "element.text requires <elt:N>"])
     }
     return elementResult({ Data(try Element.text(table: table, idStr: id).utf8) }, encode: { $0 })
 }
 
 private func handleElementInvoke(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
-    guard let id = request.args.first else {
+    guard let id = ParsedArgs(request.args).arg("handle") else {
         return .err(code: "invalid_args", detail: ["message": "element.invoke requires <elt:N>"])
     }
     return elementResult({ try Element.invoke(table: table, idStr: id); return () }, encode: { _ in Data() })
 }
 
 private func handleElementToggle(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
-    guard let id = request.args.first else {
+    guard let id = ParsedArgs(request.args).arg("handle") else {
         return .err(code: "invalid_args", detail: ["message": "element.toggle requires <elt:N>"])
     }
     return elementResult({ try Element.toggle(table: table, idStr: id) }, encode: { state in
@@ -1596,28 +1596,28 @@ private func handleElementToggle(_ request: WireRequest, table: ElementTable) ->
 }
 
 private func handleElementExpand(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
-    guard let id = request.args.first else {
+    guard let id = ParsedArgs(request.args).arg("handle") else {
         return .err(code: "invalid_args", detail: ["message": "element.expand requires <elt:N>"])
     }
     return elementResult({ try Element.expand(table: table, idStr: id); return () }, encode: { _ in Data() })
 }
 
 private func handleElementCollapse(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
-    guard let id = request.args.first else {
+    guard let id = ParsedArgs(request.args).arg("handle") else {
         return .err(code: "invalid_args", detail: ["message": "element.collapse requires <elt:N>"])
     }
     return elementResult({ try Element.collapse(table: table, idStr: id); return () }, encode: { _ in Data() })
 }
 
 private func handleElementFocus(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
-    guard let id = request.args.first else {
+    guard let id = ParsedArgs(request.args).arg("handle") else {
         return .err(code: "invalid_args", detail: ["message": "element.focus requires <elt:N>"])
     }
     return elementResult({ try Element.focus(table: table, idStr: id); return () }, encode: { _ in Data() })
 }
 
 private func handleElementSetText(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
-    guard let id = request.args.first else {
+    guard let id = ParsedArgs(request.args).arg("handle") else {
         return .err(code: "invalid_args", detail: ["message": "element.set_text requires <elt:N> <length>"])
     }
     guard let text = String(data: request.payload, encoding: .utf8) else {
@@ -1628,11 +1628,19 @@ private func handleElementSetText(_ request: WireRequest, table: ElementTable) -
 
 private func handleElementFindInvoke(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    guard parsed.positionals.count >= 2 else {
-        return .err(code: "invalid_args", detail: ["message": "element.find_invoke requires <role> <name-pattern>"])
+    let role: String
+    let pattern: String
+    if let r = parsed.flags["role"], let n = parsed.flags["name"] {
+        role = r; pattern = n
+    } else if let n = parsed.flags["name"] {
+        role = ""; pattern = n
+    } else if parsed.positionals.count >= 2 {
+        role = parsed.positionals[0]; pattern = parsed.positionals[1]
+    } else {
+        return .err(code: "invalid_args", detail: ["message": "element.find_invoke requires <role> <name> or --name X"])
     }
     return elementResult({
-        let snap = try Element.find(table: table, role: parsed.positionals[0], pattern: parsed.positionals[1])
+        let snap = try Element.find(table: table, role: role, pattern: pattern)
         try Element.invoke(table: table, idStr: snap.id)
         return snap
     }, encode: encodeSnapshot)
