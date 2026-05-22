@@ -335,4 +335,33 @@ public enum Input {
         let screenHeight = NSScreen.screens.first?.frame.height ?? 0
         return CGPoint(x: cocoa.x, y: screenHeight - cocoa.y)
     }
+
+    // MARK: input system settings (read-tier; no TCC needed)
+
+    /// System input settings for `system.info.capabilities.input_settings`:
+    /// double-click timing, key-repeat timing, and the double-click slop
+    /// rectangle.
+    public static func systemSettings() -> [String: Any] {
+        // Double-click interval — NSEvent exposes it directly, in seconds.
+        let doubleClickMs = Int((NSEvent.doubleClickInterval * 1000).rounded())
+
+        // Key-repeat settings live in the global defaults domain as tick
+        // counts (1/60 s). They stay absent until the user moves them off
+        // the System Settings default, so fall back to typical values.
+        let defaults = UserDefaults.standard
+        let initialRepeatTicks = defaults.object(forKey: "InitialKeyRepeat") as? Int ?? 25
+        let repeatTicks = max(1, defaults.object(forKey: "KeyRepeat") as? Int ?? 6)
+        let repeatDelayMs = Int((Double(initialRepeatTicks) * 1000.0 / 60.0).rounded())
+        // characters/second = 60 ticks-per-second ÷ ticks-per-repeat.
+        let repeatRateCps = Int((60.0 / Double(repeatTicks)).rounded())
+
+        return [
+            "double_click_time_ms": doubleClickMs,
+            "keyboard_repeat_delay_ms": repeatDelayMs,
+            "keyboard_repeat_rate_cps": repeatRateCps,
+            // macOS exposes no public API for the double-click slop
+            // rectangle; report the conventional small tolerance.
+            "double_click_rect": ["w": 4, "h": 4] as [String: Int],
+        ]
+    }
 }

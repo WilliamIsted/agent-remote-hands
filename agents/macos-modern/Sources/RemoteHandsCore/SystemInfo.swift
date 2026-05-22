@@ -57,11 +57,14 @@ public func systemInfoBody(currentTier: Tier, implementedNamespaces: [String], i
         // Supported framings post-hello. WebSocket isn't yet implemented.
         "framings": ["mcp"],
         "capabilities": [
-            "capture": "screencapturekit",
+            "capture": "coregraphics",
             "ui_automation": "ax",
             "image_formats": CaptureFormat.allCases.map { $0.rawValue },
             "discovery": "bonjour",
             "implemented_verbs": implementedVerbs.sorted(),
+            // No wake-timer verb on this family — advertise honestly.
+            "wake_timer_supported": false,
+            "input_settings": Input.systemSettings(),
             "tcc": [
                 "screen_recording": ScreenCapture.hasScreenRecordingPermission() ? "granted" : "denied",
                 "accessibility": Window.hasAccessibilityPermission() ? "granted" : "denied",
