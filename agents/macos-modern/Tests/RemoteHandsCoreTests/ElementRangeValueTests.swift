@@ -15,11 +15,12 @@ import Testing
     let spec = VerbTable.specs["element.range_value"]
     #expect(spec != nil)
     #expect(spec?.tier == .read)
+    #expect(spec?.preHelloOK == false)
 }
 
 @Test func rangeValueLookupOfBogusHandleThrowsInvalidId() {
     let table = ElementTable()
     #expect(throws: ElementError.invalidId("not-an-elt")) {
-        _ = try Element.rangeValue(table: table, idStr: "not-an-elt")
+        _ = try table.lookup(id: "not-an-elt")
     }
 }
