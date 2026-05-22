@@ -1189,11 +1189,10 @@ private func fsErrorOutcome(_ e: FSError) -> VerbOutcome {
 }
 
 private func handleFileCreate(_ r: WireRequest) -> VerbOutcome {
-    // Two arg shapes:
-    //   file.create <path> [<length>]      with optional payload (length=0 OK)
-    //   file.create <path> --content X     content embedded in flag
+    // Path: --path flag (spec form) or a leading positional.
+    // Content: --content flag, else the wire payload.
     let parsed = ParsedArgs(r.args)
-    guard let path = parsed.positionals.first else {
+    guard let path = parsed.flags["path"] ?? parsed.positionals.first else {
         return .err(code: "invalid_args", detail: ["message": "file.create requires <path>"])
     }
     let initial: Data
