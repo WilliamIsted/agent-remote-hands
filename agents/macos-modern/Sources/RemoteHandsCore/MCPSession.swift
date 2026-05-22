@@ -75,7 +75,14 @@ public final class MCPSession {
     /// protocol compliance. A future slice can enrich each tool with a
     /// real JSON Schema input — for now we emit name + description only.
     private func minimalToolList() -> [[String: Any]] {
-        return VerbTable.specs.keys.sorted().map { verb in
+        // §1.6.7 — connection-control and verb-discovery meta verbs are not
+        // exposed as MCP tools: connection.hello is the pre-hello
+        // handshake, connection.close/reset are connection-control, and
+        // system.verbs is redundant with tools/list itself.
+        let excluded: Set<String> = [
+            "connection.hello", "connection.close", "connection.reset", "system.verbs",
+        ]
+        return VerbTable.specs.keys.sorted().filter { !excluded.contains($0) }.map { verb in
             return [
                 "name": verb,
                 "description": "Agent verb \(verb) (tier=\(VerbTable.specs[verb]?.tier.rawValue ?? "?"))",
