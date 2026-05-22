@@ -577,16 +577,25 @@ private func handleWindowClose(_ request: WireRequest) -> VerbOutcome {
 }
 
 private func handleWindowMove(_ request: WireRequest) -> VerbOutcome {
-    // Grammar: window.move <id> <x> <y> <w> <h>
-    guard request.args.count >= 5 else {
-        return .err(code: "invalid_args", detail: ["message": "window.move requires <id> <x> <y> <w> <h>"])
+    // Spec: handle/x/y required; w/h optional (omitted -> size preserved).
+    // Legacy form: positionals <handle> <x> <y> <w> <h>.
+    let parsed = ParsedArgs(request.args)
+    guard let id = parsed.arg("handle", positional: 0),
+          let xs = parsed.arg("x", positional: 1), let x = Int(xs),
+          let ys = parsed.arg("y", positional: 2), let y = Int(ys) else {
+        return .err(code: "invalid_args", detail: ["message": "window.move requires <handle> <x> <y>"])
     }
-    let id = request.args[0]
-    guard let x = Int(request.args[1]),
-          let y = Int(request.args[2]),
-          let w = Int(request.args[3]),
-          let h = Int(request.args[4]) else {
-        return .err(code: "invalid_args", detail: ["message": "x/y/w/h must be integers"])
+    let wFlag = parsed.arg("w", positional: 3).flatMap { Int($0) }
+    let hFlag = parsed.arg("h", positional: 4).flatMap { Int($0) }
+    var w = wFlag ?? 0
+    var h = hFlag ?? 0
+    if wFlag == nil || hFlag == nil {
+        // Fill omitted width/height from the window's current bounds.
+        guard let cur = try? Window.resolveWindow(idStr: id).bounds else {
+            return .err(code: "not_found", detail: ["message": "no window for handle \"\(id)\""])
+        }
+        if wFlag == nil { w = Int(cur.size.width) }
+        if hFlag == nil { h = Int(cur.size.height) }
     }
     let rect = CGRect(x: x, y: y, width: w, height: h)
     return windowActionResult { try Window.move(idStr: id, to: rect) }
