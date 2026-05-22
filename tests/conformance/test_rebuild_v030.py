@@ -1009,3 +1009,155 @@ def test_r7_vision_calibrate_live_composite(
     # Prompt echo policy: caller sent one -> must be echoed verbatim.
     assert body.get("prompt") == "Reply with the single word OK.", \
         f"prompt must be echoed verbatim, got {body.get('prompt')!r}"
+
+
+# ===========================================================================
+# system.ping — named liveness probe (empty OK body)
+
+def test_system_ping_returns_ok(
+        update_client: WireClient, capabilities: dict) -> None:
+    """system.ping returns Ok with an empty body — a log-suppressible
+    liveness probe distinct from system.health."""
+    needs_verb(capabilities, "system.ping")
+    r = update_client.request("system.ping")
+    assert isinstance(r, OkResponse), f"expected OkResponse, got {r!r}"
+
+
+# ===========================================================================
+# R8/R9/R10 — element.range_value / get_text / search
+#
+# Each needs a live element handle; acquire one from element.list. Tests are
+# lenient about the host's foreground app — they assert wire SHAPE, skipping
+# when the environment offers no suitable element.
+
+def _first_element_handle(client: WireClient) -> str | None:
+    """Return the handle of the first element.list entry, or None."""
+    r = client.request("element.list", "--limit", "50")
+    if not isinstance(r, OkResponse):
+        return None
+    body = json.loads(r.payload)
+    for e in body.get("elements", []):
+        h = e.get("handle")
+        if isinstance(h, str) and h.startswith("elt:"):
+            return h
+    return None
+
+
+def test_r8_range_value_missing_handle_rejected(
+        update_client: WireClient, capabilities: dict) -> None:
+    """element.range_value with no handle returns ERR invalid_args."""
+    needs_verb(capabilities, "element.range_value")
+    r = update_client.request("element.range_value")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args", f"expected invalid_args, got {r.code!r}"
+
+
+def test_r8_range_value_non_range_element(
+        update_client: WireClient, capabilities: dict) -> None:
+    """element.range_value on a live element either returns the range shape
+    {min,max,value} or ERR not_supported_by_target {pattern} when the
+    element is not a slider/stepper. Both are spec-correct."""
+    needs_verb(capabilities, "element.range_value")
+    needs_verb(capabilities, "element.list")
+    handle = _first_element_handle(update_client)
+    if handle is None:
+        pytest.skip("no element handle discoverable on the current foreground")
+    r = update_client.request("element.range_value", "--handle", handle)
+    if isinstance(r, ErrResponse):
+        assert r.code == "not_supported_by_target", \
+            f"expected not_supported_by_target, got {r.code!r} ({r.detail!r})"
+        assert r.detail.get("pattern") == "RangeValuePattern", \
+            f"expected detail.pattern=='RangeValuePattern', got {r.detail!r}"
+        return
+    assert isinstance(r, OkResponse), f"expected Ok or Err, got {r!r}"
+    body = json.loads(r.payload)
+    for k in ("min", "max", "value"):
+        assert k in body, f"range_value body missing {k!r}: {body!r}"
+
+
+def test_r9_get_text_missing_handle_rejected(
+        update_client: WireClient, capabilities: dict) -> None:
+    """element.get_text with no handle returns ERR invalid_args."""
+    needs_verb(capabilities, "element.get_text")
+    r = update_client.request("element.get_text")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args", f"expected invalid_args, got {r.code!r}"
+
+
+def test_r9_get_text_bad_max_length_rejected(
+        update_client: WireClient, capabilities: dict) -> None:
+    """element.get_text with an out-of-range max-length returns invalid_args
+    before any AX call."""
+    needs_verb(capabilities, "element.get_text")
+    handle = _first_element_handle(update_client) or "elt:1"
+    r = update_client.request("element.get_text", "--handle", handle,
+                              "--max-length", "999999999")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args", f"expected invalid_args, got {r.code!r}"
+
+
+def test_r9_get_text_returns_paginated_shape(
+        update_client: WireClient, capabilities: dict) -> None:
+    """element.get_text on a live element returns {text,length,truncated,
+    offset} with the documented types."""
+    needs_verb(capabilities, "element.get_text")
+    needs_verb(capabilities, "element.list")
+    handle = _first_element_handle(update_client)
+    if handle is None:
+        pytest.skip("no element handle discoverable on the current foreground")
+    r = update_client.request("element.get_text", "--handle", handle)
+    if isinstance(r, ErrResponse) and r.code == "target_gone":
+        pytest.skip("element went stale between list and get_text")
+    assert isinstance(r, OkResponse), f"expected OkResponse, got {r!r}"
+    body = json.loads(r.payload)
+    assert isinstance(body.get("text"), str), f"text must be str: {body!r}"
+    assert isinstance(body.get("length"), int) and not isinstance(
+        body["length"], bool), f"length must be int: {body!r}"
+    assert isinstance(body.get("truncated"), bool), f"truncated must be bool: {body!r}"
+    assert isinstance(body.get("offset"), int), f"offset must be int: {body!r}"
+
+
+def test_r10_search_missing_args_rejected(
+        update_client: WireClient, capabilities: dict) -> None:
+    """element.search without --root or --patterns returns invalid_args."""
+    needs_verb(capabilities, "element.search")
+    r = update_client.request("element.search")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args", f"expected invalid_args, got {r.code!r}"
+
+
+def test_r10_search_bad_patterns_rejected(
+        update_client: WireClient, capabilities: dict) -> None:
+    """element.search with a non-JSON-array --patterns returns invalid_args."""
+    needs_verb(capabilities, "element.search")
+    handle = _first_element_handle(update_client) or "elt:1"
+    r = update_client.request("element.search", "--root", handle,
+                              "--patterns", "not-json")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args", f"expected invalid_args, got {r.code!r}"
+
+
+def test_r10_search_returns_result_shape(
+        update_client: WireClient, capabilities: dict) -> None:
+    """element.search on a live subtree returns {hits,patterns_unmatched,
+    total_text_searched,truncated}."""
+    needs_verb(capabilities, "element.search")
+    needs_verb(capabilities, "element.list")
+    handle = _first_element_handle(update_client)
+    if handle is None:
+        pytest.skip("no element handle discoverable on the current foreground")
+    r = update_client.request("element.search", "--root", handle,
+                              "--patterns", json.dumps(["zzz-no-such-text-zzz"]))
+    if isinstance(r, ErrResponse) and r.code == "target_gone":
+        pytest.skip("element went stale between list and search")
+    assert isinstance(r, OkResponse), f"expected OkResponse, got {r!r}"
+    body = json.loads(r.payload)
+    assert isinstance(body.get("hits"), list), f"hits must be list: {body!r}"
+    assert isinstance(body.get("patterns_unmatched"), list), \
+        f"patterns_unmatched must be list: {body!r}"
+    assert isinstance(body.get("total_text_searched"), int), \
+        f"total_text_searched must be int: {body!r}"
+    assert isinstance(body.get("truncated"), bool), \
+        f"truncated must be bool: {body!r}"
+    assert body["patterns_unmatched"] == ["zzz-no-such-text-zzz"], \
+        f"the absent pattern must be reported unmatched: {body!r}"
