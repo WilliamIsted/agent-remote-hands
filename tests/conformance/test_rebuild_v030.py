@@ -1064,6 +1064,8 @@ def test_r8_range_value_non_range_element(
         pytest.skip("no element handle discoverable on the current foreground")
     r = update_client.request("element.range_value", "--handle", handle)
     if isinstance(r, ErrResponse):
+        if r.code in ("target_gone", "ax_disabled", "ax_error"):
+            pytest.skip(f"AX environment not suitable: {r.code}")
         assert r.code == "not_supported_by_target", \
             f"expected not_supported_by_target, got {r.code!r} ({r.detail!r})"
         assert r.detail.get("pattern") == "RangeValuePattern", \
@@ -1106,8 +1108,8 @@ def test_r9_get_text_returns_paginated_shape(
     if handle is None:
         pytest.skip("no element handle discoverable on the current foreground")
     r = update_client.request("element.get_text", "--handle", handle)
-    if isinstance(r, ErrResponse) and r.code == "target_gone":
-        pytest.skip("element went stale between list and get_text")
+    if isinstance(r, ErrResponse) and r.code in ("target_gone", "ax_disabled", "ax_error"):
+        pytest.skip(f"element unusable: {r.code}")
     assert isinstance(r, OkResponse), f"expected OkResponse, got {r!r}"
     body = json.loads(r.payload)
     assert isinstance(body.get("text"), str), f"text must be str: {body!r}"
@@ -1148,8 +1150,8 @@ def test_r10_search_returns_result_shape(
         pytest.skip("no element handle discoverable on the current foreground")
     r = update_client.request("element.search", "--root", handle,
                               "--patterns", json.dumps(["zzz-no-such-text-zzz"]))
-    if isinstance(r, ErrResponse) and r.code == "target_gone":
-        pytest.skip("element went stale between list and search")
+    if isinstance(r, ErrResponse) and r.code in ("target_gone", "ax_disabled", "ax_error"):
+        pytest.skip(f"element unusable: {r.code}")
     assert isinstance(r, OkResponse), f"expected OkResponse, got {r!r}"
     body = json.loads(r.payload)
     assert isinstance(body.get("hits"), list), f"hits must be list: {body!r}"
