@@ -633,8 +633,14 @@ private func windowErrorOutcome(_ e: WindowError) -> VerbOutcome {
 
 // MARK: input.mouse.*
 
-private func parsePoint(_ args: [String]) -> CGPoint? {
-    guard args.count >= 2, let x = Double(args[0]), let y = Double(args[1]) else { return nil }
+private func parsePoint(_ parsed: ParsedArgs) -> CGPoint? {
+    // --x/--y flags (spec form) or two leading positionals (legacy form).
+    if let xs = parsed.flags["x"], let ys = parsed.flags["y"],
+       let x = Double(xs), let y = Double(ys) {
+        return CGPoint(x: x, y: y)
+    }
+    let p = parsed.positionals
+    guard p.count >= 2, let x = Double(p[0]), let y = Double(p[1]) else { return nil }
     return CGPoint(x: x, y: y)
 }
 
@@ -650,14 +656,7 @@ private func handleMouseClick(_ request: WireRequest) -> VerbOutcome {
     ]) {
         return .err(code: "invalid_args", detail: ["unknown_flag": "--\(bad)"])
     }
-    // Coordinates: --x/--y flags (spec form) or two leading positionals.
-    let pt: CGPoint
-    if let xs = parsed.flags["x"], let ys = parsed.flags["y"],
-       let x = Double(xs), let y = Double(ys) {
-        pt = CGPoint(x: x, y: y)
-    } else if let p = parsePoint(parsed.positionals) {
-        pt = p
-    } else {
+    guard let pt = parsePoint(parsed) else {
         return .err(code: "invalid_args", detail: ["message": "expected <x> <y> or --x/--y"])
     }
     // Flag mutual-exclusion + range validation per the input.mouse.click
@@ -704,7 +703,7 @@ private func handleMouseClick(_ request: WireRequest) -> VerbOutcome {
 }
 
 private func handleMouseMove(_ request: WireRequest) -> VerbOutcome {
-    guard let pt = parsePoint(ParsedArgs(request.args).positionals) else {
+    guard let pt = parsePoint(ParsedArgs(request.args)) else {
         return .err(code: "invalid_args", detail: ["message": "expected <x> <y>"])
     }
     return inputResult { try Input.move(to: pt) }
@@ -741,7 +740,7 @@ private func handleMouseDrag(_ request: WireRequest) -> VerbOutcome {
 
 private func handleMousePress(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    guard let pt = parsePoint(parsed.positionals) else {
+    guard let pt = parsePoint(parsed) else {
         return .err(code: "invalid_args", detail: ["message": "expected <x> <y>"])
     }
     return inputResult {
@@ -752,7 +751,7 @@ private func handleMousePress(_ request: WireRequest) -> VerbOutcome {
 
 private func handleMouseRelease(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    guard let pt = parsePoint(parsed.positionals) else {
+    guard let pt = parsePoint(parsed) else {
         return .err(code: "invalid_args", detail: ["message": "expected <x> <y>"])
     }
     return inputResult {
@@ -1501,7 +1500,7 @@ private func handleElementTree(_ request: WireRequest, table: ElementTable) -> V
 
 private func handleElementAt(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    guard let pt = parsePoint(parsed.positionals) else {
+    guard let pt = parsePoint(parsed) else {
         return .err(code: "invalid_args", detail: ["message": "element.at requires <x> <y>"])
     }
     return elementResult({ try Element.elementAt(table: table, point: pt) }, encode: encodeSnapshot)
@@ -1634,7 +1633,7 @@ private func handleElementFindInvoke(_ request: WireRequest, table: ElementTable
 
 private func handleElementAtInvoke(_ request: WireRequest, table: ElementTable) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    guard let pt = parsePoint(parsed.positionals) else {
+    guard let pt = parsePoint(parsed) else {
         return .err(code: "invalid_args", detail: ["message": "element.at_invoke requires <x> <y>"])
     }
     return elementResult({

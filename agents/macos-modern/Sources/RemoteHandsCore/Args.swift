@@ -73,4 +73,13 @@ public struct ParsedArgs: Sendable {
         }
         return nil
     }
+
+    /// Resolve a primary argument: the named flag (the spec / MCP wire
+    /// form) or a positional at `index` (the legacy CLI form). Verb
+    /// handlers accept both — the protocol names every argument, but the
+    /// conformance suite and CLI callers also pass leading positionals.
+    public func arg(_ flag: String, positional index: Int = 0) -> String? {
+        if let v = flags[flag] { return v }
+        return index < positionals.count ? positionals[index] : nil
+    }
 }
