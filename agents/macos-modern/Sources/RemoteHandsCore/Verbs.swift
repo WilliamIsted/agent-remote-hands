@@ -760,27 +760,36 @@ private func handleMouseScroll(_ request: WireRequest) -> VerbOutcome {
 
 private func handleMouseDrag(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    if let bad = parsed.unknownFlag(allowed: ["button", "steps"]) {
+    if let bad = parsed.unknownFlag(allowed: ["x", "y", "button", "steps"]) {
         return .err(code: "invalid_args", detail: ["unknown_flag": "--\(bad)"])
     }
-    guard parsed.positionals.count >= 4,
-          let x1 = Double(parsed.positionals[0]),
-          let y1 = Double(parsed.positionals[1]),
-          let x2 = Double(parsed.positionals[2]),
-          let y2 = Double(parsed.positionals[3]) else {
-        return .err(code: "invalid_args", detail: ["message": "expected <x1> <y1> <x2> <y2>"])
+    // Spec form: drag from the current cursor position to --x/--y. Legacy
+    // form: four positionals <x1> <y1> <x2> <y2> (explicit start + end).
+    let start: CGPoint
+    let end: CGPoint
+    let p = parsed.positionals
+    if p.count >= 4, let x1 = Double(p[0]), let y1 = Double(p[1]),
+       let x2 = Double(p[2]), let y2 = Double(p[3]) {
+        start = CGPoint(x: x1, y: y1)
+        end = CGPoint(x: x2, y: y2)
+    } else if let target = parsePoint(parsed) {
+        start = Input.cursorPosition()
+        end = target
+    } else {
+        return .err(code: "invalid_args", detail: ["message": "drag requires --x/--y (or legacy <x1> <y1> <x2> <y2>)"])
     }
+    let steps = parsed.intFlag("steps") ?? 10
     return inputResult {
         let button = try parseButton(parsed.flags)
-        try Input.drag(from: CGPoint(x: x1, y: y1), to: CGPoint(x: x2, y: y2), button: button)
+        try Input.drag(from: start, to: end, button: button, steps: steps)
     }
 }
 
 private func handleMousePress(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    guard let pt = parsePoint(parsed) else {
-        return .err(code: "invalid_args", detail: ["message": "expected <x> <y>"])
-    }
+    // Spec: press at the current cursor position; --x/--y optionally
+    // override the press location.
+    let pt = parsePoint(parsed) ?? Input.cursorPosition()
     return inputResult {
         let button = try parseButton(parsed.flags)
         try Input.press(at: pt, button: button)
@@ -789,9 +798,9 @@ private func handleMousePress(_ request: WireRequest) -> VerbOutcome {
 
 private func handleMouseRelease(_ request: WireRequest) -> VerbOutcome {
     let parsed = ParsedArgs(request.args)
-    guard let pt = parsePoint(parsed) else {
-        return .err(code: "invalid_args", detail: ["message": "expected <x> <y>"])
-    }
+    // Spec: release at the current cursor position; --x/--y optionally
+    // override the release location.
+    let pt = parsePoint(parsed) ?? Input.cursorPosition()
     return inputResult {
         let button = try parseButton(parsed.flags)
         try Input.release(at: pt, button: button)
