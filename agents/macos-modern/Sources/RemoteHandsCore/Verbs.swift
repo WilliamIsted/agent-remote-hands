@@ -1446,8 +1446,10 @@ private func elementErrorOutcome(_ e: ElementError) -> VerbOutcome {
 }
 
 private func encodeSnapshots(_ snaps: [Element.Snapshot]) -> Data {
-    // Bare array per the post-rc.2 shape (same as window.list, etc.).
-    return (try? JSONSerialization.data(withJSONObject: snaps.map { $0.jsonObject }, options: [.sortedKeys])) ?? Data()
+    // Spec output schema wraps the snapshots in an `elements` array
+    // (element.list and element.tree).
+    let body: [String: Any] = ["elements": snaps.map { $0.jsonObject }]
+    return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])) ?? Data()
 }
 
 private func encodeSnapshot(_ snap: Element.Snapshot) -> Data {
