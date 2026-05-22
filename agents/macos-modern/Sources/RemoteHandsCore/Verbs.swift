@@ -352,7 +352,7 @@ private func handleTierRaise(_ request: WireRequest, currentTier: Tier, tokenSto
         return .err(code: "not_supported_by_target", detail: ["message": "agent started without token store"])
     }
     if !store.matches(tokenStr) {
-        return .err(code: "auth_failed", detail: ["message": "token mismatch"])
+        return .err(code: "auth_invalid", detail: ["message": "token mismatch"])
     }
     // Token valid — grant requested tier. Per PROTOCOL.md §2.3 the new tier
     // can be at, above, or below the current tier (this verb is the
