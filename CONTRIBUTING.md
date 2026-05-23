@@ -58,7 +58,7 @@ PRs missing any of the three are incomplete.
 
 ## MCP tool wrappers
 
-If the wire change should be exposed as a named MCP tool:
+If the wire change should be exposed as a named MCP tool (work happens in [`agent-remote-hands-mcp`](https://github.com/WilliamIsted/agent-remote-hands-mcp), wired in here as the `mcp-server/` submodule):
 
 1. Implement the handler in `mcp-server/tools.py`.
 2. Gate registration on the wire capability flag — the tool must not be advertised if the agent doesn't speak the underlying verb.

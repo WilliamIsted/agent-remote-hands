@@ -9,7 +9,7 @@ A multi-binary Windows control surface for AI agents. This is the **v0.3.0 from-
 - **`agents/windows-modern/`** — C++17 agent for Windows 10 1809+ (VS2022 v143). IUIAutomation, WGC/BitBlt + WIC capture, hand-rolled mDNS. Built with CMake.
 - **`agents/windows-legacy/`** — C++17 agent for Windows XP SP3 → Windows 10 1803 (VS2017 v141_xp). GDI/GDI+ capture, classic input. Built with CMake.
 - **`agents/windows-classic/`** — C89 agent for Windows NT 4 SP6a / Win95 OSR2 → Windows 2000 (VS6 on an XP SP3 VM). WinSock, GDI BitBlt, classic input. Built with `build.bat`.
-- **`mcp-server/`** — Python MCP bridge; spec-driven (tool defs derived from the Protocol spec, no manual registry), tier-filtered tool listing.
+- **`mcp-server/`** — Python MCP bridge; spec-driven (tool defs derived from the Protocol spec, no manual registry), tier-filtered tool listing. **Lives in its own repo** ([`agent-remote-hands-mcp`](https://github.com/WilliamIsted/agent-remote-hands-mcp)) and is wired in here as a git submodule, alongside `protocol/`.
 
 All three agents speak one wire protocol. The canonical spec is the **`protocol/` git submodule** (currently pinned at `v2.2.0-rc.1`). The conformance suite (`tests/conformance/`) is the contract — anything passing it speaks the protocol correctly.
 
@@ -137,10 +137,12 @@ Two gotchas: use `repos/` without a leading slash (Git Bash on Windows rewrites 
 2. Implement the handler in each family's `src/verbs/<namespace>.cpp` (`windows-modern`, `windows-legacy`, `windows-classic`) as applicable to that family's capability surface.
 3. Register it in `agents/windows-modern/src/capabilities.cpp` so `system.capabilities` advertises it.
 4. Add a test in `tests/conformance/test_<namespace>.py`. Gate it with `needs_verb(capabilities, "<verb>")` so older agents skip rather than fail.
-5. *(When `mcp-server/` lands)* Wrap it as a named MCP tool with appropriate `destructiveHint` / `readOnlyHint` annotations.
+5. Wrap it as a named MCP tool in the [`agent-remote-hands-mcp`](https://github.com/WilliamIsted/agent-remote-hands-mcp) repo (vendored here under `mcp-server/`), with appropriate `destructiveHint` / `readOnlyHint` annotations. Bump the submodule pin in this repo when it lands there.
 6. Run the suite: `python tests/conformance/run.py <host> 8765`.
 
-### Adding a new MCP tool *(planned, once `mcp-server/` lands)*
+### Adding a new MCP tool
+
+(Work happens in [`agent-remote-hands-mcp`](https://github.com/WilliamIsted/agent-remote-hands-mcp); after merge, bump the `mcp-server/` submodule pin here.)
 
 1. Implement the handler in `mcp-server/tools.py`.
 2. Gate registration on the wire capability flag — the tool should not be advertised if the agent doesn't speak the verb.
@@ -196,7 +198,7 @@ mDNS service type (`_remote-hands._tcp.local.`) is family-agnostic; families dis
 ## Future structure decisions (don't pre-empt)
 
 - **Privsep dispatcher (Protocol 3.0)** is a *future* increment — **not part of the v0.3.0 rebuild**. It will add a dispatcher/worker split (single binary, `--dispatcher` / `--worker` modes). Do not pre-build it; the current per-family single-target structure is correct for v0.3.0.
-- **`mcp-server/tools.py`** holds all named tools today. If it grows past ~50 tools, split into a `mcp-server/tools/` package by category (`capture.py`, `input.py`, `files.py`, etc.). Don't pre-split.
+- **`mcp-server/tools.py`** (in the [`agent-remote-hands-mcp`](https://github.com/WilliamIsted/agent-remote-hands-mcp) satellite repo) holds all named tools today. If it grows past ~50 tools, split into a `tools/` package by category (`capture.py`, `input.py`, `files.py`, etc.). Don't pre-split. Decision lives in that repo, not this one.
 - **`client/`** holds Python-only references today. If a non-Python client appears (TS, Go), move existing files under `client/python/` and add the new client alongside. Don't pre-create empty language directories.
 
 ## Benchmarks and comparisons

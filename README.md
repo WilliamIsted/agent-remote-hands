@@ -80,7 +80,7 @@ pip install pytest
 python tests/conformance/run.py <vm-host>
 ```
 
-To wire it into Claude Code (once `mcp-server/` lands — see the Roadmap), drop a `.mcp.json` into your project root:
+To wire it into Claude Code, drop a `.mcp.json` into your project root (the bridge lives in [`agent-remote-hands-mcp`](https://github.com/WilliamIsted/agent-remote-hands-mcp) and is vendored here as a submodule under `mcp-server/`):
 
 ```json
 {
@@ -112,7 +112,7 @@ To wire it into Claude Code (once `mcp-server/` lands — see the Roadmap), drop
 | [`agents/windows-modern/tests/unit/`](agents/windows-modern/tests/unit/) | doctest unit tests for the pure-logic modules (framing, JSON, error codes, tier model) |
 | [`agents/windows-legacy/`](agents/windows-legacy/) | C++17 agent for Windows XP SP3 → Windows 10 1803 — GDI/GDI+ capture, classic input. Built with CMake (VS2017 v141_xp). |
 | [`agents/windows-classic/`](agents/windows-classic/) | C89 agent for Windows NT 4 SP6a / Win 9x → Windows 2000 — WinSock, GDI BitBlt, `build.bat` (VS6 on an XP SP3 VM) |
-| [`mcp-server/`](mcp-server/) | Python MCP bridge — exposes wire verbs as named tools to MCP-aware clients (Claude Code, Claude Desktop, …) with tier-aware tool filtering |
+| [`mcp-server/`](mcp-server/) *(submodule — [`agent-remote-hands-mcp`](https://github.com/WilliamIsted/agent-remote-hands-mcp))* | Python MCP bridge — exposes wire verbs as named tools to MCP-aware clients (Claude Code, Claude Desktop, …) with tier-aware tool filtering |
 | `client/hostctl` | *(planned)* Reference Python CLI |
 | `client/hostctl-discover` | *(planned)* mDNS LAN scanner |
 | [`Tools/install-agent.ps1`](Tools/install-agent.ps1) | PowerShell installer — adds a Defender exclusion, copies the binary to `%ProgramFiles%`, adds binary-scoped firewall rules, registers a Task Scheduler logon-task with restart-on-failure. `-Uninstall` reverses it. |

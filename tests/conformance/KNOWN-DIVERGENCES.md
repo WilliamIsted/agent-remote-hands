@@ -36,7 +36,7 @@ from the submodule whenever the submodule pin is bumped.
 
 | Test(s) | Why |
 |---|---|
-| `test_system.py::test_verbs_returns_verbs_object / _entries_are_strict_tool_defs / _superset_of_capabilities` | `system.verbs` is implemented on the wire but not exposed on the MCP `tools/*` surface. That surface is the `mcp-server/` bridge, explicitly out of scope for this run (and not yet built). |
+| `test_system.py::test_verbs_returns_verbs_object / _entries_are_strict_tool_defs / _superset_of_capabilities` | `system.verbs` is implemented on the wire but not exposed on the MCP `tools/*` surface. That surface is the `mcp-server/` bridge (now its own repo, [`agent-remote-hands-mcp`](https://github.com/WilliamIsted/agent-remote-hands-mcp), vendored here as a submodule), explicitly out of scope for this run. |
 
 ### C — Genuinely-deferred behaviour (Phase-2b content delivery)
 
@@ -77,6 +77,6 @@ between runs (27 vs 26 total depending on ordering).
 ## Follow-up issues to file (out of scope this run)
 
 1. Protocol-repo PR: fix the stale submodule tests in class **A** (clipboard.get shape, screen.capture image-content-item + region object, vision.ocr region, power.cancel tier) and teach `wire.py` to extract image content items.
-2. `mcp-server/` bridge: expose `system.verbs` on the MCP tools surface (class **B**).
+2. `mcp-server/` bridge (now [`agent-remote-hands-mcp`](https://github.com/WilliamIsted/agent-remote-hands-mcp)): expose `system.verbs` on the MCP tools surface (class **B**).
 3. Triage pass for class **D** (agent-bug vs stale-test, per test).
 4. `tests/conformance/fixtures/` is vestigial from the v2.0 fork (no resynced v2.2 test references it) — confirm and remove in a follow-up.

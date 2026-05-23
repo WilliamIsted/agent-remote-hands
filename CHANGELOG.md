@@ -9,6 +9,12 @@ version (see [`PROTOCOL.md`](PROTOCOL.md) §12) and the agent build version
 Wire-breaking. No alias period — agents on this build reject the v2.0
 tier and verb names. Pin to v0.2.0-rc.5 for the Protocol 2.0 surface.
 
+- **MCP bridge split into its own repo.** `mcp-server/` is now a git
+  submodule tracking [`agent-remote-hands-mcp`](https://github.com/WilliamIsted/agent-remote-hands-mcp).
+  Clone with `--recurse-submodules` (or run `git submodule update --init --recursive`
+  after a plain clone). Existing path references (`mcp-server/server.py`,
+  `mcp-server/tools.py`, etc.) still resolve via the submodule. The
+  satellite repo is private during initial bring-up.
 - **CRUDX tier ladder.** `observe` / `drive` / `power` become a five-rung
   ladder: `read` < `create` < `update` < `delete` < `extra_risky`. Each
   verb's required tier is derived from its CRUDX letter on

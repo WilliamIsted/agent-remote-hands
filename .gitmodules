@@ -1,3 +1,6 @@
 [submodule "protocol"]
 	path = protocol
 	url = https://github.com/WilliamIsted/agent-remote-hands-protocol.git
+[submodule "mcp-server"]
+	path = mcp-server
+	url = https://github.com/WilliamIsted/agent-remote-hands-mcp.git

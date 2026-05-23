@@ -6,10 +6,10 @@ The agent has a deliberate split between **how it's invoked** and **what's on th
 
 ## The 90% path: use the MCP bridge
 
-If you're driving the agent through Claude Code, Claude Desktop, or any MCP-aware client, **you don't need to read `PROTOCOL.md`**. The bridge in `mcp-server/` exposes the wire verbs as named tools (`take_screenshot`, `click_element`, `write_file`, etc.) with a tier-elevation flow that keeps destructive operations behind explicit caller intent.
+If you're driving the agent through Claude Code, Claude Desktop, or any MCP-aware client, **you don't need to read `PROTOCOL.md`**. The bridge in `mcp-server/` (vendored as a submodule from [`agent-remote-hands-mcp`](https://github.com/WilliamIsted/agent-remote-hands-mcp)) exposes the wire verbs as named tools (`take_screenshot`, `click_element`, `write_file`, etc.) with a tier-elevation flow that keeps destructive operations behind explicit caller intent.
 
 Read first:
-- [`mcp-server/README.md`](mcp-server/README.md) — bridge architecture, tier-elevation flow, environment variables.
+- [`mcp-server/README.md`](mcp-server/README.md) — bridge architecture, tier-elevation flow, environment variables. (Submodule — `git submodule update --init --recursive` if you cloned without `--recurse-submodules`.)
 
 Tier elevation is stateful and follows the v2.1 CRUDX ladder (`read` < `create` < `update` < `delete` < `extra_risky`). Call `request_update_access(reason="…")` before tools like `click_element` or `write_file`; call `request_delete_access(reason="…")` before tools like `delete_file` or `kill_process`; call `request_extra_risky_access(reason="…")` before tools like `cancel_pending_shutdown`. (`request_create_access` exists too, for tools that only need create — `directory.create`, `process.start`.) The bridge handles the token dance for you.
 
