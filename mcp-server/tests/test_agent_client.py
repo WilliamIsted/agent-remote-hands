@@ -123,9 +123,13 @@ def test_unknown_verb_surfaces_err_not_supported(mock_agent) -> None:
 
 def test_custom_handler_registers_a_verb(mock_agent) -> None:
     """Tests can plug verb handlers in for whatever shape they want to
-    exercise — used by tools tests for individual wire verbs."""
-    def handler(args, payload):
-        return ("ok", {"echo": " ".join(args)})
+    exercise — used by tools tests for individual wire verbs.
+
+    v2.2 handler signature: ``(arguments: dict, payload: bytes)``. Positional
+    args from ``request("verb", "a", "b")`` arrive under ``_args`` because
+    they don't match a ``--flag`` pattern (see ``wire.py::_args_to_dict``)."""
+    def handler(arguments, payload):
+        return ("ok", {"echo": " ".join(arguments.get("_args", []))})
 
     mock_agent.register("test.echo", handler)
 
