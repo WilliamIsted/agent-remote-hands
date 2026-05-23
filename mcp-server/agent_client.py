@@ -832,3 +832,117 @@ class AgentClient(WireClient):
             finally:
                 if self._sock is not None:
                     self._sock.settimeout(original_timeout)
+
+    # ------------------------------------------------------------------
+    # Recovery primitive
+    #
+    # Bridge-internal: not a wire verb. The v2.2 spec deliberately does not
+    # expose `connection.reset` over MCP (no header/payload split to desync
+    # — see protocol §1.6.7), and even if it did, the agent-side reset
+    # would not help the failure mode this primitive addresses. Session 2
+    # of the v0.3.0 test campaign showed that the bridge's own `_buf` can
+    # lose its byte offset under concurrent access; the agent's parser
+    # stays fine throughout. So recovery has to happen on the bridge side,
+    # by tearing down the TCP connection and re-establishing it.
+
+    def reset(self, lock_timeout: float = 2.0) -> dict:
+        """Tear down the current socket and re-establish hello + initialize.
+
+        After reset, ``current_tier`` is ``"read"`` regardless of prior
+        tier — the LLM must re-raise tier explicitly via the
+        ``request_*_access`` family. This is the secure default: a recovery
+        that silently preserved an elevated tier could surprise an LLM that
+        thought the connection was fresh.
+
+        Concurrency: if another thread is wedged inside ``request_args``
+        and holding the lock (e.g. blocked in ``recv`` on a half-dead
+        socket), waiting for the lock would itself hang. In that case we
+        force-close the socket from outside the lock — that unblocks the
+        wedged ``recv`` with EOF, the wedged thread raises ``WireError``
+        and releases the lock, and we then acquire it normally to do the
+        clean reconnect. ``socket.close()`` is thread-safe on all major
+        platforms when called concurrently with ``recv`` on the same fd.
+
+        Returns a dict describing what happened — callers (the bridge's
+        manual ``agent_reset`` tool and the auto-recovery wrapper in
+        ``server.py``) format this for the LLM.
+        """
+        prior_tier = self._current_tier
+        forced_socket_close = False
+
+        acquired = self._lock.acquire(timeout=lock_timeout)
+        if not acquired:
+            # Wedged caller holding the lock — force socket close from
+            # outside the lock to unblock its recv(). The wedged thread
+            # will then raise WireError and release the lock naturally.
+            if self._sock is not None:
+                try:
+                    self._sock.close()
+                except OSError:
+                    pass
+            forced_socket_close = True
+            acquired = self._lock.acquire(timeout=10.0)
+            if not acquired:
+                return {
+                    "ok": False,
+                    "error": "lock_unavailable",
+                    "detail": (
+                        "lock held by another thread even after socket "
+                        "force-close; bridge is in an unrecoverable state"),
+                    "prior_tier": prior_tier,
+                    "new_tier": prior_tier,
+                    "forced_socket_close": forced_socket_close,
+                }
+
+        try:
+            # Close any extant socket and reset all per-connection state.
+            # We do NOT call self.close() because it acquires the lock
+            # (RLock allows reentry, so it would work — but doing the
+            # bookkeeping inline here is clearer).
+            if self._sock is not None:
+                try:
+                    self._sock.close()
+                except OSError:
+                    pass
+            self._sock = None
+            self._buf.clear()
+            self.notifications.clear()
+            self._next_id = 1
+            self._initialized = False
+            self._current_tier = "read"
+            self._cached_info = None
+
+            # Reconnect — same code path as the initial connect().
+            try:
+                self._sock = _create_connection(
+                    self.host, self.port, self.timeout)
+                self.hello(client_name=self.client_name,
+                           version=self.PROTOCOL_VERSION)
+                # Refresh current_tier from the agent's report.
+                try:
+                    info = super().info()
+                    self._cached_info = info
+                    self._current_tier = info.get("current_tier", "read")
+                except Exception:
+                    # Connection works but info() failed — that's still
+                    # a recovered state; just leave _current_tier at "read".
+                    pass
+            except Exception as ex:  # noqa: BLE001
+                self._sock = None
+                return {
+                    "ok": False,
+                    "error": "reconnect_failed",
+                    "detail": f"{type(ex).__name__}: {ex}",
+                    "prior_tier": prior_tier,
+                    "new_tier": "read",
+                    "forced_socket_close": forced_socket_close,
+                }
+
+            return {
+                "ok": True,
+                "prior_tier": prior_tier,
+                "new_tier": self._current_tier,
+                "forced_socket_close": forced_socket_close,
+            }
+        finally:
+            self._lock.release()

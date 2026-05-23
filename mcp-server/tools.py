@@ -226,6 +226,29 @@ def _elevate(client: AgentClient, target_tier: str, reason: str) -> str:
             f"{target_tier}-tier tools will appear on the next tools/list query.")
 
 
+def _h_agent_reset(args: dict, client: AgentClient) -> str:
+    """Manual escape-hatch recovery primitive. Tears down the agent
+    connection and re-establishes it, returning a structured summary.
+
+    Bridge-internal: not a wire verb. The v2.2 spec deliberately does
+    not expose `connection.reset` over MCP, and the failure modes this
+    addresses (bridge-side `_buf` desync, half-dead socket after a
+    framing error, agent process restarted under us) all live on the
+    bridge side anyway.
+
+    The auto-recovery wrapper in server.py handles read-only verbs
+    transparently. This manual tool is the LLM-callable fallback when
+    auto-recovery doesn't apply (non-idempotent verb that failed
+    mid-call) or itself failed."""
+    reason = args.get("reason", "").strip()
+    if not reason:
+        raise ValueError(
+            "reason is required — explain what failure pattern prompted "
+            "the reset (e.g. 'wire_error on file.write retry')")
+    result = client.reset()
+    return json.dumps({"reason": reason, **result}, indent=2)
+
+
 def _h_request_create_access(args: dict, client: AgentClient) -> str:
     return _elevate(client, "create", args.get("reason", ""))
 
@@ -1319,6 +1342,41 @@ TOOLS: list[ToolDef] = [
             "(check `integrity` and `uiaccess`)."
         ),
         tier="always",
+    ),
+    ToolDef(
+        name="agent_reset",
+        description=(
+            "Recover a wedged bridge connection. Tears down the TCP "
+            "connection to the agent and re-establishes hello + initialize. "
+            "Use this when you see repeated `wire_error` responses on every "
+            "tool call — that indicates the bridge's wire-framing parser has "
+            "lost sync with the agent and cannot recover in-band. After "
+            "reset, the connection's tier resets to `read`; you must call "
+            "`request_*_access` again to re-elevate. Any active `watch.*` "
+            "subscriptions are lost. Read-only verbs are auto-recovered by "
+            "the bridge transparently — call `agent_reset` manually only "
+            "when a non-idempotent verb (file.write, process.start, click) "
+            "fails with `wire_error`, or when auto-recovery itself failed. "
+            "Provide a one-sentence `reason` describing the failure pattern."
+        ),
+        tier="always",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "One-sentence description of what failure pattern "
+                        "prompted the reset (for audit-log clarity)."),
+                },
+            },
+            "required": ["reason"],
+        },
+        handler=_h_agent_reset,
+        # Side-effect: drops tier, kills subscriptions. Not destructive of
+        # agent state, but not read-only either. Idempotent in the strong
+        # sense: calling it twice in a row is equivalent to calling it once.
+        idempotent_hint=True,
     ),
     ToolDef(
         name="request_create_access",

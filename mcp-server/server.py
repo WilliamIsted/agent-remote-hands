@@ -106,6 +106,81 @@ def _format_resolution_diagnostic(host: str, port: int) -> str:
     return "resolved to: " + ", ".join(pretty)
 
 
+async def _call_with_recovery(client: AgentClient, tool, args: dict) -> str:
+    """Run a tool handler with bridge-side recovery on `WireError`.
+
+    Policy:
+    - Non-`WireError` exceptions are surfaced as-is (with a Python traceback).
+      Handlers raise these for verb-level / argument-validation failures
+      that the LLM can act on directly.
+    - `WireError` on a read-only tool triggers auto-recovery: the bridge
+      tears down and re-establishes the connection (``client.reset()``),
+      then retries the handler once. On retry success the result is
+      prefixed with a recovery note so the LLM knows a reset happened.
+      Read-only is the strictest auto-retry policy — verbs that don't
+      modify state are guaranteed safe to repeat. ``idempotent_hint``
+      (the next-strictest annotation) means "repeating produces the same
+      end state" but may still cause secondary effects (a double click,
+      a duplicated keystroke), so it does NOT trigger auto-retry.
+    - `WireError` on a non-read-only tool returns a structured wire_error
+      message naming the failure and directing the LLM to call
+      ``agent_reset``. This is the manual escape hatch path.
+
+    Note that ``WireError`` traceback leak — the operator's complaint #78
+    against the previous code that dumped 25 lines of Python stack — is
+    fixed here as a side-effect. The traceback goes to stderr; the LLM
+    sees a structured single-line summary.
+    """
+    name = tool.name
+    try:
+        return await asyncio.to_thread(tool.handler, args, client)
+    except WireError as ex:
+        # Server-side log retains the trace for the bridge developer; the
+        # LLM-facing surface is the structured message below.
+        print(f"[mcp-server] WireError in {name}: {ex}",
+              file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+
+        if not tool.read_only_hint:
+            return (
+                f"wire_error: {ex}\n"
+                f"Tool `{name}` is not read-only, so the bridge did not "
+                f"auto-retry — the call may have had side effects on the "
+                f"agent before the framing broke. Call `agent_reset` with "
+                f"a one-line reason to recover, then decide whether to "
+                f"retry this call based on whether its side effects are "
+                f"acceptable to repeat.")
+
+        # Read-only: attempt one transparent reset + retry.
+        reset = await asyncio.to_thread(client.reset)
+        if not reset.get("ok"):
+            return (
+                f"wire_error: {ex}\n"
+                f"Bridge attempted auto-recovery and failed: "
+                f"{reset.get('error')!r} ({reset.get('detail')}). "
+                f"The agent may be unreachable. Re-check connectivity, "
+                f"then try `agent_reset` manually.")
+
+        try:
+            text = await asyncio.to_thread(tool.handler, args, client)
+        except WireError as ex2:
+            return (
+                f"wire_error: retry-after-reset also failed: {ex2}. "
+                f"The agent is reachable (reset succeeded) but framing "
+                f"is breaking on every call. Likely an agent-side bug; "
+                f"surface this to the bridge maintainer.")
+        # Prefix the success path with a recovery note so the LLM has
+        # the context that a reset just happened (relevant if the next
+        # call depends on prior tier or subscription state).
+        note = (
+            "[bridge recovery: auto-reset succeeded after wire_error; "
+            "any prior tier elevation and active watch.* subscriptions "
+            "were lost. Re-elevate / re-subscribe if needed.]\n\n")
+        return note + text
+    except Exception as ex:  # noqa: BLE001 — surface other handler failures
+        return f"Error in {name}: {ex}\n\n{traceback.format_exc()}"
+
+
 async def main() -> None:
     client = _build_agent_client()
     try:
@@ -172,11 +247,7 @@ async def main() -> None:
             )]
 
         prior_tier = client.current_tier
-        try:
-            text = await asyncio.to_thread(
-                tool.handler, arguments or {}, client)
-        except Exception as ex:  # noqa: BLE001 — surface any handler failure
-            text = f"Error in {name}: {ex}\n\n{traceback.format_exc()}"
+        text = await _call_with_recovery(client, tool, arguments or {})
 
         # If the tier changed (an elevation tool just succeeded), tell the
         # client to refetch the tool list — that's how the LLM "sees" the
