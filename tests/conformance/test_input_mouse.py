@@ -222,3 +222,55 @@ def test_input_mouse_click_clicks_out_of_range(
                                "--clicks", "11")
     assert isinstance(r2, ErrResponse)
     assert r2.code == "invalid_args"
+
+
+# ---------------------------------------------------------------------------
+# input.mouse.press / release — arg-validation for the v2.2 split verbs
+# (classic landing point — see Planning/full-spec-completion/per-verb/
+# input.mouse-extended-classic.md). Wire-contract assertions only; the
+# actual button-down/up perturbs the host and is left to manual testing.
+
+def test_input_mouse_press_unknown_flag_rejected(
+        update_client: WireClient, capabilities: dict) -> None:
+    needs_verb(capabilities, "input.mouse.press")
+    r = update_client.request("input.mouse.press", "--bogus-flag")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args"
+    assert r.detail.get("unknown_flag") == "--bogus-flag"
+
+
+def test_input_mouse_release_unknown_flag_rejected(
+        update_client: WireClient, capabilities: dict) -> None:
+    needs_verb(capabilities, "input.mouse.release")
+    r = update_client.request("input.mouse.release", "--bogus-flag")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args"
+    assert r.detail.get("unknown_flag") == "--bogus-flag"
+
+
+def test_input_mouse_press_invalid_button(
+        update_client: WireClient, capabilities: dict) -> None:
+    """button enum is left/right/middle/x1/x2 — 'wheel' is not a valid name."""
+    needs_verb(capabilities, "input.mouse.press")
+    r = update_client.request("input.mouse.press", "--button", "wheel")
+    assert isinstance(r, ErrResponse)
+    assert r.code == "invalid_args"
+
+
+def test_input_mouse_release_invalid_button(
+        update_client: WireClient, capabilities: dict) -> None:
+    needs_verb(capabilities, "input.mouse.release")
+    r = update_client.request("input.mouse.release", "--button", "wheel")
+    assert isinstance(r, ErrResponse)
+    assert r.code == "invalid_args"
+
+
+def test_input_mouse_drag_invalid_button(
+        update_client: WireClient, capabilities: dict) -> None:
+    """Drag inherits the same button enum as press/release."""
+    needs_verb(capabilities, "input.mouse.drag")
+    r = update_client.request("input.mouse.drag",
+                              "--x", "-9999", "--y", "-9999",
+                              "--button", "wheel")
+    assert isinstance(r, ErrResponse)
+    assert r.code == "invalid_args"

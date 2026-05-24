@@ -66,7 +66,7 @@ REM -------------------------------------------------------------------------
   %SRCS% ^
   /link /SUBSYSTEM:CONSOLE,4.00 /MACHINE:IX86 ^
         /OUT:%OUT_NAME% ^
-  wsock32.lib advapi32.lib kernel32.lib user32.lib gdi32.lib shell32.lib
+  wsock32.lib advapi32.lib kernel32.lib user32.lib gdi32.lib shell32.lib wininet.lib
 
 if %ERRORLEVEL% EQU 0 (
   echo BUILD OK: %OUT_NAME%

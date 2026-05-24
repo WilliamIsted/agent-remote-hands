@@ -19,6 +19,7 @@
 #include "../protocol.h"
 
 #include <windows.h>
+#include <wininet.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -416,4 +417,480 @@ void rh_verb_file_wait(RhConn* c, const RhRequest* req)
         Sleep(100);
         waited += 100;
     }
+}
+
+/* --- file.create ------------------------------------------------------- */
+
+/* Transcode UTF-8 input (n bytes) -> wide (UTF-16 LE host order) then ->
+ * target single-byte code page. Returns a malloc'd buffer in *out (caller
+ * frees) and length in *out_len, or 0 on failure. */
+static int transcode_utf8_to_cp(const char* in, int n, UINT cp,
+                                unsigned char** out, int* out_len)
+{
+    int      wlen;
+    wchar_t* wbuf;
+    int      blen;
+    char*    bbuf;
+
+    wlen = MultiByteToWideChar(CP_UTF8, 0, in, n, NULL, 0);
+    if (wlen <= 0) {
+        return 0;
+    }
+    wbuf = (wchar_t*)malloc((size_t)wlen * sizeof(wchar_t));
+    if (wbuf == NULL) {
+        return 0;
+    }
+    if (MultiByteToWideChar(CP_UTF8, 0, in, n, wbuf, wlen) <= 0) {
+        free(wbuf);
+        return 0;
+    }
+    blen = WideCharToMultiByte(cp, 0, wbuf, wlen, NULL, 0, NULL, NULL);
+    if (blen <= 0) {
+        free(wbuf);
+        return 0;
+    }
+    bbuf = (char*)malloc((size_t)blen);
+    if (bbuf == NULL) {
+        free(wbuf);
+        return 0;
+    }
+    if (WideCharToMultiByte(cp, 0, wbuf, wlen, bbuf, blen, NULL, NULL) <= 0) {
+        free(wbuf);
+        free(bbuf);
+        return 0;
+    }
+    free(wbuf);
+    *out     = (unsigned char*)bbuf;
+    *out_len = blen;
+    return 1;
+}
+
+/* Transcode UTF-8 input (n bytes) -> UTF-16LE/BE byte stream (no BOM).
+ * Returns a malloc'd buffer in *out (caller frees) and length in *out_len. */
+static int transcode_utf8_to_utf16(const char* in, int n, int big_endian,
+                                   unsigned char** out, int* out_len)
+{
+    int            wlen;
+    wchar_t*       wbuf;
+    unsigned char* bbuf;
+    int            i;
+
+    wlen = MultiByteToWideChar(CP_UTF8, 0, in, n, NULL, 0);
+    if (wlen < 0) {
+        return 0;
+    }
+    if (wlen == 0) {
+        *out     = NULL;
+        *out_len = 0;
+        return 1;
+    }
+    wbuf = (wchar_t*)malloc((size_t)wlen * sizeof(wchar_t));
+    if (wbuf == NULL) {
+        return 0;
+    }
+    if (MultiByteToWideChar(CP_UTF8, 0, in, n, wbuf, wlen) <= 0) {
+        free(wbuf);
+        return 0;
+    }
+    bbuf = (unsigned char*)malloc((size_t)wlen * 2);
+    if (bbuf == NULL) {
+        free(wbuf);
+        return 0;
+    }
+    for (i = 0; i < wlen; ++i) {
+        unsigned u = (unsigned short)wbuf[i];
+        if (big_endian) {
+            bbuf[i * 2]     = (unsigned char)((u >> 8) & 0xFF);
+            bbuf[i * 2 + 1] = (unsigned char)(u & 0xFF);
+        } else {
+            bbuf[i * 2]     = (unsigned char)(u & 0xFF);
+            bbuf[i * 2 + 1] = (unsigned char)((u >> 8) & 0xFF);
+        }
+    }
+    free(wbuf);
+    *out     = bbuf;
+    *out_len = wlen * 2;
+    return 1;
+}
+
+/* CREATE_NEW write: refuses if `path` already exists. Returns 1 / 0. */
+static int rh_classic_write_new(const char* path,
+                                const unsigned char* bytes, int len)
+{
+    HANDLE h;
+    DWORD  written;
+    BOOL   ok;
+
+    h = CreateFileA(path, GENERIC_WRITE, 0, NULL,
+                    CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    if (len == 0) {
+        CloseHandle(h);
+        return 1;
+    }
+    written = 0;
+    ok = WriteFile(h, bytes, (DWORD)len, &written, NULL);
+    CloseHandle(h);
+    return (ok && written == (DWORD)len) ? 1 : 0;
+}
+
+void rh_verb_file_create(RhConn* c, const RhRequest* req)
+{
+    static const RhFlagDef defs[] = {
+        { "--encoding",  1 },
+        { "--no-atomic", 0 }
+    };
+    RhArgs         a;
+    int            n;
+    char*          body;
+    int            got;
+    const char*    encoding;
+    int            atomic;
+    unsigned char* bytes;
+    int            bytes_len;
+    int            owned;
+    DWORD          attr;
+    char           tmp[MAX_PATH + 8];
+    DWORD          err;
+    RhJson*        j;
+    const char*    r;
+
+    rh_args_parse(req, defs, 2, &a);
+    if (a.unknown != NULL) {
+        rh_err_unknown_flag(c, a.unknown);
+        return;
+    }
+    if (a.npos < 2) {
+        rh_err_msg(c, "invalid_args",
+                   "file.create requires <path> <length>");
+        return;
+    }
+    n = atoi(a.pos[1]);
+    got = read_body(c, n, &body);
+    if (got == -1) {
+        rh_err_msg(c, "invalid_args", "bad payload length");
+        return;
+    }
+    if (got == -2) {
+        rh_err(c, "wire_desync");
+        return;
+    }
+
+    encoding = a.val[0];
+    if (encoding == NULL) {
+        encoding = "utf-8";
+    }
+    atomic = a.seen[1] ? 0 : 1;
+
+    /* Decode/transcode payload into `bytes` / `bytes_len`. `owned` tracks
+     * whether `bytes` is a fresh allocation we must free, vs aliasing
+     * `body`. */
+    bytes     = NULL;
+    bytes_len = 0;
+    owned     = 0;
+    if (strcmp(encoding, "utf-8") == 0 ||
+        strcmp(encoding, "binary") == 0) {
+        bytes     = (unsigned char*)body;
+        bytes_len = got;
+        owned     = 0;
+    } else if (strcmp(encoding, "utf-16le") == 0 ||
+               strcmp(encoding, "utf-16be") == 0) {
+        int be = (encoding[6] == 'b') ? 1 : 0;
+        if (!transcode_utf8_to_utf16(body, got, be, &bytes, &bytes_len)) {
+            if (body != NULL) free(body);
+            rh_err_msg(c, "invalid_args",
+                       "file.create encoding transcode failed");
+            return;
+        }
+        owned = 1;
+    } else if (strcmp(encoding, "cp1252") == 0 ||
+               strcmp(encoding, "ascii") == 0 ||
+               strcmp(encoding, "latin-1") == 0) {
+        UINT cp = (strcmp(encoding, "ascii") == 0)   ? 20127u
+                 : (strcmp(encoding, "latin-1") == 0) ? 28591u
+                                                      : 1252u;
+        if (!transcode_utf8_to_cp(body, got, cp, &bytes, &bytes_len)) {
+            if (body != NULL) free(body);
+            rh_err_msg(c, "invalid_args",
+                       "file.create encoding transcode failed");
+            return;
+        }
+        owned = 1;
+    } else {
+        if (body != NULL) free(body);
+        rh_err_msg(c, "invalid_args",
+                   "file.create 'encoding' must be one of utf-8|utf-16le"
+                   "|utf-16be|ascii|latin-1|cp1252|binary");
+        return;
+    }
+
+    /* Refuse-if-exists probe. CREATE_NEW would also catch this, but the
+     * explicit probe lets us return already_exists before touching the
+     * temp file in the atomic path. */
+    attr = GetFileAttributesA(a.pos[0]);
+    if (attr != INVALID_FILE_ATTRIBUTES) {
+        if (owned && bytes != NULL) free(bytes);
+        if (body != NULL) free(body);
+        rh_err_msg(c, "already_exists",
+                   "file already exists; use file.write to overwrite");
+        return;
+    }
+
+    if (atomic) {
+        _snprintf(tmp, sizeof(tmp), "%s.rh-tmp", a.pos[0]);
+        tmp[sizeof(tmp) - 1] = '\0';
+        DeleteFileA(tmp);   /* best-effort cleanup */
+        if (!rh_classic_write_new(tmp, bytes, bytes_len)) {
+            err = GetLastError();
+            DeleteFileA(tmp);
+            if (owned && bytes != NULL) free(bytes);
+            if (body != NULL) free(body);
+            if (err == ERROR_PATH_NOT_FOUND) {
+                rh_err_msg(c, "not_found",
+                           "parent directory does not exist "
+                           "(use directory.create first)");
+            } else {
+                rh_err(c, rh_win32_code(err));
+            }
+            return;
+        }
+        /* MoveFileA without MOVEFILE_REPLACE_EXISTING -- CREATE_NEW above
+         * guarantees the target does not exist (and we re-probed before
+         * the temp write). */
+        if (!MoveFileA(tmp, a.pos[0])) {
+            err = GetLastError();
+            DeleteFileA(tmp);
+            if (owned && bytes != NULL) free(bytes);
+            if (body != NULL) free(body);
+            rh_err(c, rh_win32_code(err));
+            return;
+        }
+    } else {
+        if (!rh_classic_write_new(a.pos[0], bytes, bytes_len)) {
+            err = GetLastError();
+            if (owned && bytes != NULL) free(bytes);
+            if (body != NULL) free(body);
+            if (err == ERROR_FILE_EXISTS) {
+                rh_err_msg(c, "already_exists",
+                           "file already exists; use file.write to overwrite");
+            } else if (err == ERROR_PATH_NOT_FOUND) {
+                rh_err_msg(c, "not_found",
+                           "parent directory does not exist "
+                           "(use directory.create first)");
+            } else {
+                rh_err(c, rh_win32_code(err));
+            }
+            return;
+        }
+    }
+
+    if (owned && bytes != NULL) free(bytes);
+    if (body != NULL) free(body);
+
+    j = (RhJson*)malloc(sizeof(RhJson));
+    if (j == NULL) {
+        rh_err(c, "wire_desync");
+        return;
+    }
+    rh_json_init(j);
+    rh_json_begin_obj(j);
+    rh_json_key(j, "bytes_written"); rh_json_int(j, (i32)bytes_len);
+    rh_json_key(j, "encoding");      rh_json_str(j, encoding);
+    rh_json_end_obj(j);
+    r = rh_json_finish(j);
+    if (r == NULL) {
+        rh_err(c, "wire_desync");
+    } else {
+        rh_ok_json(c, r);
+    }
+    free(j);
+}
+
+/* --- file.download ----------------------------------------------------- */
+
+/* WinINet streaming download. Maps HTTP 4xx/5xx to permission_denied with
+ * a {"http_status":N} detail (the spec only declares permission_denied for
+ * upstream failures; the status code lives in the detail). */
+void rh_verb_file_download(RhConn* c, const RhRequest* req)
+{
+    static const RhFlagDef defs[] = {
+        { "--timeout-ms",    1 },
+        { "--no-verify-tls", 0 }
+    };
+    RhArgs        a;
+    int           timeout_ms;
+    int           verify_tls;
+    HINTERNET     hSession;
+    HINTERNET     hReq;
+    DWORD         flags;
+    DWORD         http_status;
+    DWORD         sz;
+    char          content_type[256];
+    HANDLE        hFile;
+    DWORD         err;
+    unsigned char buf[8192];
+    DWORD         bytes_read;
+    unsigned long total;
+    DWORD         wrote;
+    BOOL          read_ok;
+    RhJson*       j;
+    const char*   r;
+
+    rh_args_parse(req, defs, 2, &a);
+    if (a.unknown != NULL) {
+        rh_err_unknown_flag(c, a.unknown);
+        return;
+    }
+    if (a.npos < 2) {
+        rh_err_msg(c, "invalid_args",
+                   "file.download requires <url> <path>");
+        return;
+    }
+    timeout_ms = (a.val[0] != NULL) ? atoi(a.val[0]) : 30000;
+    if (timeout_ms <= 0) {
+        timeout_ms = 30000;
+    }
+    verify_tls = a.seen[1] ? 0 : 1;
+
+    hSession = InternetOpenA("ARH-Classic/0.3",
+                             INTERNET_OPEN_TYPE_PRECONFIG,
+                             NULL, NULL, 0);
+    if (hSession == NULL) {
+        rh_err_msg(c, "permission_denied", "InternetOpen failed");
+        return;
+    }
+    InternetSetOptionA(hSession, INTERNET_OPTION_CONNECT_TIMEOUT,
+                       &timeout_ms, sizeof(timeout_ms));
+    InternetSetOptionA(hSession, INTERNET_OPTION_RECEIVE_TIMEOUT,
+                       &timeout_ms, sizeof(timeout_ms));
+    InternetSetOptionA(hSession, INTERNET_OPTION_SEND_TIMEOUT,
+                       &timeout_ms, sizeof(timeout_ms));
+
+    flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE;
+    if (!verify_tls) {
+        flags |= INTERNET_FLAG_IGNORE_CERT_CN_INVALID |
+                 INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
+    }
+    hReq = InternetOpenUrlA(hSession, a.pos[0], NULL, 0, flags, 0);
+    if (hReq == NULL) {
+        err = GetLastError();
+        InternetCloseHandle(hSession);
+        if (err == ERROR_INTERNET_TIMEOUT) {
+            rh_err_kv(c, "timeout", "deadline",
+                      (a.val[0] != NULL) ? a.val[0] : "30000");
+        } else {
+            char buf2[32];
+            _snprintf(buf2, sizeof(buf2), "%lu", (unsigned long)err);
+            buf2[sizeof(buf2) - 1] = '\0';
+            rh_err_kv(c, "permission_denied", "wininet_error", buf2);
+        }
+        return;
+    }
+
+    http_status = 0;
+    sz = sizeof(http_status);
+    HttpQueryInfoA(hReq,
+                   HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER,
+                   &http_status, &sz, NULL);
+
+    content_type[0] = '\0';
+    sz = sizeof(content_type) - 1;
+    if (HttpQueryInfoA(hReq, HTTP_QUERY_CONTENT_TYPE,
+                       content_type, &sz, NULL)) {
+        content_type[sz] = '\0';
+    } else {
+        content_type[0] = '\0';
+    }
+
+    if (http_status >= 400) {
+        char buf2[16];
+        InternetCloseHandle(hReq);
+        InternetCloseHandle(hSession);
+        _snprintf(buf2, sizeof(buf2), "%lu", (unsigned long)http_status);
+        buf2[sizeof(buf2) - 1] = '\0';
+        rh_err_kv(c, "permission_denied", "http_status", buf2);
+        return;
+    }
+
+    /* CREATE_ALWAYS so a partial prior download is overwritten; spec
+     * doesn't require refuse-if-exists for download. */
+    hFile = CreateFileA(a.pos[1], GENERIC_WRITE, 0, NULL,
+                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        err = GetLastError();
+        InternetCloseHandle(hReq);
+        InternetCloseHandle(hSession);
+        if (err == ERROR_PATH_NOT_FOUND) {
+            rh_err_msg(c, "not_found",
+                       "parent directory does not exist");
+        } else {
+            rh_err(c, rh_win32_code(err));
+        }
+        return;
+    }
+
+    total = 0;
+    for (;;) {
+        bytes_read = 0;
+        read_ok = InternetReadFile(hReq, buf, sizeof(buf), &bytes_read);
+        if (!read_ok) {
+            err = GetLastError();
+            CloseHandle(hFile);
+            DeleteFileA(a.pos[1]);
+            InternetCloseHandle(hReq);
+            InternetCloseHandle(hSession);
+            if (err == ERROR_INTERNET_TIMEOUT) {
+                rh_err_kv(c, "timeout", "deadline",
+                          (a.val[0] != NULL) ? a.val[0] : "30000");
+            } else {
+                rh_err_kv(c, "permission_denied", "reason", "read_failed");
+            }
+            return;
+        }
+        if (bytes_read == 0) {
+            break;   /* end of stream */
+        }
+        wrote = 0;
+        if (!WriteFile(hFile, buf, bytes_read, &wrote, NULL) ||
+            wrote != bytes_read) {
+            CloseHandle(hFile);
+            DeleteFileA(a.pos[1]);
+            InternetCloseHandle(hReq);
+            InternetCloseHandle(hSession);
+            rh_err_kv(c, "permission_denied", "reason", "write_failed");
+            return;
+        }
+        total += wrote;
+    }
+
+    CloseHandle(hFile);
+    InternetCloseHandle(hReq);
+    InternetCloseHandle(hSession);
+
+    j = (RhJson*)malloc(sizeof(RhJson));
+    if (j == NULL) {
+        rh_err(c, "wire_desync");
+        return;
+    }
+    rh_json_init(j);
+    rh_json_begin_obj(j);
+    /* Defensive clamp at INT_MAX (~2 GB) to avoid sign-flip on cast (R2
+     * review). Classic targets (FAT32 / NTFS on NT 4-2000) can theoretically
+     * exceed 2 GB; until the JSON emitter grows a 64-bit helper, clamp. */
+    if (total > 0x7FFFFFFFul) {
+        total = 0x7FFFFFFFul;
+    }
+    rh_json_key(j, "bytes_written"); rh_json_int(j, (i32)total);
+    rh_json_key(j, "content_type");  rh_json_str(j, content_type);
+    rh_json_key(j, "http_status");   rh_json_int(j, (i32)http_status);
+    rh_json_end_obj(j);
+    r = rh_json_finish(j);
+    if (r == NULL) {
+        rh_err(c, "wire_desync");
+    } else {
+        rh_ok_json(c, r);
+    }
+    free(j);
 }

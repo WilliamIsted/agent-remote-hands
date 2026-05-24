@@ -31,4 +31,16 @@ void rh_verb_input_type(RhConn* c, const RhRequest* req);
 void rh_verb_input_send_message(RhConn* c, const RhRequest* req);
 void rh_verb_input_post_message(RhConn* c, const RhRequest* req);
 
+/* Phase R2 extended input verbs (v2.2): the existing click/key/type are
+ * composite (down+up) shortcuts; these decompose so the caller can hold a
+ * button or key across multiple requests (drag-and-drop, modifier-hold,
+ * game input). All use SendInput when present (XP+ / Win2000+ via the
+ * platform SDK) and fall back to mouse_event / keybd_event on NT 4 / 9x. */
+void rh_verb_input_mouse_press(RhConn* c, const RhRequest* req);
+void rh_verb_input_mouse_release(RhConn* c, const RhRequest* req);
+void rh_verb_input_mouse_drag(RhConn* c, const RhRequest* req);
+void rh_verb_input_keyboard_key_down(RhConn* c, const RhRequest* req);
+void rh_verb_input_keyboard_key_up(RhConn* c, const RhRequest* req);
+void rh_verb_input_position(RhConn* c, const RhRequest* req);
+
 #endif /* RH_VERBS_INPUT_H */

@@ -30,4 +30,15 @@ void rh_verb_file_exists(RhConn* c, const RhRequest* req);
 void rh_verb_file_wait(RhConn* c, const RhRequest* req);
 void rh_verb_file_rename(RhConn* c, const RhRequest* req);
 
+/* v2.1 Create-tier: refuse-if-exists, atomic temp+rename by default.
+ *    file.create <path> <length> [--encoding <enc>] [--no-atomic]
+ * Encoding: utf-8 (default) | binary | utf-16le | utf-16be | cp1252
+ *           | ascii | latin-1. utf-8/binary write payload bytes as-is;
+ * the rest transcode UTF-8 payload -> wide -> target code page. */
+void rh_verb_file_create(RhConn* c, const RhRequest* req);
+
+/* v2.0 HTTP(S)-to-disk via WinINet (NT 4 / 9x / 2000+).
+ *    file.download <url> <path> [--timeout-ms <ms>] [--no-verify-tls] */
+void rh_verb_file_download(RhConn* c, const RhRequest* req);
+
 #endif /* RH_VERBS_FILE_H */

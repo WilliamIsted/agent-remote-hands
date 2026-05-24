@@ -207,6 +207,14 @@ static const VerbEntry kVerbs[] = {
     { "input.send_message",  RH_TIER_UPDATE,      rh_verb_input_send_message  },
     { "input.post_message",  RH_TIER_UPDATE,      rh_verb_input_post_message  },
 
+    /* input.* v2.1 namespace additions */
+    { "input.position",          RH_TIER_READ,   rh_verb_input_position          },
+    { "input.mouse.press",       RH_TIER_UPDATE, rh_verb_input_mouse_press       },
+    { "input.mouse.release",     RH_TIER_UPDATE, rh_verb_input_mouse_release     },
+    { "input.mouse.drag",        RH_TIER_UPDATE, rh_verb_input_mouse_drag        },
+    { "input.keyboard.key_down", RH_TIER_UPDATE, rh_verb_input_keyboard_key_down },
+    { "input.keyboard.key_up",   RH_TIER_UPDATE, rh_verb_input_keyboard_key_up   },
+
     /* file.* */
     { "file.read",           RH_TIER_READ,        rh_verb_file_read           },
     { "file.write",          RH_TIER_UPDATE,      rh_verb_file_write          },
@@ -216,6 +224,8 @@ static const VerbEntry kVerbs[] = {
     { "file.exists",         RH_TIER_READ,        rh_verb_file_exists         },
     { "file.wait",           RH_TIER_READ,        rh_verb_file_wait           },
     { "file.rename",         RH_TIER_UPDATE,      rh_verb_file_rename         },
+    { "file.create",         RH_TIER_CREATE,      rh_verb_file_create         },
+    { "file.download",       RH_TIER_CREATE,      rh_verb_file_download       },
 
     /* directory.* */
     { "directory.list",      RH_TIER_READ,        rh_verb_directory_list      },
@@ -232,11 +242,19 @@ static const VerbEntry kVerbs[] = {
     { "process.kill",        RH_TIER_DELETE,      rh_verb_process_kill        },
     { "process.wait",        RH_TIER_READ,        rh_verb_process_wait        },
 
-    /* registry.* */
-    { "registry.read",       RH_TIER_READ,        rh_verb_registry_read       },
-    { "registry.write",      RH_TIER_UPDATE,      rh_verb_registry_write      },
-    { "registry.delete",     RH_TIER_DELETE,      rh_verb_registry_delete     },
-    { "registry.wait",       RH_TIER_READ,        rh_verb_registry_wait       },
+    /* registry.* (v2.0 names kept as back-compat aliases) */
+    { "registry.read",          RH_TIER_READ,    rh_verb_registry_read         },
+    { "registry.write",         RH_TIER_UPDATE,  rh_verb_registry_write        },
+    { "registry.delete",        RH_TIER_DELETE,  rh_verb_registry_delete       },
+    { "registry.wait",          RH_TIER_READ,    rh_verb_registry_wait         },
+
+    /* registry.* v2.1 namespace split */
+    { "registry.key.read",      RH_TIER_READ,    rh_verb_registry_key_read     },
+    { "registry.key.delete",    RH_TIER_DELETE,  rh_verb_registry_key_delete   },
+    { "registry.value.read",    RH_TIER_READ,    rh_verb_registry_value_read   },
+    { "registry.value.create",  RH_TIER_CREATE,  rh_verb_registry_value_create },
+    { "registry.value.update",  RH_TIER_UPDATE,  rh_verb_registry_value_update },
+    { "registry.value.delete",  RH_TIER_DELETE,  rh_verb_registry_value_delete },
 
     /* clipboard.* */
     { "clipboard.get",       RH_TIER_READ,        rh_verb_clipboard_get       },

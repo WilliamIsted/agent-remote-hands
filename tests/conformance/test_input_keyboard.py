@@ -97,3 +97,49 @@ def test_input_keyboard_key_up_idempotent_when_not_held(
     from wire import OkResponse
     r = update_client.request("input.keyboard.key_up", "F24")
     assert isinstance(r, OkResponse), f"expected OkResponse, got {r!r}"
+
+
+# ---------------------------------------------------------------------------
+# input.keyboard.key_down / key_up — arg-validation for the v2.2 split verbs
+# (classic landing point — see Planning/full-spec-completion/per-verb/
+# input.keyboard-extended-classic.md). Wire-contract only; the synthesised
+# key event itself perturbs the focused window and stays out of CI.
+
+def test_input_keyboard_key_down_unknown_flag_rejected(
+        update_client: WireClient, capabilities: dict) -> None:
+    needs_verb(capabilities, "input.keyboard.key_down")
+    r = update_client.request("input.keyboard.key_down", "F24", "--bogus-flag")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args"
+    assert r.detail.get("unknown_flag") == "--bogus-flag"
+
+
+def test_input_keyboard_key_up_unknown_flag_rejected(
+        update_client: WireClient, capabilities: dict) -> None:
+    needs_verb(capabilities, "input.keyboard.key_up")
+    r = update_client.request("input.keyboard.key_up", "F24", "--bogus-flag")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args"
+    assert r.detail.get("unknown_flag") == "--bogus-flag"
+
+
+def test_input_keyboard_key_down_unknown_vk_rejected(
+        update_client: WireClient, capabilities: dict) -> None:
+    """Unknown vk names must be rejected (not silently no-op'd), mirroring
+    the existing input.keyboard.key contract."""
+    needs_verb(capabilities, "input.keyboard.key_down")
+    r = update_client.request("input.keyboard.key_down",
+                              "--vk", "definitely-not-a-key")
+    assert isinstance(r, ErrResponse)
+    assert r.code == "invalid_args"
+
+
+def test_input_keyboard_key_down_unknown_modifier_rejected(
+        update_client: WireClient, capabilities: dict) -> None:
+    """`--modifiers` accepts ctrl/shift/alt/win — anything else is
+    invalid_args with detail.unknown_modifier=<name>."""
+    needs_verb(capabilities, "input.keyboard.key_down")
+    r = update_client.request("input.keyboard.key_down", "F24",
+                              "--modifiers", "bogus")
+    assert isinstance(r, ErrResponse), f"expected ErrResponse, got {r!r}"
+    assert r.code == "invalid_args"
