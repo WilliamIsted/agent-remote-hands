@@ -75,6 +75,7 @@
 // Paths are UTF-8 on the wire; converted to wide-char internally.
 // FILETIME values are converted to Unix epoch seconds.
 
+#include "../base64.hpp"
 #include "../connection.hpp"
 #include "../errors.hpp"
 #include "../json.hpp"
@@ -245,7 +246,8 @@ bool base64_decode(std::string_view s, std::vector<unsigned char>& out) {
     return true;
 }
 
-// Resolve file.create's content to the exact bytes to write.
+// Resolve the content payload of a write-tier file verb (file.create,
+// file.write, file.write_at) to the exact bytes to land on disk.
 //
 // Two delivery shapes, both spec-aligned:
 //   1. schema `content` (string) + `encoding` discriminator
@@ -259,11 +261,12 @@ bool base64_decode(std::string_view s, std::vector<unsigned char>& out) {
 //
 // On success `bytes_out` holds the file content and `encoding_echo` is the
 // encoding string to echo in the response. Returns false having already
-// written the spec-declared invalid_args.
-bool resolve_create_content(Connection& conn, SchemaArgs& args,
-                            const wire::Request& req,
-                            std::vector<unsigned char>& bytes_out,
-                            std::string& encoding_echo) {
+// written the spec-declared invalid_args. `verb` is the wire verb name used
+// in the invalid_args messages (file.create / file.write / file.write_at).
+bool resolve_write_content(Connection& conn, SchemaArgs& args,
+                           const wire::Request& req, std::string_view verb,
+                           std::vector<unsigned char>& bytes_out,
+                           std::string& encoding_echo) {
     // Side-channel first: if content_b64 is present it is the authoritative
     // raw-bytes carrier (the harness sends a numeric `content` placeholder —
     // the byte length — alongside it, so content_b64 must win).
@@ -271,7 +274,8 @@ bool resolve_create_content(Connection& conn, SchemaArgs& args,
         cb != nullptr && cb->is_string()) {
         if (!base64_decode(cb->as_string(), bytes_out)) {
             invalid_args(conn,
-                         "file.create 'content_b64' is not valid base64");
+                         std::string(verb) +
+                         " 'content_b64' is not valid base64");
             return false;
         }
         encoding_echo = "binary";
@@ -279,12 +283,12 @@ bool resolve_create_content(Connection& conn, SchemaArgs& args,
     }
 
     if (!args.present("content")) {
-        invalid_args(conn, "file.create requires 'content'");
+        invalid_args(conn, std::string(verb) + " requires 'content'");
         return false;
     }
     std::optional<std::string> content = args.str("content");
     if (!content) {
-        invalid_args(conn, "file.create 'content' must be a string");
+        invalid_args(conn, std::string(verb) + " 'content' must be a string");
         return false;
     }
 
@@ -292,7 +296,8 @@ bool resolve_create_content(Connection& conn, SchemaArgs& args,
     if (args.present("encoding")) {
         auto enc = args.str("encoding");
         if (!enc) {
-            invalid_args(conn, "file.create 'encoding' must be a string");
+            invalid_args(conn,
+                         std::string(verb) + " 'encoding' must be a string");
             return false;
         }
         encoding = *enc;
@@ -302,8 +307,8 @@ bool resolve_create_content(Connection& conn, SchemaArgs& args,
     if (encoding == "binary") {
         if (!base64_decode(*content, bytes_out)) {
             invalid_args(conn,
-                         "file.create 'content' is not valid base64 "
-                         "(encoding=binary)");
+                         std::string(verb) +
+                         " 'content' is not valid base64 (encoding=binary)");
             return false;
         }
         return true;
@@ -369,9 +374,159 @@ bool resolve_create_content(Connection& conn, SchemaArgs& args,
     }
 
     invalid_args(conn,
-                 "file.create 'encoding' must be one of utf-8|utf-16le|"
+                 std::string(verb) +
+                 " 'encoding' must be one of utf-8|utf-16le|utf-16be|"
+                 "ascii|latin-1|cp1252|binary");
+    return false;
+}
+
+// Encode raw bytes already-loaded from disk back to the wire string for
+// file.read. Mirror of resolve_write_content's encoder side. On success
+// fills `text_out` with the JSON-encodable string and returns true; on a
+// decode failure (malformed UTF-16 stream, unknown encoding) writes the
+// spec-declared invalid_args and returns false.
+bool encode_read_bytes(Connection& conn, std::string_view encoding,
+                       const std::vector<unsigned char>& bytes,
+                       std::string& text_out) {
+    if (encoding == "binary") {
+        text_out = remote_hands::base64_encode(bytes.data(), bytes.size());
+        return true;
+    }
+    if (encoding == "utf-8") {
+        text_out.assign(reinterpret_cast<const char*>(bytes.data()),
+                        bytes.size());
+        return true;
+    }
+    if (encoding == "ascii" || encoding == "latin-1" ||
+        encoding == "cp1252") {
+        const UINT cp = (encoding == "ascii")   ? 20127u
+                       : (encoding == "latin-1") ? 28591u
+                                                 : 1252u;
+        const int wlen = MultiByteToWideChar(
+            cp, 0, reinterpret_cast<const char*>(bytes.data()),
+            static_cast<int>(bytes.size()), nullptr, 0);
+        std::wstring w(static_cast<std::size_t>(wlen > 0 ? wlen : 0), L'\0');
+        if (wlen > 0) {
+            MultiByteToWideChar(
+                cp, 0, reinterpret_cast<const char*>(bytes.data()),
+                static_cast<int>(bytes.size()), w.data(), wlen);
+        }
+        const int blen = WideCharToMultiByte(
+            CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+            nullptr, 0, nullptr, nullptr);
+        text_out.assign(static_cast<std::size_t>(blen > 0 ? blen : 0), '\0');
+        if (blen > 0) {
+            WideCharToMultiByte(
+                CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+                text_out.data(), blen, nullptr, nullptr);
+        }
+        return true;
+    }
+    if (encoding == "utf-16le" || encoding == "utf-16be") {
+        // Decode raw bytes as UTF-16 code units (BOM stripping if present),
+        // then transcode to UTF-8.
+        if (bytes.size() % 2 != 0) {
+            std::string detail = "{\"reason\":\"decode_failed\",";
+            json::append_kv_string(detail, "encoding", encoding);
+            detail += '}';
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return false;
+        }
+        const bool be = (encoding == "utf-16be");
+        std::wstring w;
+        w.reserve(bytes.size() / 2);
+        std::size_t i = 0;
+        // Strip BOM if present (FE FF for BE, FF FE for LE).
+        if (bytes.size() >= 2) {
+            const unsigned char b0 = bytes[0];
+            const unsigned char b1 = bytes[1];
+            if (be && b0 == 0xFE && b1 == 0xFF) i = 2;
+            else if (!be && b0 == 0xFF && b1 == 0xFE) i = 2;
+        }
+        for (; i + 1 < bytes.size(); i += 2) {
+            unsigned u;
+            if (be) {
+                u = (static_cast<unsigned>(bytes[i]) << 8) |
+                    static_cast<unsigned>(bytes[i + 1]);
+            } else {
+                u = (static_cast<unsigned>(bytes[i + 1]) << 8) |
+                    static_cast<unsigned>(bytes[i]);
+            }
+            w.push_back(static_cast<wchar_t>(u));
+        }
+        const int blen = WideCharToMultiByte(
+            CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+            nullptr, 0, nullptr, nullptr);
+        text_out.assign(static_cast<std::size_t>(blen > 0 ? blen : 0), '\0');
+        if (blen > 0) {
+            WideCharToMultiByte(
+                CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+                text_out.data(), blen, nullptr, nullptr);
+        }
+        return true;
+    }
+    invalid_args(conn,
+                 "file.read 'encoding' must be one of utf-8|utf-16le|"
                  "utf-16be|ascii|latin-1|cp1252|binary");
     return false;
+}
+
+// Atomic-replace helper shared by file.create and file.write. Writes `bytes`
+// to a sibling temp file (`target + ".rh-tmp"`), then MoveFileExW into place.
+// `replace_existing=false` matches file.create's CREATE_NEW semantics (an
+// existing target fails the rename). `replace_existing=true` matches
+// file.write's overwrite semantics (MOVEFILE_REPLACE_EXISTING). Returns 0
+// on success or the Win32 GetLastError() code on failure. The temp file is
+// best-effort cleaned on failure. The temp itself is opened CREATE_ALWAYS
+// (its sole purpose is to receive bytes — never the user-visible target).
+DWORD atomic_replace(const std::wstring& target,
+                     const std::vector<unsigned char>& bytes,
+                     bool replace_existing) {
+    std::wstring tmp = target;
+    tmp += L".rh-tmp";
+    // Best-effort clean of a stale temp from a previous aborted write.
+    DeleteFileW(tmp.c_str());
+
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return GetLastError();
+    }
+    bool ok = true;
+    if (!bytes.empty()) {
+        // WriteFile takes a DWORD; for >4 GiB payloads loop. Bridge frame
+        // budgets are well under this, but the loop is cheap insurance.
+        const unsigned char* p = bytes.data();
+        std::size_t remaining = bytes.size();
+        while (remaining > 0) {
+            const DWORD chunk = (remaining > 0xFFFFFFFFu)
+                ? 0xFFFFFFFFu
+                : static_cast<DWORD>(remaining);
+            DWORD written = 0;
+            if (!WriteFile(h, p, chunk, &written, nullptr) ||
+                written != chunk) {
+                ok = false;
+                break;
+            }
+            p += chunk;
+            remaining -= chunk;
+        }
+    }
+    const DWORD werr = ok ? 0u : GetLastError();
+    CloseHandle(h);
+    if (werr != 0) {
+        DeleteFileW(tmp.c_str());
+        return werr;
+    }
+
+    DWORD mv_flags = MOVEFILE_WRITE_THROUGH;
+    if (replace_existing) mv_flags |= MOVEFILE_REPLACE_EXISTING;
+    if (!MoveFileExW(tmp.c_str(), target.c_str(), mv_flags)) {
+        const DWORD merr = GetLastError();
+        DeleteFileW(tmp.c_str());
+        return merr;
+    }
+    return 0;
 }
 
 }  // namespace
@@ -379,13 +534,12 @@ bool resolve_create_content(Connection& conn, SchemaArgs& args,
 // ---------------------------------------------------------------------------
 // file.read — input_schema (schema order): ["path","encoding","offset","length"]
 // x-errors: ["not_found","permission_denied","invalid_args"].
+// x-output-schema: {content, bytes_read, truncated} all required.
 //
-// PHASE 2b — the `content` output is the binary side-channel (decoded text in
-// the requested encoding, or base64 for `encoding: binary`). Path / encoding
-// / offset / length are validated here as named args; the byte read +
-// encode is deferred. not_supported is NOT in this verb's x-errors, so the
-// deferral is surfaced via the spec-declared invalid_args with an explicit
-// {"reason":...}.
+// `content` is the requested-encoding text, or base64 of the raw bytes when
+// `encoding: binary`. `truncated` is true only when `length` was supplied AND
+// the file has more bytes after `offset + bytes_read` (an explicit length
+// cap that didn't reach EOF).
 
 void read(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path", "encoding", "offset", "length"});
@@ -394,13 +548,16 @@ void read(Connection& conn, const wire::Request& req) {
     std::string path;
     if (!resolve_path(conn, args, "file.read", path)) return;
 
+    std::string encoding = "utf-8";   // schema default
     if (args.present("encoding")) {
         auto enc = args.str("encoding");
         if (!enc) {
             invalid_args(conn, "file.read 'encoding' must be a string");
             return;
         }
+        encoding = *enc;
     }
+    long long offset = 0;
     if (args.present("offset")) {
         auto off = args.integer("offset");
         if (!off || *off < 0) {
@@ -408,7 +565,10 @@ void read(Connection& conn, const wire::Request& req) {
                          "file.read 'offset' must be a non-negative integer");
             return;
         }
+        offset = *off;
     }
+    bool length_supplied = false;
+    long long length = 0;
     if (args.present("length")) {
         auto len = args.integer("length");
         if (!len || *len < 0) {
@@ -416,34 +576,128 @@ void read(Connection& conn, const wire::Request& req) {
                          "file.read 'length' must be a non-negative integer");
             return;
         }
+        length_supplied = true;
+        length = *len;
     }
 
-    // Existence probe BEFORE the Phase-2b deferral: a missing path is
-    // not_found (in file.read.json x-errors), not the generic phase2b
-    // invalid_args. write_open_err maps INVALID_FILE_ATTRIBUTES via
+    const std::wstring wpath = text::utf8_to_wide(path);
+
+    // Existence probe: a missing path is not_found (in file.read.json
+    // x-errors). write_open_err maps INVALID_FILE_ATTRIBUTES via
     // GetLastError() to NotFound ({"path":...}) / permission_denied exactly
-    // as the open path does (file.cpp:199). A path that EXISTS keeps the
-    // unchanged Phase-2b deferral below (content delivery is genuinely
-    // deferred).
-    if (GetFileAttributesW(text::utf8_to_wide(path).c_str())
-        == INVALID_FILE_ATTRIBUTES) {
+    // as the open path does (file.cpp:199).
+    if (GetFileAttributesW(wpath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         write_open_err(conn, path);
         return;
     }
 
-    // PHASE 2b — content read/encode is the binary side-channel; deferred.
-    invalid_args(conn,
-                 "file.read content side-channel is deferred to Phase 2b "
-                 "(reason: file_content_phase2b)");
+    HANDLE h = CreateFileW(wpath.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        write_open_err(conn, path);
+        return;
+    }
+
+    LARGE_INTEGER total_size{};
+    if (!GetFileSizeEx(h, &total_size)) {
+        const DWORD err = GetLastError();
+        CloseHandle(h);
+        char detail[64];
+        std::snprintf(detail, sizeof(detail), "{\"win32_error\":%lu}", err);
+        conn.writer().write_err(ErrorCode::PermissionDenied, detail);
+        return;
+    }
+
+    if (offset > total_size.QuadPart) {
+        CloseHandle(h);
+        invalid_args(conn,
+                     "file.read 'offset' is past end of file "
+                     "(reason: offset_past_eof)");
+        return;
+    }
+
+    if (offset > 0) {
+        LARGE_INTEGER pos{};
+        pos.QuadPart = offset;
+        if (!SetFilePointerEx(h, pos, nullptr, FILE_BEGIN)) {
+            const DWORD err = GetLastError();
+            CloseHandle(h);
+            char detail[64];
+            std::snprintf(detail, sizeof(detail),
+                          "{\"win32_error\":%lu}", err);
+            conn.writer().write_err(ErrorCode::PermissionDenied, detail);
+            return;
+        }
+    }
+
+    const long long remaining = total_size.QuadPart - offset;
+    long long read_len = length_supplied
+        ? (length < remaining ? length : remaining)
+        : remaining;
+
+    std::vector<unsigned char> buf(
+        static_cast<std::size_t>(read_len > 0 ? read_len : 0));
+    std::size_t bytes_read_total = 0;
+    if (read_len > 0) {
+        unsigned char* p = buf.data();
+        long long left = read_len;
+        while (left > 0) {
+            const DWORD chunk =
+                (left > static_cast<long long>(0xFFFFFFFFu))
+                ? 0xFFFFFFFFu
+                : static_cast<DWORD>(left);
+            DWORD got = 0;
+            if (!ReadFile(h, p, chunk, &got, nullptr)) {
+                const DWORD err = GetLastError();
+                CloseHandle(h);
+                char detail[64];
+                std::snprintf(detail, sizeof(detail),
+                              "{\"win32_error\":%lu}", err);
+                conn.writer().write_err(ErrorCode::PermissionDenied, detail);
+                return;
+            }
+            if (got == 0) break;   // clean EOF
+            p += got;
+            left -= got;
+            bytes_read_total += got;
+        }
+    }
+    CloseHandle(h);
+    buf.resize(bytes_read_total);
+
+    const bool truncated =
+        length_supplied &&
+        (offset + static_cast<long long>(bytes_read_total) <
+         total_size.QuadPart);
+
+    std::string content;
+    if (!encode_read_bytes(conn, encoding, buf, content)) {
+        return;   // helper already wrote the spec-declared error
+    }
+
+    std::string body = "{";
+    json::append_kv_string(body, "content", content);
+    body += ',';
+    json::append_kv_uint(body, "bytes_read",
+                         static_cast<unsigned long long>(bytes_read_total));
+    body += ',';
+    json::append_kv_bool(body, "truncated", truncated);
+    body += '}';
+    conn.writer().write_ok(body);
 }
 
 // ---------------------------------------------------------------------------
 // file.write — input_schema (schema order): ["path","content","encoding",
 // "atomic"]. x-errors: ["not_found","permission_denied","invalid_args"].
+// x-output-schema: {bytes_written, encoding} both required.
 //
-// PHASE 2b — `content` is the binary side-channel. Path / encoding / atomic
-// are validated as named args; the decode + write is deferred via the
-// spec-declared invalid_args (not_supported is NOT in this verb's x-errors).
+// Overwrite an existing file with new content (Update-tier; the file MUST
+// exist — a missing target is not_found, unlike file.create which would
+// already_exists). Atomic by default: sibling temp + MoveFileExW with
+// MOVEFILE_REPLACE_EXISTING via the shared atomic_replace helper. When
+// atomic: false, opens the target CREATE_ALWAYS (truncate-on-open) and
+// writes in place.
 
 void write(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path", "content", "encoding", "atomic"});
@@ -452,42 +706,98 @@ void write(Connection& conn, const wire::Request& req) {
     std::string path;
     if (!resolve_path(conn, args, "file.write", path)) return;
 
-    // `content` is REQUIRED by file.write.json; validate presence + string
-    // shape (the actual decode is the deferred side-channel).
-    if (!args.present("content")) {
-        invalid_args(conn, "file.write requires 'content'");
-        return;
-    }
-    if (!args.str("content")) {
-        invalid_args(conn, "file.write 'content' must be a string");
-        return;
-    }
-    if (args.present("encoding") && !args.str("encoding")) {
-        invalid_args(conn, "file.write 'encoding' must be a string");
-        return;
-    }
-    if (args.present("atomic") && !args.boolean("atomic")) {
-        invalid_args(conn, "file.write 'atomic' must be a boolean");
-        return;
+    bool atomic = true;   // schema default
+    if (args.present("atomic")) {
+        auto a = args.boolean("atomic");
+        if (!a) {
+            invalid_args(conn, "file.write 'atomic' must be a boolean");
+            return;
+        }
+        atomic = *a;
     }
 
-    // Existence probe BEFORE the Phase-2b deferral: a missing path is
-    // not_found (in file.write.json x-errors), not the generic phase2b
-    // invalid_args. write_open_err maps INVALID_FILE_ATTRIBUTES via
-    // GetLastError() to NotFound ({"path":...}) / permission_denied exactly
-    // as the open path does (file.cpp:199). A path that EXISTS keeps the
-    // unchanged Phase-2b deferral below (content delivery is genuinely
-    // deferred).
-    if (GetFileAttributesW(text::utf8_to_wide(path).c_str())
-        == INVALID_FILE_ATTRIBUTES) {
+    const std::wstring wpath = text::utf8_to_wide(path);
+
+    // Existence probe: file.write is Update-tier — a missing path is
+    // not_found (in file.write.json x-errors), use file.create to create.
+    if (GetFileAttributesW(wpath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         write_open_err(conn, path);
         return;
     }
 
-    // PHASE 2b — content decode/write is the binary side-channel; deferred.
-    invalid_args(conn,
-                 "file.write content side-channel is deferred to Phase 2b "
-                 "(reason: file_content_phase2b)");
+    std::vector<unsigned char> bytes;
+    std::string encoding_echo;
+    if (!resolve_write_content(conn, args, req, "file.write",
+                               bytes, encoding_echo)) {
+        return;   // helper already wrote invalid_args
+    }
+
+    auto map_write_err = [&](DWORD err) {
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+            conn.writer().write_err(ErrorCode::NotFound);
+            return;
+        }
+        char detail[64];
+        std::snprintf(detail, sizeof(detail), "{\"win32_error\":%lu}", err);
+        conn.writer().write_err(ErrorCode::PermissionDenied, detail);
+    };
+
+    if (atomic) {
+        // Sibling temp + MoveFileExW(REPLACE_EXISTING) via the shared helper.
+        const DWORD werr =
+            atomic_replace(wpath, bytes, /*replace_existing=*/true);
+        if (werr != 0) {
+            map_write_err(werr);
+            return;
+        }
+    } else {
+        // Direct in-place: TRUNCATE_EXISTING zeros the file then writes
+        // the new contents. Spec impl is `create_file_w_truncate`. Using
+        // TRUNCATE_EXISTING (rather than CREATE_ALWAYS) closes a TOCTOU
+        // window where the file could be deleted between the not_found
+        // probe above and CreateFileW — CREATE_ALWAYS would silently
+        // create a new file there, but file.write must refuse non-existent
+        // targets per spec. TRUNCATE_EXISTING returns ERROR_FILE_NOT_FOUND
+        // which map_write_err correctly maps to `not_found`.
+        HANDLE h = CreateFileW(wpath.c_str(), GENERIC_WRITE, 0, nullptr,
+                               TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+            map_write_err(GetLastError());
+            return;
+        }
+        bool ok = true;
+        if (!bytes.empty()) {
+            const unsigned char* p = bytes.data();
+            std::size_t remaining = bytes.size();
+            while (remaining > 0) {
+                const DWORD chunk = (remaining > 0xFFFFFFFFu)
+                    ? 0xFFFFFFFFu
+                    : static_cast<DWORD>(remaining);
+                DWORD written = 0;
+                if (!WriteFile(h, p, chunk, &written, nullptr) ||
+                    written != chunk) {
+                    ok = false;
+                    break;
+                }
+                p += chunk;
+                remaining -= chunk;
+            }
+        }
+        const DWORD werr = ok ? 0u : GetLastError();
+        CloseHandle(h);
+        if (werr != 0) {
+            map_write_err(werr);
+            return;
+        }
+    }
+
+    std::string body = "{";
+    json::append_kv_uint(body, "bytes_written",
+                         static_cast<unsigned long long>(bytes.size()));
+    body += ',';
+    json::append_kv_string(body, "encoding", encoding_echo);
+    body += '}';
+    conn.writer().write_ok(body);
 }
 
 // ---------------------------------------------------------------------------
@@ -495,10 +805,12 @@ void write(Connection& conn, const wire::Request& req) {
 // "encoding","truncate"]. x-errors:
 // ["not_found","permission_denied","invalid_args"].
 // x-conditional: truncate:true requires offset:0 (else invalid_args).
+// x-output-schema: {bytes_written, encoding, new_size} all required.
 //
-// PHASE 2b — `content` is the binary side-channel. Path / offset / encoding /
-// truncate (incl. the offset==0 conditional) are validated as named args;
-// the decode + random-access write is deferred via invalid_args.
+// Random-access write of `content` at byte `offset` — the chunked-upload
+// primitive. The file MUST exist (use file.write or file.create first);
+// a missing target is not_found. `truncate: true` (only valid at offset 0)
+// clears the file to zero bytes before writing.
 
 void write_at(Connection& conn, const wire::Request& req) {
     SchemaArgs args(req, {"path", "offset", "content", "encoding", "truncate"});
@@ -519,21 +831,6 @@ void write_at(Connection& conn, const wire::Request& req) {
         return;
     }
 
-    // content — required string (the deferred side-channel).
-    if (!args.present("content")) {
-        invalid_args(conn, "file.write_at requires 'content'");
-        return;
-    }
-    if (!args.str("content")) {
-        invalid_args(conn, "file.write_at 'content' must be a string");
-        return;
-    }
-
-    if (args.present("encoding") && !args.str("encoding")) {
-        invalid_args(conn, "file.write_at 'encoding' must be a string");
-        return;
-    }
-
     bool truncate = false;
     if (args.present("truncate")) {
         auto t = args.boolean("truncate");
@@ -551,24 +848,111 @@ void write_at(Connection& conn, const wire::Request& req) {
         return;
     }
 
-    // Existence probe BEFORE the Phase-2b deferral: a missing path is
-    // not_found (in file.write_at.json x-errors), not the generic phase2b
-    // invalid_args. write_open_err maps INVALID_FILE_ATTRIBUTES via
-    // GetLastError() to NotFound ({"path":...}) / permission_denied exactly
-    // as the open path does (file.cpp:199). A path that EXISTS keeps the
-    // unchanged Phase-2b deferral below (content delivery is genuinely
-    // deferred).
-    if (GetFileAttributesW(text::utf8_to_wide(path).c_str())
-        == INVALID_FILE_ATTRIBUTES) {
+    const std::wstring wpath = text::utf8_to_wide(path);
+
+    // Existence probe: file.write_at requires the target to exist —
+    // a missing path is not_found (in file.write_at.json x-errors).
+    if (GetFileAttributesW(wpath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         write_open_err(conn, path);
         return;
     }
 
-    // PHASE 2b — content decode + random-access write is the binary
-    // side-channel; deferred.
-    invalid_args(conn,
-                 "file.write_at content side-channel is deferred to Phase 2b "
-                 "(reason: file_content_phase2b)");
+    std::vector<unsigned char> bytes;
+    std::string encoding_echo;
+    if (!resolve_write_content(conn, args, req, "file.write_at",
+                               bytes, encoding_echo)) {
+        return;   // helper already wrote invalid_args
+    }
+
+    // FILE_SHARE_READ lets readers observe a stable mid-write view at the
+    // OS layer; concurrent writers correctly fail with sharing_violation
+    // (mapped to permission_denied below).
+    HANDLE h = CreateFileW(wpath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                           nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        const DWORD err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+            conn.writer().write_err(ErrorCode::NotFound);
+            return;
+        }
+        char detail[64];
+        std::snprintf(detail, sizeof(detail), "{\"win32_error\":%lu}", err);
+        conn.writer().write_err(ErrorCode::PermissionDenied, detail);
+        return;
+    }
+
+    auto fail_perm = [&](DWORD err) {
+        CloseHandle(h);
+        char detail[64];
+        std::snprintf(detail, sizeof(detail), "{\"win32_error\":%lu}", err);
+        conn.writer().write_err(ErrorCode::PermissionDenied, detail);
+    };
+
+    // truncate: true (guaranteed offset==0 by the conditional check above).
+    // Move to BOF, set EOF there to clear the prior content, then proceed
+    // to write `bytes` starting at the new BOF.
+    if (truncate) {
+        LARGE_INTEGER zero{};
+        zero.QuadPart = 0;
+        if (!SetFilePointerEx(h, zero, nullptr, FILE_BEGIN)) {
+            fail_perm(GetLastError());
+            return;
+        }
+        if (!SetEndOfFile(h)) {
+            fail_perm(GetLastError());
+            return;
+        }
+    }
+
+    LARGE_INTEGER pos{};
+    pos.QuadPart = *offset;
+    if (!SetFilePointerEx(h, pos, nullptr, FILE_BEGIN)) {
+        const DWORD err = GetLastError();
+        CloseHandle(h);
+        std::string detail = "{\"reason\":\"seek_failed\",\"win32_error\":";
+        detail += std::to_string(err);
+        detail += '}';
+        conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+        return;
+    }
+
+    unsigned long long bytes_written_total = 0;
+    if (!bytes.empty()) {
+        const unsigned char* p = bytes.data();
+        std::size_t remaining = bytes.size();
+        while (remaining > 0) {
+            const DWORD chunk = (remaining > 0xFFFFFFFFu)
+                ? 0xFFFFFFFFu
+                : static_cast<DWORD>(remaining);
+            DWORD written = 0;
+            if (!WriteFile(h, p, chunk, &written, nullptr) ||
+                written != chunk) {
+                fail_perm(GetLastError());
+                return;
+            }
+            p += chunk;
+            remaining -= chunk;
+            bytes_written_total += chunk;
+        }
+    }
+
+    LARGE_INTEGER new_size{};
+    if (!GetFileSizeEx(h, &new_size)) {
+        fail_perm(GetLastError());
+        return;
+    }
+    CloseHandle(h);
+
+    std::string body = "{";
+    json::append_kv_uint(body, "bytes_written", bytes_written_total);
+    body += ',';
+    json::append_kv_string(body, "encoding", encoding_echo);
+    body += ',';
+    json::append_kv_uint(body, "new_size",
+                         static_cast<unsigned long long>(new_size.QuadPart));
+    body += '}';
+    conn.writer().write_ok(body);
 }
 
 // ---------------------------------------------------------------------------
@@ -593,7 +977,8 @@ void create(Connection& conn, const wire::Request& req) {
 
     std::vector<unsigned char> bytes;
     std::string encoding_echo;
-    if (!resolve_create_content(conn, args, req, bytes, encoding_echo)) {
+    if (!resolve_write_content(conn, args, req, "file.create",
+                               bytes, encoding_echo)) {
         return;   // helper already wrote invalid_args
     }
 
@@ -609,9 +994,12 @@ void create(Connection& conn, const wire::Request& req) {
 
     const std::wstring wpath = text::utf8_to_wide(path);
 
-    // Write helper: CREATE_NEW so an existing target fails (mapped to
-    // already_exists). Returns the Win32 status (0 == success).
-    auto write_new = [&](const std::wstring& target) -> DWORD {
+    // Direct-write helper for the non-atomic path: CREATE_NEW so an existing
+    // target fails (mapped to already_exists). Returns the Win32 status
+    // (0 == success). The atomic path uses the shared atomic_replace helper
+    // with replace_existing=false; an already-existing target is detected up
+    // front (probe) so the rename never has to refuse it.
+    auto write_new_direct = [&](const std::wstring& target) -> DWORD {
         HANDLE h = CreateFileW(target.c_str(), GENERIC_WRITE, 0, nullptr,
                                CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h == INVALID_HANDLE_VALUE) return GetLastError();
@@ -650,11 +1038,13 @@ void create(Connection& conn, const wire::Request& req) {
     };
 
     if (atomic) {
-        // Sibling temp file then MoveFileExW WITHOUT MOVEFILE_REPLACE_EXISTING
-        // so an existing target fails the rename (surfaced as already_exists),
-        // matching file.create.json's create_file_w_atomic_new
-        // implementation. Probe the final target up front so the
-        // already_exists answer is precise and no temp file is left behind.
+        // Probe the final target up front so the already_exists answer is
+        // precise and no temp file is ever left behind. The atomic_replace
+        // helper (replace_existing=false) writes a sibling temp then
+        // MoveFileExW WITHOUT MOVEFILE_REPLACE_EXISTING into place — matching
+        // file.create.json's create_file_w_atomic_new implementation. Shared
+        // with file.write (which calls atomic_replace with replace_existing
+        // =true).
         if (GetFileAttributesW(wpath.c_str()) != INVALID_FILE_ATTRIBUTES) {
             conn.writer().write_err(
                 ErrorCode::AlreadyExists,
@@ -662,25 +1052,14 @@ void create(Connection& conn, const wire::Request& req) {
                 "overwrite\"}");
             return;
         }
-        std::wstring tmp = wpath;
-        tmp += L".rh-tmp";
-        // Best-effort clean of a stale temp from a previous aborted create.
-        DeleteFileW(tmp.c_str());
-        const DWORD werr = write_new(tmp);
+        const DWORD werr =
+            atomic_replace(wpath, bytes, /*replace_existing=*/false);
         if (werr != 0) {
-            DeleteFileW(tmp.c_str());   // don't leak the partial temp
             map_create_err(werr);
             return;
         }
-        if (!MoveFileExW(tmp.c_str(), wpath.c_str(),
-                         MOVEFILE_WRITE_THROUGH)) {
-            const DWORD merr = GetLastError();
-            DeleteFileW(tmp.c_str());   // don't leak the temp
-            map_create_err(merr);
-            return;
-        }
     } else {
-        const DWORD werr = write_new(wpath);
+        const DWORD werr = write_new_direct(wpath);
         if (werr != 0) {
             map_create_err(werr);
             return;

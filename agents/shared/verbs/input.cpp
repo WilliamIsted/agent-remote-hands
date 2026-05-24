@@ -113,10 +113,12 @@
 #include "../errors.hpp"
 #include "../json.hpp"
 #include "../log.hpp"
+#include "../text_util.hpp"
 #include "../uipi.hpp"
 #include "args.hpp"
 #include "schema_args.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <charconv>
@@ -146,6 +148,19 @@
 // the value is simply never injected by a horizontal-wheel-aware target.
 #ifndef MOUSEEVENTF_HWHEEL
 #define MOUSEEVENTF_HWHEEL 0x01000
+#endif
+
+// Rich-edit string messages — declared in richedit.h, not winuser.h. The
+// string-pointer marshalling safelist (input.send_message / input.post_message)
+// references them by numeric value to compare against the caller-supplied
+// `msg` integer; we do not actually issue these messages by name, so pulling
+// in richedit.h is unnecessary. Define them numerically the same way the
+// MOUSEEVENTF_HWHEEL guard above handles pre-Vista SDKs.
+#ifndef EM_GETSELTEXT
+#define EM_GETSELTEXT (WM_USER + 62)
+#endif
+#ifndef EM_GETTEXTEX
+#define EM_GETTEXTEX  (WM_USER + 94)
 #endif
 
 namespace remote_hands::input_verbs {
@@ -1598,6 +1613,71 @@ void type(Connection& conn, const wire::Request& req) {
 // (not_supported is in NEITHER verb's x-errors).
 namespace {
 
+// ---------------------------------------------------------------------------
+// String-pointer marshalling helpers for input.send_message / post_message.
+//
+// Windows messages that carry strings (WM_SETTEXT, WM_GETTEXT, the list/combo
+// box ADDSTRING family, the rich-edit EM_* string ops) expect a pointer to a
+// buffer in the TARGET PROCESS's address space, not a copy of the string. The
+// OS marshalls cross-process for a KNOWN safelist of message IDs (the message
+// pump knows e.g. WM_SETTEXT carries a wide string in lparam and copies it
+// into the receiver). For any other message ID the marshalling would need
+// shared memory or RPC — we refuse with invalid_args + string_marshal_unsupported
+// rather than guess.
+//
+// SendMessageW is used (not SendMessageA) because the cross-process wide-string
+// marshalling is the W-variant path; the A-variant uses thread-local CP_ACP and
+// is not the protocol contract (the wire is UTF-8 throughout).
+
+// Whether a message ID is a "receive-into-caller-buffer" string op. For these,
+// the caller-supplied wparam (numeric) is the buffer length in chars/bytes,
+// the OS writes wide chars into the lparam buffer, and we transcode back to
+// UTF-8 for the `received_string` response field.
+constexpr bool is_recv_string_msg(UINT msg) {
+    return msg == WM_GETTEXT || msg == EM_GETSELTEXT;
+}
+
+// Whether a message ID is in the OS-marshalled string safelist. Anything outside
+// this set is rejected with invalid_args + string_marshal_unsupported.
+constexpr bool is_marshalled_string_msg(UINT msg) {
+    switch (msg) {
+        case WM_SETTEXT:
+        case WM_GETTEXT:
+        case WM_GETTEXTLENGTH:
+        case CB_ADDSTRING:
+        case CB_INSERTSTRING:
+        case CB_FINDSTRING:
+        case CB_FINDSTRINGEXACT:
+        case CB_SELECTSTRING:
+        case LB_ADDSTRING:
+        case LB_INSERTSTRING:
+        case LB_FINDSTRING:
+        case LB_FINDSTRINGEXACT:
+        case LB_SELECTSTRING:
+        case EM_REPLACESEL:
+        case EM_GETSELTEXT:
+        case EM_GETTEXTEX:
+        case EM_SETPASSWORDCHAR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Stable, name-ordered list of the safelisted message IDs for error-detail
+// `supported_msgs` (mirrors the switch above).
+inline std::vector<std::string> supported_string_msgs_decimal() {
+    return {
+        "WM_SETTEXT", "WM_GETTEXT", "WM_GETTEXTLENGTH",
+        "CB_ADDSTRING", "CB_INSERTSTRING", "CB_FINDSTRING",
+        "CB_FINDSTRINGEXACT", "CB_SELECTSTRING",
+        "LB_ADDSTRING", "LB_INSERTSTRING", "LB_FINDSTRING",
+        "LB_FINDSTRINGEXACT", "LB_SELECTSTRING",
+        "EM_REPLACESEL", "EM_GETSELTEXT", "EM_GETTEXTEX",
+        "EM_SETPASSWORDCHAR",
+    };
+}
+
 void message_impl(Connection& conn, const wire::Request& req, bool is_send) {
     const std::string_view verb =
         is_send ? "input.send_message" : "input.post_message";
@@ -1682,32 +1762,83 @@ void message_impl(Connection& conn, const wire::Request& req, bool is_send) {
             return;
         }
     }
-    if (has_wp_str || has_lp_str) {
-        // PHASE 2b — the string-pointer buffer marshalling (allocate, UTF-16
-        // convert, keep alive across the send, free) is the binary
-        // side-channel. Arg presence + string shape are validated above; the
-        // marshalling is deferred. not_supported is in NEITHER verb's
-        // x-errors, so the deferral uses the spec-declared invalid_args with
-        // an explicit {"reason":...} (mirrors file.cpp / registry.cpp Phase-2b
-        // deferrals).
-        std::string detail = "{";
-        json::append_kv_string(detail, "reason",
-                               "string_pointer_phase2b");
-        detail += ',';
-        json::append_kv_string(
-            detail, "message",
-            std::string(verb) +
-            " 'wparam_string'/'lparam_string' marshalling is deferred to "
-            "Phase 2b; pass numeric 'wparam'/'lparam'");
-        detail += '}';
-        conn.writer().write_err(ErrorCode::InvalidArgs, detail);
-        return;
+    // --- String-pointer Phase-2b marshalling -------------------------------
+    //
+    // If either *_string arg is present, this is the OS-marshalled side-channel:
+    //   * Reject HWND_BROADCAST (the marshaller cannot copy a buffer to every
+    //     window on the desktop — `broadcast_string_unsupported`).
+    //   * Reject any msg ID outside the OS-marshalled safelist
+    //     (`string_marshal_unsupported`, with the safelist in the detail so the
+    //     caller can self-correct).
+    //   * UTF-8 -> UTF-16 the source string into a wide buffer that outlives
+    //     the SendMessageW / PostMessageW call (the OS reads from it during
+    //     marshalling; for cross-process sends the kernel snapshots the bytes
+    //     into the target's address space before the wndproc runs).
+    //   * For "receive into caller buffer" messages (WM_GETTEXT, EM_GETSELTEXT)
+    //     the numeric `wparam` is the caller-supplied buffer length in
+    //     characters; allocate that many wide chars in `recv_buf`, point lparam
+    //     at it, and after the call transcode the OS-written bytes back to UTF-8
+    //     for the response's `received_string` field.
+    //
+    // Buffers must outlive SendMessageTimeoutW / PostMessageW; declared at this
+    // scope so they remain valid until the verb's reply is written.
+    std::wstring wp_send_buf;            // source for wparam_string (send-side)
+    std::wstring lp_send_buf;            // source for lparam_string (send-side)
+    std::vector<wchar_t> recv_buf;       // destination for WM_GETTEXT et al
+    bool lparam_is_recv_buf = false;     // mark for the post-call transcode
+
+    WPARAM wparam = 0;
+    LPARAM lparam = 0;
+    const bool any_string_form = (has_wp_str || has_lp_str);
+
+    if (any_string_form) {
+        // HWND_BROADCAST (0xFFFF) cannot do per-target buffer marshalling;
+        // refuse rather than risk silent half-delivery. broadcast_string_
+        // unsupported is the spec's invalid_args sub-reason.
+        if (target == HWND_BROADCAST) {
+            std::string detail = "{";
+            json::append_kv_string(detail, "reason",
+                                   "broadcast_string_unsupported");
+            detail += ',';
+            json::append_kv_string(
+                detail, "message",
+                std::string(verb) +
+                " HWND_BROADCAST is incompatible with 'wparam_string' / "
+                "'lparam_string' (per-target buffer marshalling cannot apply "
+                "to a broadcast)");
+            detail += '}';
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
+        }
+
+        // Safelist gate — only the OS-marshalled message IDs are supported.
+        if (!is_marshalled_string_msg(msg)) {
+            std::string detail = "{";
+            json::append_kv_string(detail, "reason",
+                                   "string_marshal_unsupported");
+            detail += ',';
+            json::append_string_array(detail, "supported_msgs",
+                                      supported_string_msgs_decimal());
+            detail += ',';
+            json::append_kv_string(
+                detail, "message",
+                std::string(verb) +
+                " 'msg' is not in the OS-marshalled string safelist; cross-"
+                "process pointer passing for unknown messages would require "
+                "shared memory / RPC");
+            detail += '}';
+            conn.writer().write_err(ErrorCode::InvalidArgs, detail);
+            return;
+        }
     }
 
-    // wparam / lparam — optional numeric (default 0). Same hex/decimal-string
-    // tolerance as msg.
-    WPARAM wparam = 0;
-    if (args.present("wparam")) {
+    // wparam — numeric form, OR pointer to the wparam_string wide buffer.
+    if (has_wp_str) {
+        // mutual exclusion already enforced above (rejects when both arms
+        // present); the wp_send_buf is the source the OS marshals from.
+        wp_send_buf = text::utf8_to_wide(*args.str("wparam_string"));
+        wparam = reinterpret_cast<WPARAM>(wp_send_buf.c_str());
+    } else if (args.present("wparam")) {
         std::optional<std::string> wp = args.str("wparam");
         unsigned long long v = 0;
         if (!wp || !parse_msg_int(*wp, v)) {
@@ -1718,8 +1849,14 @@ void message_impl(Connection& conn, const wire::Request& req, bool is_send) {
         }
         wparam = static_cast<WPARAM>(v);
     }
-    LPARAM lparam = 0;
-    if (args.present("lparam")) {
+
+    // lparam — numeric form, pointer to the lparam_string wide buffer, OR the
+    // caller-supplied receive buffer (msg in is_recv_string_msg).
+    if (has_lp_str) {
+        lp_send_buf = text::utf8_to_wide(*args.str("lparam_string"));
+        lparam = static_cast<LPARAM>(
+            reinterpret_cast<LONG_PTR>(lp_send_buf.c_str()));
+    } else if (args.present("lparam")) {
         std::optional<std::string> lp = args.str("lparam");
         if (!lp) {
             invalid_args(conn,
@@ -1742,6 +1879,29 @@ void message_impl(Connection& conn, const wire::Request& req, bool is_send) {
             return;
         }
         lparam = static_cast<LPARAM>(sv);
+    }
+
+    // Receive-into-buffer messages: caller-supplied numeric wparam is the
+    // buffer length in wide chars (WM_GETTEXT contract). Allocate, repoint
+    // lparam at the destination, and remember so the post-call code transcodes
+    // the OS-written bytes back to UTF-8 for `received_string`.
+    if (any_string_form && is_recv_string_msg(msg)) {
+        // Clamp the requested buffer length: WPARAM is 64-bit on x64; cap at
+        // a sane upper bound so a hostile caller cannot try to allocate
+        // gigabytes via a stray 0xFFFFFFFFFFFFFFFF. 1 MiB of wide chars is
+        // ~2 MiB heap and a generous ceiling for any UI text field.
+        constexpr std::size_t kMaxRecvWchars = 1024 * 1024;
+        std::size_t want = static_cast<std::size_t>(wparam);
+        if (want == 0) want = 1;                 // room for the trailing NUL
+        if (want > kMaxRecvWchars) want = kMaxRecvWchars;
+        recv_buf.assign(want, L'\0');
+        // Re-point both params: wparam keeps the requested buffer length, but
+        // narrowed to the clamped value the OS will actually see; lparam is
+        // the pointer the receiving wndproc writes into.
+        wparam = static_cast<WPARAM>(want);
+        lparam = static_cast<LPARAM>(
+            reinterpret_cast<LONG_PTR>(recv_buf.data()));
+        lparam_is_recv_buf = true;
     }
 
     // UIPI guard — cross-IL sends/posts are silently no-op'd by the OS.
@@ -1774,6 +1934,9 @@ void message_impl(Connection& conn, const wire::Request& req, bool is_send) {
         // indefinitely. timeout_ms == 0 means "block indefinitely" per the
         // spec -> INFINITE.
         const UINT to = (timeout_ms == 0) ? INFINITE : timeout_ms;
+        // GetLastError must be cleared before the call so we can distinguish
+        // "succeeded with lresult==0" from "failed with err==0/ERROR_TIMEOUT".
+        SetLastError(0);
         LRESULT sent = SendMessageTimeoutW(
             target, msg, wparam, lparam,
             SMTO_ABORTIFHUNG | SMTO_NORMAL, to, &result);
@@ -1789,6 +1952,21 @@ void message_impl(Connection& conn, const wire::Request& req, bool is_send) {
                     "timeout_ms\"}");
                 return;
             }
+            if (err == ERROR_INVALID_WINDOW_HANDLE) {
+                // The window died between IsWindow() and the send — not_found
+                // is in input.send_message.json x-errors. (Mirrors the
+                // PostMessageW arm below.)
+                std::string detail = "{";
+                json::append_kv_string(detail, "handle", *handle);
+                detail += '}';
+                conn.writer().write_err(ErrorCode::NotFound, detail);
+                return;
+            }
+            // UIPI cross-IL boundary surfaces here on modern as
+            // ERROR_ACCESS_DENIED (the agent's UIPI gate above is a fast-path
+            // pre-check; the OS still rejects the actual SendMessageW if the
+            // target's IL is higher than ours and the prior gate was bypassed).
+            // permission_denied is in input.send_message.json x-errors.
             char detail[64];
             std::snprintf(detail, sizeof(detail),
                           "{\"win32_error\":%lu}", err);
@@ -1797,10 +1975,25 @@ void message_impl(Connection& conn, const wire::Request& req, bool is_send) {
         }
 
         // #89 — x-output-schema: {lresult} required. Signed 64-bit on x64.
+        // Receive-into-buffer messages (WM_GETTEXT, EM_GETSELTEXT) gain a
+        // `received_string` field carrying the UTF-8 transcode of the
+        // OS-written wide bytes. The `signed` field was emitted in an
+        // earlier iteration but removed per spec's
+        // additionalProperties:false; reintroduce only via a paired spec PR.
         std::string body = "{";
         json::append_kv_int(body, "lresult",
                             static_cast<long long>(
                                 static_cast<LONG_PTR>(result)));
+        if (lparam_is_recv_buf) {
+            body += ',';
+            // OS-written buffer is NUL-terminated for WM_GETTEXT (LRESULT is
+            // the char count NOT counting the NUL); take the LRESULT as the
+            // wide-char length, clamped to the allocated buffer.
+            const std::size_t got =
+                std::min(static_cast<std::size_t>(result), recv_buf.size());
+            std::string received = text::wide_to_utf8(recv_buf.data(), got);
+            json::append_kv_string(body, "received_string", received);
+        }
         body += '}';
         conn.writer().write_ok(body);
         return;

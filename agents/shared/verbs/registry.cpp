@@ -55,18 +55,15 @@
 // SPEC's for the dispatched verb — there is no shared "mode flag" arg any
 // more (the pre-2.1 `--value` / `--recursive` scanning is gone).
 //
-// REG_BINARY base64 — Phase 2b split:
+// REG_BINARY base64 — both sides now implemented:
 //   * READ path (registry.value.read / registry.key.read): a REG_BINARY
 //     value's `data` is base64-encoded per registry.value.read.json
-//     x-output-schema. Implemented in full here (output side, not the
-//     deferred input side) via a file-local encoder.
-//   * WRITE path (registry.value.create / registry.value.update): decoding
-//     base64 `data` back into bytes for a REG_BINARY write is the Phase-2b
-//     binary side-channel. The arg's PRESENCE and STRING shape are validated
-//     here; the decode is deferred with an explicit ERR not_supported
-//     ({"reason":"reg_binary_write_phase2b"}) — within both write verbs'
-//     declared x-errors. string / dword / qword / multi_sz writes are
-//     implemented in full now. See report.
+//     x-output-schema. Encoder shared via base64.hpp.
+//   * WRITE path (registry.value.create / registry.value.update): the input
+//     `data` string is base64-decoded through the shared `base64_decode`
+//     (base64.hpp, RFC 4648, ASCII whitespace tolerated) and written via
+//     RegSetValueExW. Malformed base64 surfaces as the verb's declared
+//     invalid_args. Empty input is valid (cbData=0 + NULL pointer).
 //
 // Paths use the standard `HKLM\Software\...` form. Roots accepted: HKLM,
 // HKCU, HKCR, HKU, HKCC (or their long-form equivalents).
@@ -390,16 +387,26 @@ bool encode_write_data(Connection& conn, std::string_view verb,
             return true;
         }
         case REG_BINARY: {
-            // PHASE 2b — base64 `data` -> bytes decode is the binary
-            // side-channel. The arg's presence + string shape are validated
-            // by the caller (str() succeeded). The decode itself is deferred.
-            // not_supported is within both create's and update's x-errors.
-            conn.writer().write_err(
-                ErrorCode::NotSupported,
-                "{\"reason\":\"reg_binary_write_phase2b\","
-                "\"message\":\"REG_BINARY base64 write is deferred to "
-                "Phase 2b; string/dword/qword/multi_sz are supported\"}");
-            return false;
+            // input_schema: REG_BINARY `data` is base64. Decode through the
+            // shared `base64_decode` (base64.hpp) — strict RFC 4648, ASCII
+            // whitespace tolerated, anything else => std::nullopt and we
+            // surface that as the verb's spec-declared invalid_args.
+            std::optional<std::vector<std::byte>> decoded =
+                base64_decode(data_str);
+            if (!decoded) {
+                invalid_args(conn, std::string(verb) +
+                             " 'data' is not valid base64 (type=REG_BINARY)");
+                return false;
+            }
+            // Empty binary is valid (RegSetValueExW accepts cbData=0 with a
+            // NULL pointer; the caller already handles bytes.empty() ->
+            // nullptr). Copy through std::byte -> BYTE; same in-memory layout.
+            bytes_out.resize(decoded->size());
+            if (!decoded->empty()) {
+                std::memcpy(bytes_out.data(), decoded->data(), decoded->size());
+            }
+            size_out = static_cast<DWORD>(decoded->size());
+            return true;
         }
         case REG_NONE:
         default: {

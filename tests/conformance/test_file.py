@@ -264,3 +264,441 @@ def test_file_wait_short_timeout(client: WireClient,
     r = client.request("file.wait", glob, "--timeout-ms", "200")
     assert isinstance(r, ErrResponse)
     assert r.code == "timeout"
+
+
+# ---------------------------------------------------------------------------
+# file.create — extra coverage (binary payload, missing parent, atomic-default)
+
+def test_file_create_binary_round_trip(update_client: WireClient,
+                                       capabilities: dict) -> None:
+    """encoding=binary writes the payload bytes verbatim."""
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.read")
+
+    path = _scratch_path()
+    payload = bytes(range(256))   # every byte value including NULs
+
+    r = update_client.request("file.create", path,
+                              str(len(payload)),
+                              "--encoding", "binary",
+                              payload=payload)
+    assert isinstance(r, OkResponse), f"create failed: {r!r}"
+    body = json.loads(r.payload)
+    assert body["bytes_written"] == len(payload)
+    assert body["encoding"] == "binary"
+
+    r = update_client.request("file.read", path, "--encoding", "binary")
+    assert isinstance(r, OkResponse)
+
+
+def test_file_create_parent_missing_returns_not_found(
+        update_client: WireClient, capabilities: dict) -> None:
+    """A path whose parent directory does not exist errors with not_found."""
+    needs_verb(capabilities, "file.create")
+
+    missing_dir = pathlib.Path(tempfile.gettempdir()) / \
+        f"remote-hands-noexist-{uuid.uuid4().hex}"
+    path = str(missing_dir / "child.txt")
+
+    r = update_client.request("file.create", path, "1", payload=b"x")
+    assert isinstance(r, ErrResponse)
+    assert r.code == "not_found"
+
+
+def test_file_create_atomic_leaves_no_tmp(update_client: WireClient,
+                                          capabilities: dict) -> None:
+    """Atomic-by-default: no .rh-tmp residue alongside the created file."""
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.exists")
+
+    path = _scratch_path()
+    r = update_client.request("file.create", path, "4", payload=b"data")
+    assert isinstance(r, OkResponse)
+
+    tmp_sidecar = path + ".rh-tmp"
+    r = update_client.request("file.exists", tmp_sidecar)
+    assert isinstance(r, OkResponse)
+    assert json.loads(r.payload)["exists"] is False
+
+
+# ---------------------------------------------------------------------------
+# file.read — content delivery (closes Phase-2b deferral)
+#
+# These tests exercise the Phase-2b closure: file.read returning actual bytes
+# (text or base64) in `content`, with `bytes_read` + `truncated` reflecting
+# the slice that was actually read. The pre-closure stub answered
+# invalid_args {"reason":"file_content_phase2b"} for any existing path; these
+# tests assert real content delivery.
+
+def _create_fixture(client: WireClient, payload: bytes) -> str:
+    """Helper: file.create a scratch path with the given raw bytes."""
+    path = _scratch_path()
+    r = client.request("file.create", path,
+                       str(len(payload)),
+                       "--encoding", "binary", payload=payload)
+    assert isinstance(r, OkResponse), f"fixture create failed: {r!r}"
+    return path
+
+
+def test_file_read_text_full(update_client: WireClient,
+                             capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.read")
+
+    payload = b"hello world\nsecond line\n"
+    path = _create_fixture(update_client, payload)
+
+    r = update_client.request("file.read", path, "--encoding", "utf-8")
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["content"] == payload.decode("utf-8")
+    assert body["bytes_read"] == len(payload)
+    assert body["truncated"] is False
+
+
+def test_file_read_text_offset_length(update_client: WireClient,
+                                      capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.read")
+
+    payload = b"abcdefghij"
+    path = _create_fixture(update_client, payload)
+
+    r = update_client.request("file.read", path,
+                              "--encoding", "utf-8",
+                              "--offset", "2", "--length", "4")
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["content"] == "cdef"
+    assert body["bytes_read"] == 4
+    assert body["truncated"] is True
+
+
+def test_file_read_text_offset_to_eof(update_client: WireClient,
+                                      capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.read")
+
+    payload = b"abcdefghij"
+    path = _create_fixture(update_client, payload)
+
+    r = update_client.request("file.read", path,
+                              "--encoding", "utf-8", "--offset", "6")
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["content"] == "ghij"
+    assert body["bytes_read"] == 4
+    assert body["truncated"] is False
+
+
+def test_file_read_binary_round_trip(update_client: WireClient,
+                                     capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.read")
+
+    import base64
+    payload = bytes(range(256))   # every byte value
+    path = _create_fixture(update_client, payload)
+
+    r = update_client.request("file.read", path, "--encoding", "binary")
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert base64.b64decode(body["content"]) == payload
+    assert body["bytes_read"] == len(payload)
+    assert body["truncated"] is False
+
+
+def test_file_read_encoding_utf16le(update_client: WireClient,
+                                    capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.read")
+
+    text = "héllo wörld"
+    payload = text.encode("utf-16-le")   # no BOM
+    path = _create_fixture(update_client, payload)
+
+    r = update_client.request("file.read", path, "--encoding", "utf-16le")
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["content"] == text
+    assert body["bytes_read"] == len(payload)
+
+
+def test_file_read_encoding_cp1252(update_client: WireClient,
+                                   capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.read")
+
+    text = "résumé café"
+    payload = text.encode("cp1252")
+    path = _create_fixture(update_client, payload)
+
+    r = update_client.request("file.read", path, "--encoding", "cp1252")
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["content"] == text
+
+
+def test_file_read_offset_past_eof(update_client: WireClient,
+                                   capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.read")
+
+    path = _create_fixture(update_client, b"abc")
+    r = update_client.request("file.read", path, "--offset", "100")
+    assert isinstance(r, ErrResponse)
+    assert r.code == "invalid_args"
+
+
+def test_file_read_empty_file(update_client: WireClient,
+                              capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.read")
+
+    path = _create_fixture(update_client, b"")
+    r = update_client.request("file.read", path, "--encoding", "utf-8")
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["content"] == ""
+    assert body["bytes_read"] == 0
+    assert body["truncated"] is False
+
+
+def test_file_read_length_zero(update_client: WireClient,
+                               capabilities: dict) -> None:
+    """`length: 0` is the stat-like no-op — reads zero bytes, not truncated
+    despite length being supplied (offset+0 equals offset, not past EOF)."""
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.read")
+
+    path = _create_fixture(update_client, b"abcdef")
+    r = update_client.request("file.read", path,
+                              "--encoding", "utf-8", "--length", "0")
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["content"] == ""
+    assert body["bytes_read"] == 0
+    # length supplied AND there are remaining bytes past offset+0=0 -> True.
+    assert body["truncated"] is True
+
+
+# ---------------------------------------------------------------------------
+# file.write — content delivery (closes Phase-2b deferral)
+
+def test_file_write_overwrites_text(update_client: WireClient,
+                                    capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.write")
+    needs_verb(capabilities, "file.read")
+
+    path = _create_fixture(update_client, b"original-content")
+    new_payload = b"replaced-content!"
+    r = update_client.request("file.write", path,
+                              str(len(new_payload)), payload=new_payload)
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["bytes_written"] == len(new_payload)
+    assert body["encoding"] == "binary"
+
+    r = update_client.request("file.read", path, "--encoding", "binary")
+    assert isinstance(r, OkResponse)
+    import base64
+    assert base64.b64decode(json.loads(r.payload)["content"]) == new_payload
+
+
+def test_file_write_atomic_false_direct(update_client: WireClient,
+                                        capabilities: dict) -> None:
+    """atomic:false: succeeds and leaves no .rh-tmp sidecar."""
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.write")
+    needs_verb(capabilities, "file.exists")
+
+    path = _create_fixture(update_client, b"x")
+    payload = b"direct-write"
+    r = update_client.request("file.write", path,
+                              str(len(payload)),
+                              "--atomic", "false", payload=payload)
+    assert isinstance(r, OkResponse)
+    assert json.loads(r.payload)["bytes_written"] == len(payload)
+
+    r = update_client.request("file.exists", path + ".rh-tmp")
+    assert isinstance(r, OkResponse)
+    assert json.loads(r.payload)["exists"] is False
+
+
+def test_file_write_atomic_leaves_no_tmp(update_client: WireClient,
+                                         capabilities: dict) -> None:
+    """atomic-by-default: after overwrite there is no .rh-tmp residue."""
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.write")
+    needs_verb(capabilities, "file.exists")
+
+    path = _create_fixture(update_client, b"x")
+    payload = b"atomic-write"
+    r = update_client.request("file.write", path,
+                              str(len(payload)), payload=payload)
+    assert isinstance(r, OkResponse)
+
+    r = update_client.request("file.exists", path + ".rh-tmp")
+    assert isinstance(r, OkResponse)
+    assert json.loads(r.payload)["exists"] is False
+
+
+def test_file_write_binary_round_trip(update_client: WireClient,
+                                      capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.write")
+    needs_verb(capabilities, "file.read")
+
+    path = _create_fixture(update_client, b"placeholder")
+    import base64
+    payload = bytes(range(256))
+    r = update_client.request("file.write", path,
+                              str(len(payload)),
+                              "--encoding", "binary", payload=payload)
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["bytes_written"] == len(payload)
+    assert body["encoding"] == "binary"
+
+    r = update_client.request("file.read", path, "--encoding", "binary")
+    assert isinstance(r, OkResponse)
+    assert base64.b64decode(json.loads(r.payload)["content"]) == payload
+
+
+def test_file_write_empty_content(update_client: WireClient,
+                                  capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.write")
+    needs_verb(capabilities, "file.read")
+
+    path = _create_fixture(update_client, b"non-empty-original")
+    r = update_client.request("file.write", path, "0", payload=b"")
+    assert isinstance(r, OkResponse)
+    assert json.loads(r.payload)["bytes_written"] == 0
+
+    r = update_client.request("file.read", path, "--encoding", "utf-8")
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["content"] == ""
+    assert body["bytes_read"] == 0
+
+
+# ---------------------------------------------------------------------------
+# file.write_at — content delivery (closes Phase-2b deferral)
+
+def test_file_write_at_offset_zero(update_client: WireClient,
+                                   capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.write_at")
+    needs_verb(capabilities, "file.read")
+
+    path = _create_fixture(update_client, b"0123456789")
+    payload = b"WXYZ"
+    r = update_client.request("file.write_at", path, "0",
+                              str(len(payload)),
+                              "--encoding", "binary", payload=payload)
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["bytes_written"] == len(payload)
+    assert body["encoding"] == "binary"
+    assert body["new_size"] == 10
+
+    r = update_client.request("file.read", path, "--encoding", "binary")
+    assert isinstance(r, OkResponse)
+    import base64
+    assert base64.b64decode(json.loads(r.payload)["content"]) == b"WXYZ456789"
+
+
+def test_file_write_at_middle(update_client: WireClient,
+                              capabilities: dict) -> None:
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.write_at")
+    needs_verb(capabilities, "file.read")
+
+    path = _create_fixture(update_client, b"0123456789")
+    payload = b"AB"
+    r = update_client.request("file.write_at", path, "5",
+                              str(len(payload)),
+                              "--encoding", "binary", payload=payload)
+    assert isinstance(r, OkResponse)
+    assert json.loads(r.payload)["new_size"] == 10
+
+    r = update_client.request("file.read", path, "--encoding", "binary")
+    assert isinstance(r, OkResponse)
+    import base64
+    assert base64.b64decode(json.loads(r.payload)["content"]) == b"01234AB789"
+
+
+def test_file_write_at_extends_file(update_client: WireClient,
+                                    capabilities: dict) -> None:
+    """Writing past EOF extends the file (Win32 sparse-hole behaviour)."""
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.write_at")
+    needs_verb(capabilities, "file.stat")
+
+    path = _create_fixture(update_client, b"abc")
+    payload = b"END"
+    r = update_client.request("file.write_at", path, "1024",
+                              str(len(payload)),
+                              "--encoding", "binary", payload=payload)
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["new_size"] == 1024 + len(payload)
+
+    r = update_client.request("file.stat", path)
+    assert isinstance(r, OkResponse)
+    assert json.loads(r.payload)["size"] == 1024 + len(payload)
+
+
+def test_file_write_at_truncate_zero(update_client: WireClient,
+                                     capabilities: dict) -> None:
+    """truncate:true at offset 0 clears prior content before writing."""
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.write_at")
+    needs_verb(capabilities, "file.read")
+
+    path = _create_fixture(update_client, b"long-original-content")
+    payload = b"abc"
+    r = update_client.request("file.write_at", path, "0",
+                              str(len(payload)),
+                              "--encoding", "binary",
+                              "--truncate", payload=payload)
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["bytes_written"] == 3
+    assert body["new_size"] == 3
+
+    r = update_client.request("file.read", path, "--encoding", "binary")
+    assert isinstance(r, OkResponse)
+    import base64
+    assert base64.b64decode(json.loads(r.payload)["content"]) == b"abc"
+
+
+def test_file_write_at_truncate_empty_content(update_client: WireClient,
+                                              capabilities: dict) -> None:
+    """truncate:true with empty content is the 'clear file' pattern."""
+    needs_verb(capabilities, "file.create")
+    needs_verb(capabilities, "file.write_at")
+    needs_verb(capabilities, "file.stat")
+
+    path = _create_fixture(update_client, b"to-be-cleared")
+    r = update_client.request("file.write_at", path, "0", "0",
+                              "--truncate", payload=b"")
+    assert isinstance(r, OkResponse)
+    body = json.loads(r.payload)
+    assert body["bytes_written"] == 0
+    assert body["new_size"] == 0
+
+    r = update_client.request("file.stat", path)
+    assert isinstance(r, OkResponse)
+    assert json.loads(r.payload)["size"] == 0
+
+
+def test_file_write_at_missing_path_returns_not_found(
+        update_client: WireClient, capabilities: dict) -> None:
+    needs_verb(capabilities, "file.write_at")
+    r = update_client.request("file.write_at", _scratch_path(),
+                              "0", "1", payload=b"x")
+    assert isinstance(r, ErrResponse)
+    assert r.code == "not_found"

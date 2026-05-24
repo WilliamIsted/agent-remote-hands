@@ -214,6 +214,7 @@ target_link_libraries(remote-hands-legacy-core PUBLIC
     user32              # input + window APIs
     gdi32               # BitBlt capture path
     gdiplus             # GDI+ PNG encoding (legacy image_encode seam)
+    windowscodecs       # WIC (clipboard.* image format DIB↔PNG; XP SP2 + redist)
     advapi32            # registry, security; CryptGenRandom (legacy rng seam)
     shell32             # ShellExecuteEx
     ole32               # COM core
@@ -226,7 +227,10 @@ target_link_libraries(remote-hands-legacy-core PUBLIC
     "$<$<CONFIG:Debug>:${WINSDK_UCRT_LIB_X64}/libucrtd.lib>"    # static UCRT debug
     # OMITTED vs modern: bcrypt (legacy uses CryptGenRandom via advapi32)
     #                    runtimeobject (WinRT loaded dynamically in ocr seam)
-    #                    windowscodecs (WIC — GDI+ used instead)
+    # NOTE: windowscodecs (WIC) is linked for the clipboard.* image format
+    # path (DIB↔PNG transcode). The screen.capture encoder still uses GDI+
+    # on legacy — only the additive clipboard helpers in image_encode.cpp
+    # pull in WIC here.
     # NOTE: UIAutomation is accessed entirely via COM (CoCreateInstance), so
     # uiautomationcore.dll generates NO hard PE imports — the binary loads on XP
     # without /DELAYLOAD. Capability gating in verb_enabled() ensures element.*

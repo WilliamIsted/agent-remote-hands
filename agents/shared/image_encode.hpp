@@ -40,4 +40,37 @@ std::vector<std::byte> encode_bmp(const screen::CapturedFrame& frame);
 // thread (Connection threads do).
 std::vector<std::byte> encode_png(const screen::CapturedFrame& frame);
 
+// ---------------------------------------------------------------------------
+// Clipboard DIB ↔ PNG helpers (CF_DIB / CF_DIBV5 transcode for clipboard.*).
+//
+// These are independent of the screen.capture encoder path above. They go via
+// the Windows Imaging Component (WIC), which is available on both modern and
+// legacy targets (windowscodecs.dll ships with Windows XP SP2 + redist;
+// standard on Vista+). Each function returns true on success and false on
+// COM/decoder failure (caller maps to an ARH error code).
+//
+// `dib_data` points to a packed CF_DIB block: a BITMAPINFOHEADER (or
+// BITMAPV5HEADER), optional colour table (palette / bitfields masks), then
+// pixel data — exactly the layout the clipboard hands back from
+// GetClipboardData(CF_DIB) / (CF_DIBV5). `dib_to_png` reads the header,
+// computes the pixel offset, asks WIC to decode it via a CreateDecoderFromStream
+// path with a synthesised BMP file header, then re-encodes the resulting
+// frame as a PNG.
+//
+// `png_to_dib` takes a PNG byte stream, decodes it via WIC, converts the
+// frame to 32bpp BGRA, and writes a CF_DIB block (BITMAPINFOHEADER + pixels;
+// no BITMAPFILEHEADER — that's only used for on-disk BMP files, never for
+// the clipboard) suitable for handing straight to SetClipboardData(CF_DIB).
+//
+// `width_out` / `height_out` are filled with the decoded image dimensions
+// (positive integers; negative heights from top-down DIBs are returned as
+// their absolute value so callers don't have to re-normalise).
+
+bool dib_to_png(const void* dib_data, std::size_t dib_size,
+                std::vector<std::byte>& out_png,
+                int& width_out, int& height_out);
+
+bool png_to_dib(const std::byte* png_data, std::size_t png_size,
+                std::vector<std::byte>& out_dib);
+
 }  // namespace remote_hands::image
