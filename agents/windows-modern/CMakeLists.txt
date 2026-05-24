@@ -50,6 +50,7 @@ add_compile_definitions(
     _WIN32_WINNT=0x0A00         # Target Windows 10 (1809+) APIs
     RH_MODERN                   # Modern-family marker (capture backends, etc.)
     RH_MCP                      # MCP framing + verbs_blob/system.verbs TU
+    RH_WS                       # RFC 6455 binary framing (modern-only)
 )
 
 if(MSVC)
@@ -108,6 +109,10 @@ target_sources(remote-hands-core PRIVATE
     ../shared/mcp/json_parse.cpp
     ../shared/mcp/mcp_codec.cpp
     ../shared/mcp/mcp_session.cpp
+    # RFC 6455 binary framing (PROTOCOL.md §1.5) — modern-only. Legacy and
+    # classic explicitly do not link this TU; legacy continues to reject
+    # `--framing ws` with `framing_unsupported`.
+    ../shared/ws/ws_codec.cpp
     # verbs (one file per namespace)
     ../shared/verbs/system.cpp
     ../shared/verbs/window.cpp

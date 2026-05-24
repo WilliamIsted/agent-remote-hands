@@ -35,8 +35,9 @@
 // is a windows-modern-only translation unit.
 
 #include "json_parse.hpp"
-#include "mcp_codec.hpp"
+#include "../ws/frame_codec.hpp"   // ws::IFrameCodec (codec-agnostic session)
 
+#include <memory>
 #include <string>
 
 namespace remote_hands {
@@ -47,10 +48,14 @@ namespace remote_hands::mcp {
 
 class McpSession {
 public:
+    // `codec` is owned by the session; it may be either an MCP-stdio codec
+    // (Content-Length framing, §1.6) or an RFC 6455 binary-frame codec
+    // (§1.5). The session loop is identical in both cases — only the
+    // on-wire delimiter encoding differs, which the codec abstracts away.
     // `negotiated_version` is the ARH protocol version string echoed in
     // serverInfo.version (e.g. "2.2").
     McpSession(Connection& conn,
-               McpCodec codec,
+               std::unique_ptr<ws::IFrameCodec> codec,
                std::string negotiated_version);
 
     // Runs the JSON-RPC loop until the transport closes or a fatal protocol
@@ -59,9 +64,9 @@ public:
     void run();
 
 private:
-    Connection&       conn_;
-    McpCodec          codec_;
-    std::string       negotiated_version_;
+    Connection&                       conn_;
+    std::unique_ptr<ws::IFrameCodec>  codec_;
+    std::string                       negotiated_version_;
     bool              initialized_ = false;
 
     // Frame handlers. `id_json` is the verbatim JSON text of the request's

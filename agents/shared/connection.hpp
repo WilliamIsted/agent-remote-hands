@@ -139,6 +139,10 @@ private:
     // windows-classic keeps the v2.1 header-line path.
     bool            switch_to_mcp_ = false;
     std::string     negotiated_protocol_;   // e.g. "2.2"
+    // Post-bootstrap framing the client selected via `--framing` on the
+    // hello line. "mcp" (default) or, on modern with RH_WS, "ws". run()
+    // reads this to decide which codec to construct at the handoff.
+    std::string     negotiated_framing_ = "mcp";
 
     std::unique_ptr<ElementTable>          element_table_;
     std::unique_ptr<SubscriptionRegistry>  subscriptions_;

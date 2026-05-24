@@ -25,6 +25,10 @@
 #include "platform.hpp"
 #include "mcp/mcp_codec.hpp"
 #include "mcp/mcp_session.hpp"
+#include "ws/frame_codec.hpp"
+#endif
+#ifdef RH_WS
+#include "ws/ws_codec.hpp"
 #endif
 
 #include <stdexcept>
@@ -60,6 +64,34 @@ std::string json_kv2(std::string_view k1, std::string_view v1,
     s += '}';
     return s;
 }
+
+#ifdef RH_MCP
+// Thin IFrameCodec adapter that owns an McpCodec by value and forwards every
+// virtual call to it. Lets McpSession remain codec-agnostic
+// (std::unique_ptr<ws::IFrameCodec>) without modifying mcp_codec.hpp/.cpp,
+// which is explicitly out of scope for the WS-framing landing. The adapter
+// is constructed here at handoff time and ownership is transferred to the
+// session.
+class McpFrameCodecAdapter final : public ws::IFrameCodec {
+public:
+    explicit McpFrameCodecAdapter(mcp::McpCodec codec)
+        : inner_{std::move(codec)} {}
+
+    std::optional<std::string> read_frame() override {
+        return inner_.read_frame();
+    }
+    void write_frame(const std::string& json) override {
+        inner_.write_frame(json);
+    }
+    void write_frame(const std::string& json,
+                     wire::ByteView blob) override {
+        inner_.write_frame(json, blob);
+    }
+
+private:
+    mcp::McpCodec inner_;
+};
+#endif
 
 }  // namespace
 
@@ -133,17 +165,32 @@ void Connection::run() {
             }
 
 #ifdef RH_MCP
-            // v2.2 framing handoff (§1.6). handle_hello() set this once the
-            // hello OK body has been written (ARH-framed) to the socket. From
-            // the next byte the connection speaks MCP-stdio. The bootstrap
-            // Reader may already hold pipelined MCP bytes (the client's
-            // `initialize` frame) — take_residual() moves them into the codec
-            // so they are not lost. The MCP session owns the socket until the
-            // transport closes; on return we fall through to the existing
-            // subscription teardown so cleanup is identical to the ARH path.
+            // v2.2 framing handoff (§1.5 / §1.6). handle_hello() set this
+            // once the hello OK body has been written (ARH-framed) to the
+            // socket. From the next byte the connection speaks the
+            // negotiated post-bootstrap framing — MCP-stdio
+            // (Content-Length) or, on modern with RH_WS, RFC 6455 binary
+            // frames. The bootstrap Reader may already hold pipelined bytes
+            // (the client's `initialize` frame) — take_residual() moves
+            // them into the codec so they are not lost. The session owns
+            // the socket until the transport closes; on return we fall
+            // through to the existing subscription teardown so cleanup is
+            // identical to the ARH path.
             if (switch_to_mcp_) {
-                log::debug(L"Switching connection to MCP framing");
-                mcp::McpCodec codec(reader_.socket(), reader_.take_residual());
+                std::unique_ptr<ws::IFrameCodec> codec;
+#ifdef RH_WS
+                if (negotiated_framing_ == "ws") {
+                    log::debug(L"Switching connection to WS framing");
+                    codec = std::make_unique<ws::WsCodec>(
+                        reader_.socket(), reader_.take_residual());
+                } else
+#endif
+                {
+                    log::debug(L"Switching connection to MCP framing");
+                    codec = std::make_unique<McpFrameCodecAdapter>(
+                        mcp::McpCodec(reader_.socket(),
+                                      reader_.take_residual()));
+                }
                 mcp::McpSession session(*this, std::move(codec),
                                         negotiated_protocol_);
                 session.run();
@@ -403,15 +450,21 @@ void Connection::handle_hello(const wire::Request& req) {
     negotiated_protocol_ = "2.2";
 
     if (framing == "ws") {
-        // WS framing (§1.5) is windows-modern-only and not implemented yet
-        // (a later phase). windows-legacy never supports ws regardless. Both
-        // reject explicitly (ARH-framed) so the client does not switch its
+#ifdef RH_WS
+        // WS framing (§1.5) — modern only. The actual codec swap happens in
+        // run() after the hello OK body has gone out (ARH-framed).
+        negotiated_framing_ = "ws";
+#else
+        // windows-legacy never supports ws regardless of build flags.
+        // Reject explicitly (ARH-framed) so the client does not switch its
         // parser. Empty-detail ERR per §1.2.
         writer_.write_err(ErrorCode::FramingUnsupported);
         state_ = State::Closed;
         return;
-    }
-    if (framing != "mcp") {
+#endif
+    } else if (framing == "mcp") {
+        negotiated_framing_ = "mcp";
+    } else {
         writer_.write_err(ErrorCode::FramingUnsupported);
         return;
     }
@@ -426,13 +479,14 @@ void Connection::handle_hello(const wire::Request& req) {
     json::append_kv_string(body, "os_name", sysinfo::os_name());     body += ',';
     json::append_kv_string(body, "os_version", sysinfo::os_version()); body += ',';
     json::append_kv_string(body, "session_id", make_session_id());   body += ',';
-    json::append_kv_string(body, "framing", "mcp");
+    json::append_kv_string(body, "framing", negotiated_framing_);
     body += '}';
 
     state_         = State::Connected;
     switch_to_mcp_ = true;     // run() performs the handoff after the OK body
-    log::info(L"Hello from %hs (protocol %hs, framing mcp)",
-              client_name.c_str(), version.c_str());
+    log::info(L"Hello from %hs (protocol %hs, framing %hs)",
+              client_name.c_str(), version.c_str(),
+              negotiated_framing_.c_str());
     writer_.write_ok(body);    // still ARH-framed (the hello response itself)
 }
 

@@ -199,7 +199,7 @@ void map_arguments(const JsonValue& args, wire::Request& req) {
 }  // namespace
 
 McpSession::McpSession(Connection& conn,
-                       McpCodec codec,
+                       std::unique_ptr<ws::IFrameCodec> codec,
                        std::string negotiated_version)
     : conn_{conn},
       codec_{std::move(codec)},
@@ -212,7 +212,7 @@ void McpSession::send_result(const std::string& id_json,
     frame += ",\"result\":";
     frame += result_obj;
     frame += '}';
-    codec_.write_frame(frame);
+    codec_->write_frame(frame);
 }
 
 void McpSession::send_error(const std::string& id_json, int code,
@@ -226,7 +226,7 @@ void McpSession::send_error(const std::string& id_json, int code,
     frame += ",\"message\":";
     append_json_string(frame, message);
     frame += "}}";
-    codec_.write_frame(frame);
+    codec_->write_frame(frame);
 }
 
 void McpSession::handle_initialize(const std::string& id_json,
@@ -369,7 +369,7 @@ void McpSession::handle_tools_call(const std::string& id_json,
         std::snprintf(nbuf, sizeof(nbuf), "%zu", cap.blob.size());
         frame += nbuf;
         frame += "}}";
-        codec_.write_frame(
+        codec_->write_frame(
             frame,
             wire::ByteView{
                 reinterpret_cast<const std::byte*>(cap.blob.data()),
@@ -418,7 +418,7 @@ void McpSession::run() {
     while (true) {
         std::optional<std::string> raw;
         try {
-            raw = codec_.read_frame();
+            raw = codec_->read_frame();
         } catch (const std::exception& ex) {
             // Malformed framing / truncation: log and end the session. The
             // socket state is unknown so we cannot reliably reply.

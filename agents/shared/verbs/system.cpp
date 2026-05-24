@@ -270,10 +270,14 @@ void info(Connection& conn, const wire::Request& req) {
     json::append_kv_string(j, "current_tier", to_wire(conn.tier()));       j += ',';
 
     // Wire-framing modes this agent honours in connection.hello. Both
-    // families speak MCP framing (RH_MCP); RFC 6455 binary framing ("ws")
-    // is not advertised by the current build.
+    // families speak MCP framing (RH_MCP); modern additionally speaks
+    // RFC 6455 binary framing when built with RH_WS (§1.5).
     json::append_string(j, "framings");
+#ifdef RH_WS
+    j += ":[\"mcp\",\"ws\"]";
+#else
     j += ":[\"mcp\"]";
+#endif
 
     j += '}';
     conn.writer().write_ok(j);
