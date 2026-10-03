@@ -28,6 +28,7 @@
 #define RH_VERBS_COMMON_H
 
 #include "../connection.h"
+#include "../json.h"
 
 #include <windows.h>
 
@@ -44,11 +45,18 @@ void rh_err_unknown_flag(RhConn* c, const char* flag);
 
 /* --- argument / flag parser ------------------------------------------- */
 
-#define RH_MAX_FLAGS 8
+#define RH_MAX_FLAGS 12
+
+/* has_val kinds */
+#define RH_FLAG_SWITCH 0  /* bare switch, no value                         */
+#define RH_FLAG_VALUE  1  /* consumes the following token as its value     */
+#define RH_FLAG_BOOL   2  /* boolean: bare (= true) or followed by an
+                           * explicit "true"/"false" token, which is
+                           * consumed. Read it with rh_arg_bool().          */
 
 typedef struct {
     const char* name;     /* e.g. "--format"                              */
-    int         has_val;  /* 1 => consumes the following token as a value */
+    int         has_val;  /* RH_FLAG_SWITCH / RH_FLAG_VALUE / RH_FLAG_BOOL */
 } RhFlagDef;
 
 typedef struct {
@@ -60,14 +68,36 @@ typedef struct {
     int         missing_val;        /* a value-flag had no following token */
 } RhArgs;
 
-/* Tokenise req->args against `defs`. A token that exactly matches a known
- * flag name is a flag (value-flags consume the next token); a token that
+/* Tokenise req->args against `defs`. A token that matches a known flag
+ * name is a flag (value-flags consume the next token). Flag names match
+ * with '-' and '_' treated as equal past the leading "--": the v2.1 suite
+ * sends "--timeout-ms" while spec-derived (v2.2 / MCP) callers send
+ * "--timeout_ms", and both name the same `timeout_ms` property. A token that
  * begins with "--" but matches no def is recorded in out->unknown; anything
  * else is a positional. Negative numbers ("-9999") are positionals (single
  * dash). Always inspect out->unknown first and emit
  * rh_err_unknown_flag() if set -- this is the conformance contract. */
 void rh_args_parse(const RhRequest* req, const RhFlagDef* defs,
                    int ndefs, RhArgs* out);
+
+/* Value of boolean flag `idx`: `dflt` when absent, 1 when bare or "true",
+ * 0 when "false". */
+int  rh_arg_bool(const RhArgs* a, int idx, int dflt);
+
+/* Value of flag `idx` if given, else positional `pos` if present, else
+ * NULL. For required spec args that the v2.1 grammar takes positionally
+ * but spec-derived callers may send named (e.g. `--path X`). */
+const char* rh_arg_named_or_pos(const RhArgs* a, int idx, int pos);
+
+/* Parse a decimal integer token strictly (optional leading '-'). Returns 1
+ * and sets *out on success, 0 if `s` is NULL, empty or has trailing junk. */
+int  rh_parse_long(const char* s, long* out);
+
+/* Case-insensitive glob match: '*' (any run) and '?' (any one char). */
+int  rh_glob_match(const char* pattern, const char* s);
+
+/* Case-insensitive substring test. */
+int  rh_contains_ci(const char* haystack, const char* needle);
 
 /* --- win: window-handle helpers --------------------------------------- */
 
@@ -86,7 +116,27 @@ void rh_hwnd_format(HWND h, char* buf, int cap);
 const char* rh_win32_code(DWORD err);
 
 /* Convert a Win32 FILETIME to Unix epoch seconds (used by file.stat and
- * directory.list/stat for the mtime_unix field). 0 if before 1970. */
+ * directory.list/stat for the *_unix_s fields). 0 if before 1970. */
 unsigned long rh_filetime_unix(const FILETIME* ft);
+
+/* --- filesystem helpers (file.* / directory.*) ------------------------ */
+
+/* Spec `type` for a set of file attributes: link / directory / file. */
+const char* rh_attr_type(DWORD attr);
+
+/* Emit the spec `flags` array value for a set of file attributes (call
+ * right after rh_json_key(j, "flags")). */
+void rh_json_attr_flags(RhJson* j, DWORD attr);
+
+/* Emit the shared stat members -- type, size, mtime_unix_s, ctime_unix_s,
+ * atime_unix_s, flags -- into the currently open JSON object. */
+void rh_json_find_stat(RhJson* j, const WIN32_FIND_DATAA* fd);
+
+/* dir + "\\" + name into out (cap bytes); tolerates a trailing separator
+ * already on `dir`. */
+void rh_path_join(const char* dir, const char* name, char* out, int cap);
+
+/* "." or ".." */
+int  rh_is_dot(const char* name);
 
 #endif /* RH_VERBS_COMMON_H */

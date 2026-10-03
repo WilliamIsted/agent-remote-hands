@@ -15,11 +15,13 @@
 
 #include "file.h"
 #include "common.h"
+#include "encoding.h"
 #include "../json.h"
 #include "../protocol.h"
 
 #include <windows.h>
 #include <wininet.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,79 +33,78 @@
 #ifndef INVALID_FILE_SIZE
 #define INVALID_FILE_SIZE ((DWORD)0xFFFFFFFF)
 #endif
+#ifndef INVALID_SET_FILE_POINTER
+#define INVALID_SET_FILE_POINTER ((DWORD)-1)
+#endif
+#ifndef MOVEFILE_REPLACE_EXISTING
+#define MOVEFILE_REPLACE_EXISTING 0x00000001
+#endif
 
-#define RH_FILE_MAX (64 * 1024 * 1024)
+#define RH_FILE_MAX       (64 * 1024 * 1024)  /* payload / write cap        */
+#define RH_FILE_READ_MAX  (16 * 1024 * 1024)  /* single file.read response  */
 
-/* --- file.read --------------------------------------------------------- */
+/* --- shared helpers ---------------------------------------------------- */
 
-void rh_verb_file_read(RhConn* c, const RhRequest* req)
+static RhJson* jopen(RhConn* c)
 {
-    RhArgs a;
-    HANDLE fh;
-    DWORD  size;
-    DWORD  got;
-    char*  buf;
-
-    rh_args_parse(req, NULL, 0, &a);
-    if (a.unknown != NULL) {
-        rh_err_unknown_flag(c, a.unknown);
-        return;
-    }
-    if (a.npos < 1) {
-        rh_err_msg(c, "invalid_args", "file.read requires <path>");
-        return;
-    }
-    fh = CreateFileA(a.pos[0], GENERIC_READ, FILE_SHARE_READ, NULL,
-                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (fh == INVALID_HANDLE_VALUE) {
-        rh_err(c, rh_win32_code(GetLastError()));
-        return;
-    }
-    size = GetFileSize(fh, NULL);
-    if (size == INVALID_FILE_SIZE) {
-        CloseHandle(fh);
-        rh_err(c, "permission_denied");
-        return;
-    }
-    if (size == 0) {
-        CloseHandle(fh);
-        rh_ok(c);
-        return;
-    }
-    if (size > RH_FILE_MAX) {
-        CloseHandle(fh);
-        rh_err_msg(c, "permission_denied", "file too large for classic read");
-        return;
-    }
-    buf = (char*)malloc((size_t)size);
-    if (buf == NULL) {
-        CloseHandle(fh);
+    RhJson* j = (RhJson*)malloc(sizeof(RhJson));
+    if (j == NULL) {
         rh_err(c, "wire_desync");
-        return;
+        return NULL;
     }
-    if (!ReadFile(fh, buf, size, &got, NULL)) {
-        free(buf);
-        CloseHandle(fh);
-        rh_err(c, rh_win32_code(GetLastError()));
-        return;
-    }
-    CloseHandle(fh);
-    rh_ok_bytes(c, buf, (int)got);
-    free(buf);
+    rh_json_init(j);
+    return j;
 }
 
-/* --- file.write -------------------------------------------------------- */
+static void jsend(RhConn* c, RhJson* j)
+{
+    const char* r = rh_json_finish(j);
+    if (r == NULL) {
+        rh_err(c, "wire_desync");
+    } else {
+        rh_ok_json(c, r);
+    }
+    free(j);
+}
 
+static int has_wildcard(const char* p)
+{
+    return (strchr(p, '*') != NULL || strchr(p, '?') != NULL) ? 1 : 0;
+}
+
+/* Stat one path (no wildcards). FindFirstFile fails on drive roots, so
+ * fall back to GetFileAttributes there. Returns 0 when absent. */
+static int stat_path(const char* path, WIN32_FIND_DATAA* fd)
+{
+    HANDLE h;
+    DWORD  attr;
+
+    h = FindFirstFileA(path, fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        FindClose(h);
+        return 1;
+    }
+    attr = GetFileAttributesA(path);
+    if (attr == INVALID_FILE_ATTRIBUTES) {
+        return 0;
+    }
+    memset(fd, 0, sizeof(*fd));
+    fd->dwFileAttributes = attr;
+    return 1;
+}
+
+/* Read the length-prefixed payload: 0 bytes -> *out NULL. Returns n, -1 for
+ * a bad length, -2 on wire failure. */
 static int read_body(RhConn* c, int n, char** out)
 {
     char* buf;
     int   rc;
 
+    *out = NULL;
     if (n < 0 || n > RH_FILE_MAX) {
         return -1;
     }
     if (n == 0) {
-        *out = NULL;
         return 0;
     }
     buf = (char*)malloc((size_t)n);
@@ -119,230 +120,612 @@ static int read_body(RhConn* c, int n, char** out)
     return n;
 }
 
-void rh_verb_file_write(RhConn* c, const RhRequest* req)
+/* Content for file.write / write_at / create. v2.1 carries it either as a
+ * `--content <text>` header arg or as a trailing <length> positional plus
+ * payload. The payload is ALWAYS consumed first (when a length is present)
+ * so an error reply never leaves body bytes on the wire.
+ *
+ * On success returns 1 with the on-disk bytes in *bytes (malloc'd or NULL)
+ * / *nbytes. On failure it has already replied and returns 0. Payload
+ * content under `binary` is taken as raw bytes (the payload is binary-
+ * clean); header-arg content under `binary` is base64. */
+static int get_content(RhConn* c, const RhArgs* a, int content_idx,
+                       int len_pos, int enc, char** bytes, int* nbytes)
 {
-    RhArgs a;
-    int    n;
-    char*  body;
-    int    got;
-    HANDLE fh;
-    DWORD  wrote;
+    const char* text;
+    char*       body;
+    int         got;
+    long        n;
 
-    rh_args_parse(req, NULL, 0, &a);
+    *bytes  = NULL;
+    *nbytes = 0;
+
+    if (len_pos < a->npos) {
+        if (!rh_parse_long(a->pos[len_pos], &n)) {
+            rh_err_msg(c, "invalid_args", "bad payload length");
+            return 0;
+        }
+        got = read_body(c, (int)n, &body);
+        if (got == -1) {
+            rh_err_msg(c, "invalid_args", "bad payload length");
+            return 0;
+        }
+        if (got == -2) {
+            rh_err(c, "wire_desync");
+            return 0;
+        }
+        if (a->seen[content_idx]) {
+            if (body != NULL) free(body);
+            rh_err_msg(c, "invalid_args",
+                       "give content as --content or a payload, not both");
+            return 0;
+        }
+        if (enc == RH_ENC_BINARY) {
+            *bytes  = body;
+            *nbytes = got;
+            return 1;
+        }
+        if (!rh_enc_encode(enc, body, got, bytes, nbytes)) {
+            if (body != NULL) free(body);
+            rh_err_msg(c, "invalid_args",
+                       "content not representable in the requested encoding");
+            return 0;
+        }
+        if (body != NULL) free(body);
+        return 1;
+    }
+
+    text = a->val[content_idx];
+    if (text == NULL) {
+        rh_err_msg(c, "invalid_args",
+                   "content required (--content or <length> + payload)");
+        return 0;
+    }
+    if (!rh_enc_encode(enc, text, (int)strlen(text), bytes, nbytes)) {
+        rh_err_msg(c, "invalid_args",
+                   (enc == RH_ENC_BINARY)
+                   ? "content is not valid base64"
+                   : "content not representable in the requested encoding");
+        return 0;
+    }
+    return 1;
+}
+
+/* Parse --encoding; replies invalid_args and returns -1 when unknown. */
+static int get_encoding(RhConn* c, const char* name)
+{
+    int enc = rh_enc_parse(name);
+    if (enc < 0) {
+        rh_err_msg(c, "invalid_args",
+                   "encoding must be one of utf-8|utf-16le|utf-16be|ascii"
+                   "|latin-1|cp1252|binary");
+    }
+    return enc;
+}
+
+/* Write `len` bytes to a new file (CREATE_NEW). Returns 1 / 0 (GetLastError
+ * is preserved on failure). */
+static int write_new(const char* path, const char* bytes, int len)
+{
+    HANDLE h;
+    DWORD  written;
+    BOOL   ok;
+    DWORD  e;
+
+    h = CreateFileA(path, GENERIC_WRITE, 0, NULL,
+                    CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    ok = TRUE;
+    written = 0;
+    if (len > 0) {
+        ok = WriteFile(h, bytes, (DWORD)len, &written, NULL);
+    }
+    e = GetLastError();
+    CloseHandle(h);
+    if (!ok || written != (DWORD)len) {
+        DeleteFileA(path);
+        SetLastError(e);
+        return 0;
+    }
+    return 1;
+}
+
+/* Replace `dst` with `src`. MoveFileEx is resolved at runtime: Win9x
+ * kernel32 lacks a working one, so fall back to CopyFile + DeleteFile
+ * (not atomic -- documented in the spec's copy_delete_fallback). */
+typedef BOOL (WINAPI *MoveFileExA_fn)(LPCSTR, LPCSTR, DWORD);
+
+static int replace_file(const char* src, const char* dst)
+{
+    static MoveFileExA_fn move_ex = NULL;
+    static int            probed  = 0;
+    DWORD                 e;
+
+    if (!probed) {
+        HMODULE k32 = GetModuleHandleA("kernel32.dll");
+        if (k32 != NULL) {
+            move_ex = (MoveFileExA_fn)GetProcAddress(k32, "MoveFileExA");
+        }
+        probed = 1;
+    }
+    if (move_ex != NULL) {
+        if (move_ex(src, dst, MOVEFILE_REPLACE_EXISTING)) {
+            return 1;
+        }
+        e = GetLastError();
+        if (e != ERROR_CALL_NOT_IMPLEMENTED) {
+            return 0;
+        }
+    }
+    if (!CopyFileA(src, dst, FALSE)) {
+        return 0;
+    }
+    DeleteFileA(src);
+    return 1;
+}
+
+static void temp_sibling(const char* path, char* out, int cap)
+{
+    _snprintf(out, (size_t)cap, "%s.rh-tmp.%lu", path,
+              (unsigned long)GetTickCount());
+    out[cap - 1] = '\0';
+}
+
+/* Append a JSON-escaped copy of s[0..n) (already valid UTF-8). */
+static char* json_escape_into(char* o, const char* s, int n)
+{
+    static const char kHex[] = "0123456789abcdef";
+    int i;
+
+    for (i = 0; i < n; ++i) {
+        unsigned char ch = (unsigned char)s[i];
+        switch (ch) {
+            case '"':  *o++ = '\\'; *o++ = '"';  break;
+            case '\\': *o++ = '\\'; *o++ = '\\'; break;
+            case '\n': *o++ = '\\'; *o++ = 'n';  break;
+            case '\r': *o++ = '\\'; *o++ = 'r';  break;
+            case '\t': *o++ = '\\'; *o++ = 't';  break;
+            default:
+                if (ch < 0x20) {
+                    *o++ = '\\'; *o++ = 'u'; *o++ = '0'; *o++ = '0';
+                    *o++ = kHex[ch >> 4];
+                    *o++ = kHex[ch & 15];
+                } else {
+                    *o++ = (char)ch;
+                }
+                break;
+        }
+    }
+    return o;
+}
+
+/* --- file.read --------------------------------------------------------- */
+
+void rh_verb_file_read(RhConn* c, const RhRequest* req)
+{
+    static const RhFlagDef defs[] = {
+        { "--encoding", RH_FLAG_VALUE },
+        { "--offset",   RH_FLAG_VALUE },
+        { "--length",   RH_FLAG_VALUE },
+        { "--path",     RH_FLAG_VALUE }
+    };
+    RhArgs      a;
+    const char* path;
+    int         enc;
+    long        offset;
+    long        length;
+    HANDLE      fh;
+    DWORD       size;
+    DWORD       want;
+    DWORD       got;
+    int         truncated;
+    char*       buf;
+    char*       text;
+    int         text_len;
+    char*       resp;
+    char*       o;
+
+    rh_args_parse(req, defs, 4, &a);
     if (a.unknown != NULL) {
         rh_err_unknown_flag(c, a.unknown);
         return;
     }
-    if (a.npos < 2) {
+    path = rh_arg_named_or_pos(&a, 3, 0);
+    if (path == NULL || a.missing_val) {
+        rh_err_msg(c, "invalid_args", "file.read requires <path>");
+        return;
+    }
+    enc = get_encoding(c, a.val[0]);
+    if (enc < 0) {
+        return;
+    }
+    offset = 0;
+    length = -1;
+    if ((a.val[1] != NULL && (!rh_parse_long(a.val[1], &offset) ||
+                              offset < 0)) ||
+        (a.val[2] != NULL && (!rh_parse_long(a.val[2], &length) ||
+                              length < 0))) {
         rh_err_msg(c, "invalid_args",
-                   "file.write requires <path> <length>");
+                   "offset / length must be non-negative integers");
         return;
     }
-    n   = atoi(a.pos[1]);
-    got = read_body(c, n, &body);
-    if (got == -1) {
-        rh_err_msg(c, "invalid_args", "bad payload length");
-        return;
-    }
-    if (got == -2) {
-        rh_err(c, "wire_desync");
-        return;
-    }
-    fh = CreateFileA(a.pos[0], GENERIC_WRITE, 0, NULL,
-                     CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    fh = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                     NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (fh == INVALID_HANDLE_VALUE) {
-        if (body != NULL) free(body);
         rh_err(c, rh_win32_code(GetLastError()));
         return;
     }
-    if (got > 0) {
-        if (!WriteFile(fh, body, (DWORD)got, &wrote, NULL)) {
-            free(body);
+    size = GetFileSize(fh, NULL);
+    if (size == INVALID_FILE_SIZE) {
+        CloseHandle(fh);
+        rh_err(c, "permission_denied");
+        return;
+    }
+    want = ((DWORD)offset >= size) ? 0 : size - (DWORD)offset;
+    truncated = 0;
+    if (length >= 0 && (DWORD)length < want) {
+        want = (DWORD)length;
+        truncated = 1;
+    }
+    if (want > RH_FILE_READ_MAX) {
+        CloseHandle(fh);
+        rh_err_msg(c, "invalid_args",
+                   "file too large for one read; page with "
+                   "--offset / --length");
+        return;
+    }
+    buf = (char*)malloc((size_t)want + 1);
+    if (buf == NULL) {
+        CloseHandle(fh);
+        rh_err(c, "wire_desync");
+        return;
+    }
+    got = 0;
+    if (want > 0) {
+        if (SetFilePointer(fh, offset, NULL, FILE_BEGIN) ==
+                INVALID_SET_FILE_POINTER ||
+            !ReadFile(fh, buf, want, &got, NULL)) {
+            free(buf);
             CloseHandle(fh);
             rh_err(c, rh_win32_code(GetLastError()));
             return;
         }
-        free(body);
     }
     CloseHandle(fh);
-    rh_ok(c);
+
+    if (!rh_enc_decode(enc, buf, (int)got, &text, &text_len)) {
+        free(buf);
+        rh_err(c, "wire_desync");
+        return;
+    }
+    free(buf);
+
+    /* Hand-built: the content can exceed RhJson's 64 KB cap. */
+    resp = (char*)malloc((size_t)text_len * 6 + 96);
+    if (resp == NULL) {
+        free(text);
+        rh_err(c, "wire_desync");
+        return;
+    }
+    o = resp;
+    memcpy(o, "{\"content\":\"", 12);
+    o += 12;
+    o = json_escape_into(o, text, text_len);
+    o += sprintf(o, "\",\"bytes_read\":%lu,\"truncated\":%s}",
+                 (unsigned long)((enc == RH_ENC_BINARY) ? (int)got
+                                                        : text_len),
+                 truncated ? "true" : "false");
+    *o = '\0';
+    free(text);
+    rh_ok_json(c, resp);
+    free(resp);
 }
+
+/* --- file.write -------------------------------------------------------- */
+
+static void send_write_result(RhConn* c, int written, int enc,
+                              int with_size, DWORD new_size)
+{
+    RhJson* j = jopen(c);
+    if (j == NULL) {
+        return;
+    }
+    rh_json_begin_obj(j);
+    rh_json_key(j, "bytes_written"); rh_json_int(j, (i32)written);
+    rh_json_key(j, "encoding");      rh_json_str(j, rh_enc_name(enc));
+    if (with_size) {
+        rh_json_key(j, "new_size");  rh_json_int(j, (i32)new_size);
+    }
+    rh_json_end_obj(j);
+    jsend(c, j);
+}
+
+void rh_verb_file_write(RhConn* c, const RhRequest* req)
+{
+    static const RhFlagDef defs[] = {
+        { "--content",  RH_FLAG_VALUE },
+        { "--encoding", RH_FLAG_VALUE },
+        { "--atomic",   RH_FLAG_BOOL  },
+        { "--path",     RH_FLAG_VALUE }
+    };
+    RhArgs      a;
+    const char* path;
+    int         enc;
+    char*       bytes;
+    int         nbytes;
+    DWORD       attr;
+    HANDLE      fh;
+    DWORD       wrote;
+    DWORD       e;
+    char        tmp[MAX_PATH + 32];
+
+    rh_args_parse(req, defs, 4, &a);
+    if (a.unknown != NULL) {
+        rh_err_unknown_flag(c, a.unknown);
+        return;
+    }
+    path = rh_arg_named_or_pos(&a, 3, 0);
+    if (path == NULL || a.missing_val) {
+        rh_err_msg(c, "invalid_args", "file.write requires <path>");
+        return;
+    }
+    enc = rh_enc_parse(a.val[1]);
+    if (!get_content(c, &a, 0, a.seen[3] ? 0 : 1,
+                     (enc < 0) ? RH_ENC_UTF8 : enc, &bytes, &nbytes)) {
+        return;
+    }
+    if (enc < 0) {
+        if (bytes != NULL) free(bytes);
+        get_encoding(c, a.val[1]);
+        return;
+    }
+
+    /* U-only: the target must already exist (file.create makes new). */
+    attr = GetFileAttributesA(path);
+    if (attr == INVALID_FILE_ATTRIBUTES) {
+        if (bytes != NULL) free(bytes);
+        rh_err_msg(c, "not_found",
+                   "file does not exist; use file.create to make it");
+        return;
+    }
+    if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+        if (bytes != NULL) free(bytes);
+        rh_err_msg(c, "invalid_args", "path is a directory");
+        return;
+    }
+
+    if (rh_arg_bool(&a, 2, 1)) {
+        temp_sibling(path, tmp, (int)sizeof(tmp));
+        if (!write_new(tmp, bytes, nbytes) || !replace_file(tmp, path)) {
+            e = GetLastError();
+            DeleteFileA(tmp);
+            if (bytes != NULL) free(bytes);
+            rh_err(c, rh_win32_code(e));
+            return;
+        }
+    } else {
+        fh = CreateFileA(path, GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                         TRUNCATE_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (fh == INVALID_HANDLE_VALUE) {
+            e = GetLastError();
+            if (bytes != NULL) free(bytes);
+            rh_err(c, rh_win32_code(e));
+            return;
+        }
+        if (nbytes > 0 &&
+            !WriteFile(fh, bytes, (DWORD)nbytes, &wrote, NULL)) {
+            e = GetLastError();
+            CloseHandle(fh);
+            free(bytes);
+            rh_err(c, rh_win32_code(e));
+            return;
+        }
+        CloseHandle(fh);
+    }
+    if (bytes != NULL) free(bytes);
+    send_write_result(c, nbytes, enc, 0, 0);
+}
+
+/* --- file.write_at ----------------------------------------------------- */
 
 void rh_verb_file_write_at(RhConn* c, const RhRequest* req)
 {
-    static const RhFlagDef defs[] = { { "--truncate", 0 } };
-    RhArgs a;
-    long   offset;
-    int    n;
-    char*  body;
-    int    got;
-    HANDLE fh;
-    DWORD  wrote;
-    DWORD  create;
+    static const RhFlagDef defs[] = {
+        { "--content",  RH_FLAG_VALUE },
+        { "--encoding", RH_FLAG_VALUE },
+        { "--truncate", RH_FLAG_BOOL  },
+        { "--path",     RH_FLAG_VALUE },
+        { "--offset",   RH_FLAG_VALUE }
+    };
+    RhArgs      a;
+    const char* path;
+    const char* off_s;
+    int         next_pos;
+    long        offset;
+    int         enc;
+    int         truncate;
+    char*       bytes;
+    int         nbytes;
+    HANDLE      fh;
+    DWORD       wrote;
+    DWORD       e;
+    DWORD       new_size;
 
-    rh_args_parse(req, defs, 1, &a);
+    rh_args_parse(req, defs, 5, &a);
     if (a.unknown != NULL) {
         rh_err_unknown_flag(c, a.unknown);
         return;
     }
-    if (a.npos < 3) {
+    /* Positional grammar: <path> <offset> [<length>]; either of the first
+     * two may instead come as --path / --offset. */
+    next_pos = 0;
+    path = a.seen[3] ? a.val[3] : (next_pos < a.npos ? a.pos[next_pos++]
+                                                     : NULL);
+    off_s = a.seen[4] ? a.val[4] : (next_pos < a.npos ? a.pos[next_pos++]
+                                                      : NULL);
+    if (path == NULL || off_s == NULL || a.missing_val) {
         rh_err_msg(c, "invalid_args",
-                   "file.write_at requires <path> <offset> <length>");
+                   "file.write_at requires <path> <offset>");
         return;
     }
-    offset = atol(a.pos[1]);
-    n      = atoi(a.pos[2]);
-    got    = read_body(c, n, &body);
-    if (got == -1) {
-        rh_err_msg(c, "invalid_args", "bad payload length");
+    enc = rh_enc_parse(a.val[1]);
+    if (!get_content(c, &a, 0, next_pos,
+                     (enc < 0) ? RH_ENC_UTF8 : enc, &bytes, &nbytes)) {
         return;
     }
-    if (got == -2) {
-        rh_err(c, "wire_desync");
+    if (enc < 0) {
+        if (bytes != NULL) free(bytes);
+        get_encoding(c, a.val[1]);
         return;
     }
-    create = (a.seen[0] && offset == 0) ? CREATE_ALWAYS : OPEN_ALWAYS;
-    fh = CreateFileA(a.pos[0], GENERIC_WRITE, 0, NULL,
-                     create, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (!rh_parse_long(off_s, &offset) || offset < 0) {
+        if (bytes != NULL) free(bytes);
+        rh_err_msg(c, "invalid_args",
+                   "offset must be a non-negative integer (32-bit on "
+                   "classic)");
+        return;
+    }
+    truncate = rh_arg_bool(&a, 2, 0);
+    if (truncate && offset != 0) {
+        if (bytes != NULL) free(bytes);
+        rh_err_msg(c, "invalid_args", "truncate requires offset 0");
+        return;
+    }
+
+    fh = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (fh == INVALID_HANDLE_VALUE) {
-        if (body != NULL) free(body);
-        rh_err(c, rh_win32_code(GetLastError()));
+        e = GetLastError();
+        if (bytes != NULL) free(bytes);
+        rh_err(c, rh_win32_code(e));
         return;
     }
-    SetFilePointer(fh, offset, NULL, FILE_BEGIN);
-    if (got > 0) {
-        if (!WriteFile(fh, body, (DWORD)got, &wrote, NULL)) {
-            free(body);
-            CloseHandle(fh);
-            rh_err(c, rh_win32_code(GetLastError()));
-            return;
-        }
-        free(body);
+    if (SetFilePointer(fh, offset, NULL, FILE_BEGIN) ==
+            INVALID_SET_FILE_POINTER ||
+        (truncate && !SetEndOfFile(fh)) ||
+        (nbytes > 0 && !WriteFile(fh, bytes, (DWORD)nbytes, &wrote, NULL))) {
+        e = GetLastError();
+        CloseHandle(fh);
+        if (bytes != NULL) free(bytes);
+        rh_err(c, rh_win32_code(e));
+        return;
     }
+    new_size = GetFileSize(fh, NULL);
     CloseHandle(fh);
-    rh_ok(c);
+    if (bytes != NULL) free(bytes);
+    send_write_result(c, nbytes, enc, 1, new_size);
 }
 
 /* --- file.stat / exists ------------------------------------------------ */
 
 void rh_verb_file_stat(RhConn* c, const RhRequest* req)
 {
+    static const RhFlagDef defs[] = { { "--path", RH_FLAG_VALUE } };
     RhArgs           a;
+    const char*      path;
     WIN32_FIND_DATAA fd;
-    HANDLE           h;
     RhJson*          j;
-    const char*      r;
-    int              is_dir;
 
-    rh_args_parse(req, NULL, 0, &a);
+    rh_args_parse(req, defs, 1, &a);
     if (a.unknown != NULL) {
         rh_err_unknown_flag(c, a.unknown);
         return;
     }
-    if (a.npos < 1) {
+    path = rh_arg_named_or_pos(&a, 0, 0);
+    if (path == NULL) {
         rh_err_msg(c, "invalid_args", "file.stat requires <path>");
         return;
     }
-    h = FindFirstFileA(a.pos[0], &fd);
-    if (h == INVALID_HANDLE_VALUE) {
+    if (has_wildcard(path)) {
+        rh_err_msg(c, "invalid_args", "wildcards not allowed in path");
+        return;
+    }
+    if (!stat_path(path, &fd)) {
         rh_err(c, "not_found");
         return;
     }
-    FindClose(h);
-    is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
-
-    j = (RhJson*)malloc(sizeof(RhJson));
+    j = jopen(c);
     if (j == NULL) {
-        rh_err(c, "wire_desync");
         return;
     }
-    rh_json_init(j);
     rh_json_begin_obj(j);
-    rh_json_key(j, "name");       rh_json_str(j, fd.cFileName);
-    rh_json_key(j, "type");       rh_json_str(j, is_dir ? "dir" : "file");
-    rh_json_key(j, "size");       rh_json_int(j, (i32)fd.nFileSizeLow);
-    rh_json_key(j, "mtime_unix");
-    rh_json_int(j, (i32)rh_filetime_unix(&fd.ftLastWriteTime));
+    rh_json_find_stat(j, &fd);
     rh_json_end_obj(j);
-    r = rh_json_finish(j);
-    if (r == NULL) {
-        rh_err(c, "wire_desync");
-    } else {
-        rh_ok_json(c, r);
-    }
-    free(j);
+    jsend(c, j);
 }
 
 void rh_verb_file_exists(RhConn* c, const RhRequest* req)
 {
+    static const RhFlagDef defs[] = { { "--path", RH_FLAG_VALUE } };
     RhArgs      a;
+    const char* path;
     DWORD       attr;
     RhJson*     j;
-    const char* r;
 
-    rh_args_parse(req, NULL, 0, &a);
+    rh_args_parse(req, defs, 1, &a);
     if (a.unknown != NULL) {
         rh_err_unknown_flag(c, a.unknown);
         return;
     }
-    if (a.npos < 1) {
+    path = rh_arg_named_or_pos(&a, 0, 0);
+    if (path == NULL) {
         rh_err_msg(c, "invalid_args", "file.exists requires <path>");
         return;
     }
-    j = (RhJson*)malloc(sizeof(RhJson));
+    attr = has_wildcard(path) ? INVALID_FILE_ATTRIBUTES
+                              : GetFileAttributesA(path);
+    j = jopen(c);
     if (j == NULL) {
-        rh_err(c, "wire_desync");
         return;
     }
-    rh_json_init(j);
     rh_json_begin_obj(j);
-    attr = GetFileAttributesA(a.pos[0]);
     if (attr == INVALID_FILE_ATTRIBUTES) {
         rh_json_key(j, "exists"); rh_json_bool(j, RH_FALSE);
+        rh_json_key(j, "type");   rh_json_str(j, "absent");
+        rh_json_key(j, "flags");  rh_json_attr_flags(j, 0);
     } else {
         rh_json_key(j, "exists"); rh_json_bool(j, RH_TRUE);
-        rh_json_key(j, "type");
-        rh_json_str(j, (attr & FILE_ATTRIBUTE_DIRECTORY) ? "dir" : "file");
+        rh_json_key(j, "type");   rh_json_str(j, rh_attr_type(attr));
+        rh_json_key(j, "flags");  rh_json_attr_flags(j, attr);
     }
     rh_json_end_obj(j);
-    r = rh_json_finish(j);
-    if (r == NULL) {
-        rh_err(c, "wire_desync");
-    } else {
-        rh_ok_json(c, r);
-    }
-    free(j);
+    jsend(c, j);
 }
 
 /* --- file.delete / rename / wait --------------------------------------- */
 
 void rh_verb_file_delete(RhConn* c, const RhRequest* req)
 {
-    RhArgs a;
-    DWORD  attr;
+    static const RhFlagDef defs[] = { { "--path", RH_FLAG_VALUE } };
+    RhArgs      a;
+    const char* path;
+    DWORD       attr;
 
-    rh_args_parse(req, NULL, 0, &a);
+    rh_args_parse(req, defs, 1, &a);
     if (a.unknown != NULL) {
         rh_err_unknown_flag(c, a.unknown);
         return;
     }
-    if (a.npos < 1) {
+    path = rh_arg_named_or_pos(&a, 0, 0);
+    if (path == NULL) {
         rh_err_msg(c, "invalid_args", "file.delete requires <path>");
         return;
     }
-    attr = GetFileAttributesA(a.pos[0]);
+    attr = GetFileAttributesA(path);
     if (attr == INVALID_FILE_ATTRIBUTES) {
         rh_err(c, "not_found");
         return;
     }
     if (attr & FILE_ATTRIBUTE_DIRECTORY) {
-        if (!RemoveDirectoryA(a.pos[0])) {
-            DWORD e = GetLastError();
-            rh_err(c, (e == ERROR_DIR_NOT_EMPTY) ? "not_empty"
-                                                 : rh_win32_code(e));
-            return;
-        }
-    } else if (!DeleteFileA(a.pos[0])) {
+        rh_err_msg(c, "invalid_args",
+                   "path is a directory; use directory.delete");
+        return;
+    }
+    if (!DeleteFileA(path)) {
         rh_err(c, rh_win32_code(GetLastError()));
         return;
     }
@@ -351,361 +734,228 @@ void rh_verb_file_delete(RhConn* c, const RhRequest* req)
 
 void rh_verb_file_rename(RhConn* c, const RhRequest* req)
 {
-    RhArgs a;
+    static const RhFlagDef defs[] = {
+        { "--overwrite", RH_FLAG_BOOL  },
+        { "--cross-fs",  RH_FLAG_BOOL  },
+        { "--src",       RH_FLAG_VALUE },
+        { "--dst",       RH_FLAG_VALUE }
+    };
+    RhArgs      a;
+    const char* src;
+    const char* dst;
+    const char* fallback;
+    DWORD       attr;
+    DWORD       e;
+    RhJson*     j;
 
-    rh_args_parse(req, NULL, 0, &a);
+    rh_args_parse(req, defs, 4, &a);
     if (a.unknown != NULL) {
         rh_err_unknown_flag(c, a.unknown);
         return;
     }
-    if (a.npos < 2) {
+    src = rh_arg_named_or_pos(&a, 2, 0);
+    dst = rh_arg_named_or_pos(&a, 3, a.seen[2] ? 0 : 1);
+    if (src == NULL || dst == NULL) {
         rh_err_msg(c, "invalid_args", "file.rename requires <src> <dst>");
         return;
     }
-    if (!MoveFileA(a.pos[0], a.pos[1])) {
-        rh_err(c, rh_win32_code(GetLastError()));
+    attr = GetFileAttributesA(src);
+    if (attr == INVALID_FILE_ATTRIBUTES) {
+        rh_err(c, "not_found");
         return;
     }
-    rh_ok(c);
+    if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+        rh_err_msg(c, "invalid_args",
+                   "src is a directory; use directory.rename");
+        return;
+    }
+    if (GetFileAttributesA(dst) != INVALID_FILE_ATTRIBUTES &&
+        !rh_arg_bool(&a, 0, 0)) {
+        rh_err(c, "already_exists");
+        return;
+    }
+
+    fallback = "none";
+    if (rh_arg_bool(&a, 0, 0) ? !replace_file(src, dst)
+                              : !MoveFileA(src, dst)) {
+        e = GetLastError();
+        if (e != ERROR_NOT_SAME_DEVICE) {
+            rh_err(c, rh_win32_code(e));
+            return;
+        }
+        if (!rh_arg_bool(&a, 1, 0)) {
+            rh_err_msg(c, "cross_device",
+                       "cross-filesystem move needs --cross-fs");
+            return;
+        }
+        if (!CopyFileA(src, dst, rh_arg_bool(&a, 0, 0) ? FALSE : TRUE)) {
+            rh_err(c, rh_win32_code(GetLastError()));
+            return;
+        }
+        DeleteFileA(src);
+        fallback = "copy_delete";
+    }
+
+    j = jopen(c);
+    if (j == NULL) {
+        return;
+    }
+    rh_json_begin_obj(j);
+    rh_json_key(j, "renamed");       rh_json_bool(j, RH_TRUE);
+    rh_json_key(j, "fallback_used"); rh_json_str(j, fallback);
+    rh_json_end_obj(j);
+    jsend(c, j);
 }
 
 void rh_verb_file_wait(RhConn* c, const RhRequest* req)
 {
-    RhArgs      a;
-    int         timeout_ms;
-    int         waited;
-    RhJson*     j;
-    const char* r;
-
-    rh_args_parse(req, NULL, 0, &a);
-    if (a.unknown != NULL) {
-        rh_err_unknown_flag(c, a.unknown);
-        return;
-    }
-    if (a.npos < 2) {
-        rh_err_msg(c, "invalid_args",
-                   "file.wait requires <pattern> <timeout-ms>");
-        return;
-    }
-    timeout_ms = atoi(a.pos[1]);
-    waited = 0;
-    for (;;) {
-        if (GetFileAttributesA(a.pos[0]) != INVALID_FILE_ATTRIBUTES) {
-            j = (RhJson*)malloc(sizeof(RhJson));
-            if (j == NULL) {
-                rh_err(c, "wire_desync");
-                return;
-            }
-            rh_json_init(j);
-            rh_json_begin_obj(j);
-            rh_json_key(j, "path");
-            rh_json_str(j, a.pos[0]);
-            rh_json_end_obj(j);
-            r = rh_json_finish(j);
-            if (r == NULL) {
-                rh_err(c, "wire_desync");
-            } else {
-                rh_ok_json(c, r);
-            }
-            free(j);
-            return;
-        }
-        if (waited >= timeout_ms) {
-            rh_err_kv(c, "timeout", "deadline", a.pos[1]);
-            return;
-        }
-        Sleep(100);
-        waited += 100;
-    }
-}
-
-/* --- file.create ------------------------------------------------------- */
-
-/* Transcode UTF-8 input (n bytes) -> wide (UTF-16 LE host order) then ->
- * target single-byte code page. Returns a malloc'd buffer in *out (caller
- * frees) and length in *out_len, or 0 on failure. */
-static int transcode_utf8_to_cp(const char* in, int n, UINT cp,
-                                unsigned char** out, int* out_len)
-{
-    int      wlen;
-    wchar_t* wbuf;
-    int      blen;
-    char*    bbuf;
-
-    wlen = MultiByteToWideChar(CP_UTF8, 0, in, n, NULL, 0);
-    if (wlen <= 0) {
-        return 0;
-    }
-    wbuf = (wchar_t*)malloc((size_t)wlen * sizeof(wchar_t));
-    if (wbuf == NULL) {
-        return 0;
-    }
-    if (MultiByteToWideChar(CP_UTF8, 0, in, n, wbuf, wlen) <= 0) {
-        free(wbuf);
-        return 0;
-    }
-    blen = WideCharToMultiByte(cp, 0, wbuf, wlen, NULL, 0, NULL, NULL);
-    if (blen <= 0) {
-        free(wbuf);
-        return 0;
-    }
-    bbuf = (char*)malloc((size_t)blen);
-    if (bbuf == NULL) {
-        free(wbuf);
-        return 0;
-    }
-    if (WideCharToMultiByte(cp, 0, wbuf, wlen, bbuf, blen, NULL, NULL) <= 0) {
-        free(wbuf);
-        free(bbuf);
-        return 0;
-    }
-    free(wbuf);
-    *out     = (unsigned char*)bbuf;
-    *out_len = blen;
-    return 1;
-}
-
-/* Transcode UTF-8 input (n bytes) -> UTF-16LE/BE byte stream (no BOM).
- * Returns a malloc'd buffer in *out (caller frees) and length in *out_len. */
-static int transcode_utf8_to_utf16(const char* in, int n, int big_endian,
-                                   unsigned char** out, int* out_len)
-{
-    int            wlen;
-    wchar_t*       wbuf;
-    unsigned char* bbuf;
-    int            i;
-
-    wlen = MultiByteToWideChar(CP_UTF8, 0, in, n, NULL, 0);
-    if (wlen < 0) {
-        return 0;
-    }
-    if (wlen == 0) {
-        *out     = NULL;
-        *out_len = 0;
-        return 1;
-    }
-    wbuf = (wchar_t*)malloc((size_t)wlen * sizeof(wchar_t));
-    if (wbuf == NULL) {
-        return 0;
-    }
-    if (MultiByteToWideChar(CP_UTF8, 0, in, n, wbuf, wlen) <= 0) {
-        free(wbuf);
-        return 0;
-    }
-    bbuf = (unsigned char*)malloc((size_t)wlen * 2);
-    if (bbuf == NULL) {
-        free(wbuf);
-        return 0;
-    }
-    for (i = 0; i < wlen; ++i) {
-        unsigned u = (unsigned short)wbuf[i];
-        if (big_endian) {
-            bbuf[i * 2]     = (unsigned char)((u >> 8) & 0xFF);
-            bbuf[i * 2 + 1] = (unsigned char)(u & 0xFF);
-        } else {
-            bbuf[i * 2]     = (unsigned char)(u & 0xFF);
-            bbuf[i * 2 + 1] = (unsigned char)((u >> 8) & 0xFF);
-        }
-    }
-    free(wbuf);
-    *out     = bbuf;
-    *out_len = wlen * 2;
-    return 1;
-}
-
-/* CREATE_NEW write: refuses if `path` already exists. Returns 1 / 0. */
-static int rh_classic_write_new(const char* path,
-                                const unsigned char* bytes, int len)
-{
-    HANDLE h;
-    DWORD  written;
-    BOOL   ok;
-
-    h = CreateFileA(path, GENERIC_WRITE, 0, NULL,
-                    CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) {
-        return 0;
-    }
-    if (len == 0) {
-        CloseHandle(h);
-        return 1;
-    }
-    written = 0;
-    ok = WriteFile(h, bytes, (DWORD)len, &written, NULL);
-    CloseHandle(h);
-    return (ok && written == (DWORD)len) ? 1 : 0;
-}
-
-void rh_verb_file_create(RhConn* c, const RhRequest* req)
-{
     static const RhFlagDef defs[] = {
-        { "--encoding",  1 },
-        { "--no-atomic", 0 }
+        { "--timeout-ms", RH_FLAG_VALUE },
+        { "--glob",       RH_FLAG_VALUE }
     };
-    RhArgs         a;
-    int            n;
-    char*          body;
-    int            got;
-    const char*    encoding;
-    int            atomic;
-    unsigned char* bytes;
-    int            bytes_len;
-    int            owned;
-    DWORD          attr;
-    char           tmp[MAX_PATH + 8];
-    DWORD          err;
-    RhJson*        j;
-    const char*    r;
+    RhArgs           a;
+    const char*      glob;
+    const char*      to_s;
+    long             timeout_ms;
+    DWORD            start;
+    WIN32_FIND_DATAA fd;
+    HANDLE           h;
+    char             dir[MAX_PATH];
+    char             full[MAX_PATH];
+    char*            slash;
+    RhJson*          j;
 
     rh_args_parse(req, defs, 2, &a);
     if (a.unknown != NULL) {
         rh_err_unknown_flag(c, a.unknown);
         return;
     }
-    if (a.npos < 2) {
-        rh_err_msg(c, "invalid_args",
-                   "file.create requires <path> <length>");
+    glob = rh_arg_named_or_pos(&a, 1, 0);
+    /* v2.0 grammar took the timeout positionally; still accepted. */
+    to_s = rh_arg_named_or_pos(&a, 0, a.seen[1] ? 0 : 1);
+    if (glob == NULL || a.missing_val) {
+        rh_err_msg(c, "invalid_args", "file.wait requires <glob>");
         return;
     }
-    n = atoi(a.pos[1]);
-    got = read_body(c, n, &body);
-    if (got == -1) {
-        rh_err_msg(c, "invalid_args", "bad payload length");
-        return;
-    }
-    if (got == -2) {
-        rh_err(c, "wire_desync");
+    timeout_ms = 30000;
+    if (to_s != NULL && (!rh_parse_long(to_s, &timeout_ms) ||
+                         timeout_ms < 0)) {
+        rh_err_msg(c, "invalid_args", "timeout_ms must be >= 0");
         return;
     }
 
-    encoding = a.val[0];
-    if (encoding == NULL) {
-        encoding = "utf-8";
+    /* Directory part of the glob, for building the matched full path. */
+    _snprintf(dir, sizeof(dir), "%s", glob);
+    dir[sizeof(dir) - 1] = '\0';
+    slash = strrchr(dir, '\\');
+    if (slash == NULL) {
+        slash = strrchr(dir, '/');
     }
-    atomic = a.seen[1] ? 0 : 1;
-
-    /* Decode/transcode payload into `bytes` / `bytes_len`. `owned` tracks
-     * whether `bytes` is a fresh allocation we must free, vs aliasing
-     * `body`. */
-    bytes     = NULL;
-    bytes_len = 0;
-    owned     = 0;
-    if (strcmp(encoding, "utf-8") == 0 ||
-        strcmp(encoding, "binary") == 0) {
-        bytes     = (unsigned char*)body;
-        bytes_len = got;
-        owned     = 0;
-    } else if (strcmp(encoding, "utf-16le") == 0 ||
-               strcmp(encoding, "utf-16be") == 0) {
-        int be = (encoding[6] == 'b') ? 1 : 0;
-        if (!transcode_utf8_to_utf16(body, got, be, &bytes, &bytes_len)) {
-            if (body != NULL) free(body);
-            rh_err_msg(c, "invalid_args",
-                       "file.create encoding transcode failed");
-            return;
-        }
-        owned = 1;
-    } else if (strcmp(encoding, "cp1252") == 0 ||
-               strcmp(encoding, "ascii") == 0 ||
-               strcmp(encoding, "latin-1") == 0) {
-        UINT cp = (strcmp(encoding, "ascii") == 0)   ? 20127u
-                 : (strcmp(encoding, "latin-1") == 0) ? 28591u
-                                                      : 1252u;
-        if (!transcode_utf8_to_cp(body, got, cp, &bytes, &bytes_len)) {
-            if (body != NULL) free(body);
-            rh_err_msg(c, "invalid_args",
-                       "file.create encoding transcode failed");
-            return;
-        }
-        owned = 1;
+    if (slash != NULL) {
+        slash[1] = '\0';
     } else {
-        if (body != NULL) free(body);
-        rh_err_msg(c, "invalid_args",
-                   "file.create 'encoding' must be one of utf-8|utf-16le"
-                   "|utf-16be|ascii|latin-1|cp1252|binary");
+        dir[0] = '\0';
+    }
+
+    start = GetTickCount();
+    for (;;) {
+        h = FindFirstFileA(glob, &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!rh_is_dot(fd.cFileName)) {
+                    break;
+                }
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+            if (!rh_is_dot(fd.cFileName)) {
+                _snprintf(full, sizeof(full), "%s%s", dir, fd.cFileName);
+                full[sizeof(full) - 1] = '\0';
+                j = jopen(c);
+                if (j == NULL) {
+                    return;
+                }
+                rh_json_begin_obj(j);
+                rh_json_key(j, "path"); rh_json_str(j, full);
+                rh_json_key(j, "type");
+                rh_json_str(j, rh_attr_type(fd.dwFileAttributes));
+                rh_json_end_obj(j);
+                jsend(c, j);
+                return;
+            }
+        }
+        if ((long)(GetTickCount() - start) >= timeout_ms) {
+            rh_err_kv(c, "timeout", "glob", glob);
+            return;
+        }
+        Sleep(100);
+    }
+}
+
+/* --- file.create ------------------------------------------------------- */
+
+void rh_verb_file_create(RhConn* c, const RhRequest* req)
+{
+    static const RhFlagDef defs[] = {
+        { "--content",  RH_FLAG_VALUE },
+        { "--encoding", RH_FLAG_VALUE },
+        { "--atomic",   RH_FLAG_BOOL  },
+        { "--path",     RH_FLAG_VALUE }
+    };
+    RhArgs      a;
+    const char* path;
+    int         enc;
+    char*       bytes;
+    int         nbytes;
+    char        tmp[MAX_PATH + 32];
+    DWORD       err;
+
+    rh_args_parse(req, defs, 4, &a);
+    if (a.unknown != NULL) {
+        rh_err_unknown_flag(c, a.unknown);
+        return;
+    }
+    path = rh_arg_named_or_pos(&a, 3, 0);
+    if (path == NULL || a.missing_val) {
+        rh_err_msg(c, "invalid_args", "file.create requires <path>");
+        return;
+    }
+    enc = rh_enc_parse(a.val[1]);
+    if (!get_content(c, &a, 0, a.seen[3] ? 0 : 1,
+                     (enc < 0) ? RH_ENC_UTF8 : enc, &bytes, &nbytes)) {
+        return;
+    }
+    if (enc < 0) {
+        if (bytes != NULL) free(bytes);
+        get_encoding(c, a.val[1]);
         return;
     }
 
-    /* Refuse-if-exists probe. CREATE_NEW would also catch this, but the
-     * explicit probe lets us return already_exists before touching the
-     * temp file in the atomic path. */
-    attr = GetFileAttributesA(a.pos[0]);
-    if (attr != INVALID_FILE_ATTRIBUTES) {
-        if (owned && bytes != NULL) free(bytes);
-        if (body != NULL) free(body);
+    if (GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES) {
+        if (bytes != NULL) free(bytes);
         rh_err_msg(c, "already_exists",
                    "file already exists; use file.write to overwrite");
         return;
     }
 
-    if (atomic) {
-        _snprintf(tmp, sizeof(tmp), "%s.rh-tmp", a.pos[0]);
-        tmp[sizeof(tmp) - 1] = '\0';
-        DeleteFileA(tmp);   /* best-effort cleanup */
-        if (!rh_classic_write_new(tmp, bytes, bytes_len)) {
+    if (rh_arg_bool(&a, 2, 1)) {
+        /* Temp + MoveFile (no replace): the rename fails if the target
+         * appeared meanwhile, giving already_exists. */
+        temp_sibling(path, tmp, (int)sizeof(tmp));
+        if (!write_new(tmp, bytes, nbytes) || !MoveFileA(tmp, path)) {
             err = GetLastError();
             DeleteFileA(tmp);
-            if (owned && bytes != NULL) free(bytes);
-            if (body != NULL) free(body);
-            if (err == ERROR_PATH_NOT_FOUND) {
-                rh_err_msg(c, "not_found",
-                           "parent directory does not exist "
-                           "(use directory.create first)");
-            } else {
-                rh_err(c, rh_win32_code(err));
-            }
-            return;
-        }
-        /* MoveFileA without MOVEFILE_REPLACE_EXISTING -- CREATE_NEW above
-         * guarantees the target does not exist (and we re-probed before
-         * the temp write). */
-        if (!MoveFileA(tmp, a.pos[0])) {
-            err = GetLastError();
-            DeleteFileA(tmp);
-            if (owned && bytes != NULL) free(bytes);
-            if (body != NULL) free(body);
+            if (bytes != NULL) free(bytes);
             rh_err(c, rh_win32_code(err));
             return;
         }
-    } else {
-        if (!rh_classic_write_new(a.pos[0], bytes, bytes_len)) {
-            err = GetLastError();
-            if (owned && bytes != NULL) free(bytes);
-            if (body != NULL) free(body);
-            if (err == ERROR_FILE_EXISTS) {
-                rh_err_msg(c, "already_exists",
-                           "file already exists; use file.write to overwrite");
-            } else if (err == ERROR_PATH_NOT_FOUND) {
-                rh_err_msg(c, "not_found",
-                           "parent directory does not exist "
-                           "(use directory.create first)");
-            } else {
-                rh_err(c, rh_win32_code(err));
-            }
-            return;
-        }
-    }
-
-    if (owned && bytes != NULL) free(bytes);
-    if (body != NULL) free(body);
-
-    j = (RhJson*)malloc(sizeof(RhJson));
-    if (j == NULL) {
-        rh_err(c, "wire_desync");
+    } else if (!write_new(path, bytes, nbytes)) {
+        err = GetLastError();
+        if (bytes != NULL) free(bytes);
+        rh_err(c, rh_win32_code(err));
         return;
     }
-    rh_json_init(j);
-    rh_json_begin_obj(j);
-    rh_json_key(j, "bytes_written"); rh_json_int(j, (i32)bytes_len);
-    rh_json_key(j, "encoding");      rh_json_str(j, encoding);
-    rh_json_end_obj(j);
-    r = rh_json_finish(j);
-    if (r == NULL) {
-        rh_err(c, "wire_desync");
-    } else {
-        rh_ok_json(c, r);
-    }
-    free(j);
+    if (bytes != NULL) free(bytes);
+    send_write_result(c, nbytes, enc, 0, 0);
 }
 
 /* --- file.download ----------------------------------------------------- */

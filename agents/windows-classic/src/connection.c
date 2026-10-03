@@ -165,6 +165,12 @@ static int version_classic_ok(const char* v)
  * suite's needs_verb() skips their tests. system.* power verbs are likewise
  * unimplemented on classic (needs_verb-gated) and intentionally absent. */
 
+/* connection.* verbs are dispatched by name ahead of the table (pre-hello
+ * gate, tier-agnostic), but they are listed here too so that
+ * system.capabilities -- built from this table -- advertises them. These
+ * stubs are never reached through find_verb(). */
+static void conn_verb_stub(RhConn* c, const RhRequest* req);
+
 typedef struct {
     const char* verb;
     int         tier;
@@ -172,6 +178,13 @@ typedef struct {
 } VerbEntry;
 
 static const VerbEntry kVerbs[] = {
+    /* connection.* (advertisement only; see conn_verb_stub) */
+    { "connection.hello",          RH_TIER_READ,        conn_verb_stub              },
+    { "connection.tier_raise",     RH_TIER_READ,        conn_verb_stub              },
+    { "connection.tier_drop",      RH_TIER_READ,        conn_verb_stub              },
+    { "connection.reset",          RH_TIER_READ,        conn_verb_stub              },
+    { "connection.close",          RH_TIER_READ,        conn_verb_stub              },
+
     /* system.* */
     { "system.info",               RH_TIER_READ,        rh_verb_system_info         },
     { "system.capabilities",       RH_TIER_READ,        rh_verb_system_capabilities },
@@ -179,13 +192,13 @@ static const VerbEntry kVerbs[] = {
 
     /* system.power.* */
     { "system.power.blockers",     RH_TIER_READ,        rh_verb_power_blockers  },
-    { "system.power.lock",         RH_TIER_READ,        rh_verb_power_lock      },
+    { "system.power.lock",         RH_TIER_EXTRA_RISKY, rh_verb_power_lock      },
     { "system.power.reboot",       RH_TIER_EXTRA_RISKY, rh_verb_power_reboot    },
     { "system.power.shutdown",     RH_TIER_EXTRA_RISKY, rh_verb_power_shutdown  },
     { "system.power.logoff",       RH_TIER_EXTRA_RISKY, rh_verb_power_logoff    },
     { "system.power.hibernate",    RH_TIER_EXTRA_RISKY, rh_verb_power_hibernate },
     { "system.power.sleep",        RH_TIER_EXTRA_RISKY, rh_verb_power_sleep     },
-    { "system.power.cancel",       RH_TIER_EXTRA_RISKY, rh_verb_power_cancel    },
+    { "system.power.cancel",       RH_TIER_UPDATE,      rh_verb_power_cancel    },
 
     /* screen.* */
     { "screen.capture",      RH_TIER_READ,        rh_verb_screen_capture      },
@@ -233,7 +246,8 @@ static const VerbEntry kVerbs[] = {
     { "directory.exists",    RH_TIER_READ,        rh_verb_directory_exists    },
     { "directory.create",    RH_TIER_CREATE,      rh_verb_directory_create    },
     { "directory.rename",    RH_TIER_UPDATE,      rh_verb_directory_rename    },
-    { "directory.remove",    RH_TIER_DELETE,      rh_verb_directory_remove    },
+    { "directory.delete",    RH_TIER_DELETE,      rh_verb_directory_remove    },
+    { "directory.remove",    RH_TIER_DELETE,      rh_verb_directory_remove    },  /* v2.0 alias */
 
     /* process.* */
     { "process.list",        RH_TIER_READ,        rh_verb_process_list        },
@@ -305,6 +319,12 @@ void rh_verb_table_get(int i, const char** verb_out,
 }
 
 /* --- connection.* handlers (port of shared/connection.cpp) ------------- */
+
+static void conn_verb_stub(RhConn* c, const RhRequest* req)
+{
+    (void)req;
+    rh_send_err(c->sock, "wire_desync");   /* unreachable: dispatched above */
+}
 
 static void handle_hello(RhConn* c, const RhRequest* req)
 {
@@ -491,6 +511,11 @@ void rh_connection_run(SOCKET s)
 
     while (c.state != RH_ST_CLOSED) {
         rc = rh_read_request(&c.reader, &req);
+        if (rc == RH_PROTO_DESYNC) {
+            err_kv(c.sock, "wire_desync", "message",
+                   "header exceeds 65535 bytes; line discarded");
+            continue;
+        }
         if (rc != RH_PROTO_OK) {
             break;   /* EOF or fatal wire error */
         }

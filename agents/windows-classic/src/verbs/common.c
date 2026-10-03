@@ -17,6 +17,7 @@
 #include "../json.h"
 #include "../protocol.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -94,6 +95,32 @@ static int is_double_dash(const char* t)
     return (t != NULL && t[0] == '-' && t[1] == '-') ? 1 : 0;
 }
 
+/* Flag-name compare with '-' == '_' (see common.h). */
+static int flag_eq(const char* tok, const char* name)
+{
+    char a;
+    char b;
+
+    for (;;) {
+        a = *tok++;
+        b = *name++;
+        if (a == '_') a = '-';
+        if (b == '_') b = '-';
+        if (a != b) {
+            return 0;
+        }
+        if (a == '\0') {
+            return 1;
+        }
+    }
+}
+
+static int is_bool_word(const char* t)
+{
+    return (t != NULL &&
+            (strcmp(t, "true") == 0 || strcmp(t, "false") == 0)) ? 1 : 0;
+}
+
 void rh_args_parse(const RhRequest* req, const RhFlagDef* defs,
                    int ndefs, RhArgs* out)
 {
@@ -114,10 +141,17 @@ void rh_args_parse(const RhRequest* req, const RhFlagDef* defs,
         int matched = 0;
 
         for (k = 0; k < ndefs && k < RH_MAX_FLAGS; ++k) {
-            if (strcmp(tok, defs[k].name) == 0) {
+            if (flag_eq(tok, defs[k].name)) {
                 matched = 1;
                 out->seen[k] = 1;
-                if (defs[k].has_val) {
+                if (defs[k].has_val == RH_FLAG_BOOL) {
+                    if (i + 1 < req->argc && is_bool_word(req->args[i + 1])) {
+                        out->val[k] = req->args[i + 1];
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                } else if (defs[k].has_val) {
                     if (i + 1 < req->argc) {
                         out->val[k] = req->args[i + 1];
                         i += 2;
@@ -149,6 +183,95 @@ void rh_args_parse(const RhRequest* req, const RhFlagDef* defs,
         }
         i += 1;
     }
+}
+
+int rh_arg_bool(const RhArgs* a, int idx, int dflt)
+{
+    if (!a->seen[idx]) {
+        return dflt;
+    }
+    if (a->val[idx] != NULL && strcmp(a->val[idx], "false") == 0) {
+        return 0;
+    }
+    return 1;
+}
+
+const char* rh_arg_named_or_pos(const RhArgs* a, int idx, int pos)
+{
+    if (idx >= 0 && a->seen[idx] && a->val[idx] != NULL) {
+        return a->val[idx];
+    }
+    if (pos >= 0 && pos < a->npos) {
+        return a->pos[pos];
+    }
+    return NULL;
+}
+
+int rh_parse_long(const char* s, long* out)
+{
+    char* end;
+    long  v;
+
+    if (s == NULL || s[0] == '\0') {
+        return 0;
+    }
+    v = strtol(s, &end, 10);
+    if (*end != '\0') {
+        return 0;
+    }
+    *out = v;
+    return 1;
+}
+
+static int lower_ch(int ch)
+{
+    return (ch >= 'A' && ch <= 'Z') ? ch - 'A' + 'a' : ch;
+}
+
+int rh_glob_match(const char* p, const char* s)
+{
+    const char* star_p = NULL;
+    const char* star_s = NULL;
+
+    while (*s != '\0') {
+        if (*p == '*') {
+            star_p = ++p;
+            star_s = s;
+        } else if (*p == '?' || (*p != '\0' &&
+                   lower_ch((unsigned char)*p) ==
+                   lower_ch((unsigned char)*s))) {
+            ++p;
+            ++s;
+        } else if (star_p != NULL) {
+            p = star_p;
+            s = ++star_s;
+        } else {
+            return 0;
+        }
+    }
+    while (*p == '*') {
+        ++p;
+    }
+    return (*p == '\0') ? 1 : 0;
+}
+
+int rh_contains_ci(const char* h, const char* n)
+{
+    int i;
+
+    if (n == NULL || n[0] == '\0') {
+        return 1;
+    }
+    for (; *h != '\0'; ++h) {
+        for (i = 0; n[i] != '\0' && h[i] != '\0' &&
+                    lower_ch((unsigned char)h[i]) ==
+                    lower_ch((unsigned char)n[i]); ++i) {
+        }
+        if (n[i] == '\0') {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* --- win: window-handle helpers --------------------------------------- */
@@ -228,4 +351,102 @@ unsigned long rh_filetime_unix(const FILETIME* ft)
     }
     secs = (u.QuadPart - 116444736000000000ui64) / 10000000ui64;
     return (unsigned long)secs;
+}
+
+/* --- filesystem helpers ------------------------------------------------ */
+
+#ifndef FILE_ATTRIBUTE_REPARSE_POINT
+#define FILE_ATTRIBUTE_REPARSE_POINT      0x00000400
+#endif
+#ifndef FILE_ATTRIBUTE_SPARSE_FILE
+#define FILE_ATTRIBUTE_SPARSE_FILE        0x00000200
+#endif
+#ifndef FILE_ATTRIBUTE_ENCRYPTED
+#define FILE_ATTRIBUTE_ENCRYPTED          0x00004000
+#endif
+#ifndef FILE_ATTRIBUTE_NOT_CONTENT_INDEXED
+#define FILE_ATTRIBUTE_NOT_CONTENT_INDEXED 0x00002000
+#endif
+#ifndef FILE_ATTRIBUTE_OFFLINE
+#define FILE_ATTRIBUTE_OFFLINE            0x00001000
+#endif
+
+const char* rh_attr_type(DWORD attr)
+{
+    if (attr & FILE_ATTRIBUTE_REPARSE_POINT) {
+        return "link";
+    }
+    if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+        return "directory";
+    }
+    return "file";
+}
+
+void rh_json_attr_flags(RhJson* j, DWORD attr)
+{
+    static const struct { DWORD bit; const char* name; } kFlags[] = {
+        { FILE_ATTRIBUTE_READONLY,            "readonly"      },
+        { FILE_ATTRIBUTE_HIDDEN,              "hidden"        },
+        { FILE_ATTRIBUTE_SYSTEM,              "system"        },
+        { FILE_ATTRIBUTE_ARCHIVE,             "archive"       },
+        { FILE_ATTRIBUTE_TEMPORARY,           "temporary"     },
+        { FILE_ATTRIBUTE_COMPRESSED,          "compressed"    },
+        { FILE_ATTRIBUTE_ENCRYPTED,           "encrypted"     },
+        { FILE_ATTRIBUTE_SPARSE_FILE,         "sparse_file"   },
+        { FILE_ATTRIBUTE_REPARSE_POINT,       "reparse_point" },
+        { FILE_ATTRIBUTE_OFFLINE,             "offline"       },
+        { FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, "not_indexed"   }
+    };
+    int i;
+
+    rh_json_begin_arr(j);
+    for (i = 0; i < (int)(sizeof(kFlags) / sizeof(kFlags[0])); ++i) {
+        if (attr & kFlags[i].bit) {
+            rh_json_arr_str(j, kFlags[i].name);
+        }
+    }
+    rh_json_end_arr(j);
+}
+
+void rh_json_find_stat(RhJson* j, const WIN32_FIND_DATAA* fd)
+{
+    char  num[32];
+    int   is_dir = (fd->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+    double size;
+
+    /* Byte size can exceed i32; emit it as a raw JSON number. Directories
+     * report 0 per the spec. */
+    size = is_dir ? 0.0
+                  : (double)fd->nFileSizeHigh * 4294967296.0 +
+                    (double)fd->nFileSizeLow;
+    _snprintf(num, sizeof(num), "%.0f", size);
+    num[sizeof(num) - 1] = '\0';
+
+    rh_json_key(j, "type");  rh_json_str(j, rh_attr_type(fd->dwFileAttributes));
+    rh_json_key(j, "size");  rh_json_raw(j, num);
+    rh_json_key(j, "mtime_unix_s");
+    rh_json_int(j, (i32)rh_filetime_unix(&fd->ftLastWriteTime));
+    rh_json_key(j, "ctime_unix_s");
+    rh_json_int(j, (i32)rh_filetime_unix(&fd->ftCreationTime));
+    rh_json_key(j, "atime_unix_s");
+    rh_json_int(j, (i32)rh_filetime_unix(&fd->ftLastAccessTime));
+    rh_json_key(j, "flags");
+    rh_json_attr_flags(j, fd->dwFileAttributes);
+}
+
+void rh_path_join(const char* dir, const char* name, char* out, int cap)
+{
+    int dl = (int)strlen(dir);
+    if (dl > 0 && (dir[dl - 1] == '\\' || dir[dl - 1] == '/')) {
+        _snprintf(out, (size_t)cap, "%s%s", dir, name);
+    } else {
+        _snprintf(out, (size_t)cap, "%s\\%s", dir, name);
+    }
+    out[cap - 1] = '\0';
+}
+
+int rh_is_dot(const char* n)
+{
+    return (n[0] == '.' && (n[1] == '\0' ||
+            (n[1] == '.' && n[2] == '\0'))) ? 1 : 0;
 }

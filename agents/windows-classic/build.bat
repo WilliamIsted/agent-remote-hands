@@ -34,7 +34,7 @@ set SRCS=src\main.c src\server.c src\connection.c src\protocol.c src\json.c src\
  src\debug.c src\socket_watchdog.c src\power_watcher.c ^
  src\verbs\system.c src\verbs\system_power.c src\verbs\common.c src\verbs\screen.c src\verbs\window.c ^
  src\verbs\input.c src\verbs\file.c src\verbs\directory.c src\verbs\process.c ^
- src\verbs\registry.c src\verbs\clipboard.c src\verbs\watch.c
+ src\verbs\registry.c src\verbs\clipboard.c src\verbs\watch.c src\verbs\encoding.c
 
 REM cl.exe strips quotes when forwarding /LIBPATH: to link.exe, so paths with
 REM spaces (Program Files) are split and misread as object files.  Set LIB and

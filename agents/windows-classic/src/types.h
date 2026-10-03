@@ -46,7 +46,7 @@ typedef unsigned long ULONG_PTR;
 #define RH_MAX_HEADER_LEN  65535
 #define RH_MAX_VERB_LEN       64
 #define RH_MAX_ARG_LEN       512
-#define RH_MAX_ARGS            8
+#define RH_MAX_ARGS           16
 
 /* JSON response buffer. W8 sized this 8192 for the three system.* verbs.
  * W9 returns directory.list / process.list / window.list / registry.read

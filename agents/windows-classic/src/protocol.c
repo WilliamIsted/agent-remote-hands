@@ -119,6 +119,7 @@ int rh_reader_init(RhReader* r, SOCKET s)
 {
     r->sock = s;
     r->have = 0;
+    r->skipping = 0;
     r->buf = (char*)malloc(RH_READ_CAP);
     if (r->buf == NULL) {
         return RH_PROTO_ERR;
@@ -138,6 +139,7 @@ void rh_reader_free(RhReader* r)
 void rh_reader_flush(RhReader* r)
 {
     r->have = 0;
+    r->skipping = 0;
 }
 
 int rh_read_request(RhReader* r, RhRequest* req)
@@ -148,6 +150,32 @@ int rh_read_request(RhReader* r, RhRequest* req)
     char* nl;
 
     for (;;) {
+        /* Resync after an oversized header: discard through the next '\n'
+         * (framing/10-behaviour-notes: ERR wire_desync, drop the buffer). */
+        if (r->skipping) {
+            for (i = 0; i < r->have; ++i) {
+                if (r->buf[i] == '\n') {
+                    break;
+                }
+            }
+            if (i < r->have) {
+                int rest = r->have - (i + 1);
+                if (rest > 0) {
+                    memmove(r->buf, r->buf + i + 1, (size_t)rest);
+                }
+                r->have = rest;
+                r->skipping = 0;
+            } else {
+                r->have = 0;
+                n = recv(r->sock, r->buf, RH_READ_CAP, 0);
+                if (n <= 0) {
+                    return (n == 0) ? RH_PROTO_EOF : RH_PROTO_ERR;
+                }
+                r->have = n;
+                continue;
+            }
+        }
+
         /* Look for a complete line in the buffer. */
         nl = NULL;
         for (i = 0; i < r->have; ++i) {
@@ -178,7 +206,9 @@ int rh_read_request(RhReader* r, RhRequest* req)
         }
 
         if (r->have >= RH_MAX_HEADER_LEN) {
-            return RH_PROTO_ERR;     /* header exceeds 65535: drop */
+            r->have = 0;             /* header exceeds 65535: resync */
+            r->skipping = 1;
+            return RH_PROTO_DESYNC;
         }
 
         n = recv(r->sock, r->buf + r->have, RH_READ_CAP - r->have, 0);

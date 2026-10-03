@@ -43,11 +43,15 @@
 #define RH_PROTO_OK    0
 #define RH_PROTO_EOF  (-1)   /* peer closed cleanly between frames */
 #define RH_PROTO_ERR  (-2)   /* fatal wire error: drop the connection */
+#define RH_PROTO_DESYNC (-3) /* header over 65535 bytes: reply ERR
+                              * wire_desync, keep the connection; the
+                              * reader discards through the next '\n' */
 
 typedef struct {
     SOCKET sock;
     char*  buf;     /* heap buffer, RH_MAX_HEADER_LEN + 1 bytes */
     int    have;    /* bytes currently buffered                 */
+    int    skipping; /* discarding an oversized line up to '\n' */
 } RhReader;
 
 typedef struct {
@@ -63,7 +67,7 @@ void rh_reader_free(RhReader* r);
 void rh_reader_flush(RhReader* r);   /* connection.reset: discard buffer */
 
 /* Read + tokenize one request. Returns RH_PROTO_OK / RH_PROTO_EOF /
- * RH_PROTO_ERR. On OK, *req is populated (req->parse_error may be set when
+ * RH_PROTO_ERR / RH_PROTO_DESYNC. On OK, *req is populated (req->parse_error may be set when
  * the line framed cleanly but the args were malformed -- the caller emits
  * ERR invalid_args in that case, per PROTOCOL.md 1.2.5). */
 int  rh_read_request(RhReader* r, RhRequest* req);
