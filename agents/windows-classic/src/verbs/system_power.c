@@ -25,6 +25,7 @@
  * (Win32 equivalent of C++17 condition_variable::wait_until). */
 
 #include "system_power.h"
+#include "common.h"
 #include "../debug.h"
 #include "../protocol.h"
 
@@ -115,43 +116,69 @@ static DWORD WINAPI power_delay_thread(LPVOID param)
     return 0;
 }
 
-/* Shared dispatcher for reboot / shutdown / logoff.  Handles --delay and
- * --force args, conflict detection, and the cancel-event lifecycle. */
+/* "YYYY-MM-DDTHH:MM:SSZ" for a Unix time (spec `scheduled_at`). */
+static void iso8601_utc(long t, char* out, int cap)
+{
+    time_t     tt = (time_t)t;
+    struct tm* g  = gmtime(&tt);
+
+    if (g == NULL) {
+        _snprintf(out, (size_t)cap, "1970-01-01T00:00:00Z");
+    } else {
+        _snprintf(out, (size_t)cap, "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                  g->tm_year + 1900, g->tm_mon + 1, g->tm_mday,
+                  g->tm_hour, g->tm_min, g->tm_sec);
+    }
+    out[cap - 1] = '\0';
+}
+
+/* Shared dispatcher for reboot / shutdown / logoff. Args per spec:
+ * --delay-seconds <n>, --force-close-apps [bool], --reason <text> (the
+ * pre-v2.1 --delay / --force spellings are still accepted). Handles
+ * conflict detection and the cancel-event lifecycle. */
 static void do_power(RhConn* c, const RhRequest* req, DWORD exit_flags)
 {
-    DWORD            delay_seconds;
-    int              force_flag;
-    int              i;
-    const char*      arg;
+    static const RhFlagDef defs[] = {
+        { "--delay-seconds",    RH_FLAG_VALUE },
+        { "--force-close-apps", RH_FLAG_BOOL  },
+        { "--reason",           RH_FLAG_VALUE },
+        { "--delay",            RH_FLAG_VALUE },
+        { "--force",            RH_FLAG_BOOL  }
+    };
+    RhArgs           a;
+    const char*      delay_s;
+    long             delay_seconds;
     long             deadline_unix;
     __int64          deadline_ms;
     PowerThreadArgs* targs;
     HANDLE           th;
-    char             body[160];
+    char             body[96];
+    char             when[32];
     char             detail[128];
     DWORD            reason;
+    DWORD            e;
 
-    delay_seconds = 0;
-    force_flag    = 0;
-
-    for (i = 0; i < req->argc; ++i) {
-        arg = req->args[i];
-        if (strcmp(arg, "--delay") == 0 && i + 1 < req->argc) {
-            ++i;
-            delay_seconds = (DWORD)strtoul(req->args[i], NULL, 10);
-        } else if (strcmp(arg, "--force") == 0) {
-            force_flag = 1;
-        } else if (strlen(arg) >= 2 && arg[0] == '-' && arg[1] == '-') {
-            _snprintf(detail, sizeof(detail),
-                      "{\"unknown_flag\":\"%s\"}", arg);
-            rh_send_err_json(c->sock, "invalid_args", detail);
-            return;
-        }
+    rh_args_parse(req, defs, 5, &a);
+    if (a.unknown != NULL) {
+        rh_err_unknown_flag(c, a.unknown);
+        return;
     }
+    delay_s = (a.val[0] != NULL) ? a.val[0] : a.val[3];
+    delay_seconds = 0;
+    if (a.missing_val ||
+        (delay_s != NULL && (!rh_parse_long(delay_s, &delay_seconds) ||
+                             delay_seconds < 0 ||
+                             delay_seconds > 315360000L /* 10 y */))) {
+        rh_err_msg(c, "invalid_args",
+                   "delay_seconds must be a non-negative integer");
+        return;
+    }
+    /* `reason` is free text for the caller's audit trail; ExitWindowsEx
+     * has no comment field, so it is accepted and not forwarded. */
 
     enable_shutdown_privilege();
 
-    if (force_flag) {
+    if (rh_arg_bool(&a, 1, 0) || rh_arg_bool(&a, 4, 0)) {
         exit_flags |= EWX_FORCE;
     }
     reason = SHTDN_REASON_MAJOR_OPERATINGSYSTEM | SHTDN_REASON_FLAG_PLANNED;
@@ -165,7 +192,7 @@ static void do_power(RhConn* c, const RhRequest* req, DWORD exit_flags)
             rh_send_err_json(c->sock, "conflict", detail);
             return;
         }
-        deadline_unix       = (long)time(NULL) + (long)delay_seconds;
+        deadline_unix       = (long)time(NULL) + delay_seconds;
         deadline_ms         = (__int64)deadline_unix * 1000;
         g_power_active      = 1;
         g_power_deadline_ms = deadline_ms;
@@ -182,7 +209,7 @@ static void do_power(RhConn* c, const RhRequest* req, DWORD exit_flags)
             return;
         }
         targs->exit_flags = exit_flags;
-        targs->delay_ms   = delay_seconds * 1000UL;
+        targs->delay_ms   = (DWORD)delay_seconds * 1000UL;
 
         th = CreateThread(NULL, 0, power_delay_thread, targs, 0, NULL);
         if (th == NULL) {
@@ -195,23 +222,23 @@ static void do_power(RhConn* c, const RhRequest* req, DWORD exit_flags)
         }
         CloseHandle(th);  /* detach — thread owns itself */
 
-        _snprintf(body, sizeof(body),
-                  "{\"phase\":\"requested\",\"grace_ms\":%lu,"
-                  "\"deadline_unix\":%I64d}",
-                  delay_seconds * 1000UL, (__int64)deadline_unix);
+        iso8601_utc(deadline_unix, when, (int)sizeof(when));
+        _snprintf(body, sizeof(body), "{\"scheduled_at\":\"%s\"}", when);
+        body[sizeof(body) - 1] = '\0';
         rh_send_ok_json(c->sock, body);
     } else {
         if (!ExitWindowsEx(exit_flags, reason)) {
-            _snprintf(detail, sizeof(detail),
-                      "{\"win32_error\":%lu}", GetLastError());
-            rh_send_err_json(c->sock, "not_supported", detail);
+            e = GetLastError();
+            _snprintf(detail, sizeof(detail), "{\"win32_error\":%lu}",
+                      (unsigned long)e);
+            rh_send_err_json(c->sock,
+                             (e == ERROR_PRIVILEGE_NOT_HELD ||
+                              e == ERROR_ACCESS_DENIED)
+                             ? "insufficient_privilege" : "policy_blocked",
+                             detail);
             return;
         }
-        _snprintf(body, sizeof(body),
-                  "{\"phase\":\"requested\",\"grace_ms\":0,"
-                  "\"deadline_unix\":%I64d}",
-                  (__int64)time(NULL));
-        rh_send_ok_json(c->sock, body);
+        rh_send_ok_json(c->sock, "{}");
     }
 }
 
@@ -329,6 +356,11 @@ void rh_verb_power_cancel(RhConn* c, const RhRequest* req)
     LeaveCriticalSection(&g_power_cs);
 
     if (was_active) {
+        /* Remaining time on the cancelled timer, not the deadline. */
+        cancelled_ms -= (__int64)time(NULL) * 1000;
+        if (cancelled_ms < 0) {
+            cancelled_ms = 0;
+        }
         _snprintf(body, sizeof(body),
                   "{\"cancelled_until_ms\":%I64d}", cancelled_ms);
         rh_send_ok_json(c->sock, body);

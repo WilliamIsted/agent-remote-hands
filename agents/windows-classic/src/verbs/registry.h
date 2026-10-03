@@ -43,6 +43,11 @@ void rh_verb_registry_write(RhConn* c, const RhRequest* req);
 void rh_verb_registry_delete(RhConn* c, const RhRequest* req);
 
 /* registry.wait -- unchanged across the split. */
+/* Block until `path` changes or `timeout_ms` elapses; replies OK {path}
+ * or ERR timeout / not_found. Shared by registry.wait and
+ * watch.registry --until-change. */
+void rh_registry_wait_change(RhConn* c, const char* path, int subtree,
+                             long timeout_ms);
 void rh_verb_registry_wait(RhConn* c, const RhRequest* req);
 
 /* v2.1 namespace. */

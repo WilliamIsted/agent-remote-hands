@@ -15,6 +15,7 @@
 
 #include "screen.h"
 #include "common.h"
+#include "encoding.h"
 
 #include <windows.h>
 #include <stdlib.h>
@@ -383,12 +384,20 @@ static int png_encode(const Frame* f, unsigned char** out, int* outlen)
 void rh_verb_screen_capture(RhConn* c, const RhRequest* req)
 {
     static const RhFlagDef defs[] = {
-        { "--format",  1 },
-        { "--region",  1 },
-        { "--window",  1 },
-        { "--monitor", 1 },
-        { "--no-cursor", 0 }
+        { "--format",    RH_FLAG_VALUE },
+        { "--region",    RH_FLAG_VALUE },
+        { "--window",    RH_FLAG_VALUE },
+        { "--monitor",   RH_FLAG_VALUE },
+        { "--no-cursor", RH_FLAG_SWITCH },
+        { "--cursor",    RH_FLAG_BOOL  },
+        { "--quality",   RH_FLAG_VALUE },
+        { "--encoding",  RH_FLAG_VALUE }
     };
+    RhScreen       screens[RH_MAX_SCREENS];
+    int            nscreens;
+    long           mon;
+    char*          b64;
+    int            b64len;
     RhArgs         a;
     const char*    fmt;
     int            want_png;
@@ -401,7 +410,7 @@ void rh_verb_screen_capture(RhConn* c, const RhRequest* req)
     int            enclen;
     int            ok;
 
-    rh_args_parse(req, defs, 5, &a);
+    rh_args_parse(req, defs, 8, &a);
 
     if (a.unknown != NULL) {
         rh_err_unknown_flag(c, a.unknown);
@@ -425,12 +434,23 @@ void rh_verb_screen_capture(RhConn* c, const RhRequest* req)
         want_png = 1;
     } else if (strcmp(fmt, "bmp") == 0) {
         want_png = 0;
+    } else if (strcmp(fmt, "webp") == 0 || strncmp(fmt, "webp:", 5) == 0) {
+        /* In the spec enum, but classic carries no WebP encoder. */
+        rh_err_kv(c, "unsupported_format", "format", fmt);
+        return;
     } else {
-        /* webp / webp:<q> / tiff-2000 / anything else: classic does not
-         * carry these encoders. PROTOCOL.md 5.1 -> not_supported. */
+        /* Outside the enum entirely (e.g. tiff-2000): not_supported, as
+         * both the v2.1 and v2.2 suites assert. */
         rh_err_kv(c, "not_supported", "format", fmt);
         return;
     }
+    if (a.val[7] != NULL && strcmp(a.val[7], "binary") != 0 &&
+        strcmp(a.val[7], "base64") != 0) {
+        rh_err_msg(c, "invalid_args", "encoding must be binary|base64");
+        return;
+    }
+    /* --quality applies to lossy formats only; accepted and unused.
+     * --cursor: classic never composites the cursor (ledgered). */
 
     /* Resolve the capture rectangle. */
     sx = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -465,7 +485,7 @@ void rh_verb_screen_capture(RhConn* c, const RhRequest* req)
             return;
         }
         if (!IsWindow(rect_w) || !GetWindowRect(rect_w, &rc)) {
-            rh_err_kv(c, "target_gone", "handle", a.val[2]);
+            rh_err_kv(c, "not_found", "handle", a.val[2]);
             return;
         }
         sx = rc.left;
@@ -473,18 +493,19 @@ void rh_verb_screen_capture(RhConn* c, const RhRequest* req)
         w  = rc.right - rc.left;
         h  = rc.bottom - rc.top;
     } else if (a.seen[3]) {          /* --monitor <index> */
-        int mi = a.val[3] ? atoi(a.val[3]) : 0;
-        if (mi != 0) {
-            /* Multi-monitor enumeration (EnumDisplayMonitors) is Win98+/
-             * Win2000+; classic spans down to NT4 where it is absent.
-             * Index 0 == primary always works; others -> not_found. */
-            rh_err_kv(c, "not_found", "monitor", a.val[3]);
+        /* Same indexing as system.info.screens (EnumDisplayMonitors order;
+         * a single primary entry on NT 4 / Win95). */
+        nscreens = rh_screens(screens, RH_MAX_SCREENS);
+        if (a.val[3] == NULL || !rh_parse_long(a.val[3], &mon) ||
+            mon < 0 || mon >= nscreens) {
+            rh_err_kv(c, "not_found", "monitor",
+                      a.val[3] ? a.val[3] : "");
             return;
         }
-        sx = 0;
-        sy = 0;
-        w  = GetSystemMetrics(SM_CXSCREEN);
-        h  = GetSystemMetrics(SM_CYSCREEN);
+        sx = screens[mon].bounds.left;
+        sy = screens[mon].bounds.top;
+        w  = screens[mon].bounds.right - screens[mon].bounds.left;
+        h  = screens[mon].bounds.bottom - screens[mon].bounds.top;
     }
     /* --no-cursor (a.seen[4]): classic never composites the cursor, so the
      * flag is accepted and is already satisfied. */
@@ -504,6 +525,17 @@ void rh_verb_screen_capture(RhConn* c, const RhRequest* req)
 
     if (!ok) {
         rh_err_msg(c, "wire_desync", "image encode failed");
+        return;
+    }
+    if (a.val[7] != NULL && strcmp(a.val[7], "base64") == 0) {
+        b64 = rh_base64_encode((const char*)enc, enclen, &b64len);
+        free(enc);
+        if (b64 == NULL) {
+            rh_err(c, "wire_desync");
+            return;
+        }
+        rh_ok_bytes(c, b64, b64len);
+        free(b64);
         return;
     }
     rh_ok_bytes(c, (const char*)enc, enclen);

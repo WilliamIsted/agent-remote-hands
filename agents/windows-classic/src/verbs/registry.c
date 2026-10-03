@@ -753,39 +753,42 @@ void rh_verb_registry_delete(RhConn* c, const RhRequest* req)
     rh_ok(c);
 }
 
-/* --- registry.wait ----------------------------------------------------- */
+/* --- registry.wait / watch.registry --until-change --------------------- */
 
-void rh_verb_registry_wait(RhConn* c, const RhRequest* req)
+/* Cheap change fingerprint for the Win9x fallback (no event-based
+ * RegNotifyChangeKeyValue there): counts + max name/data lengths. */
+static void key_fingerprint(HKEY k, DWORD fp[6])
 {
-    RhArgs      a;
+    memset(fp, 0, 6 * sizeof(DWORD));
+    RegQueryInfoKeyA(k, NULL, NULL, NULL, &fp[0], &fp[1], NULL,
+                     &fp[2], &fp[3], &fp[4], NULL, NULL);
+    fp[5] = 0;
+}
+
+void rh_registry_wait_change(RhConn* c, const char* path, int subtree,
+                             long timeout_ms)
+{
     HKEY        root;
     const char* subkey;
     HKEY        key;
     LONG        rc;
     HANDLE      ev;
-    int         timeout_ms;
     DWORD       wr;
+    DWORD       start;
+    DWORD       fp0[6];
+    DWORD       fp1[6];
+    int         changed;
     RhJson*     j;
     const char* r;
 
-    rh_args_parse(req, NULL, 0, &a);
-    if (a.unknown != NULL) {
-        rh_err_unknown_flag(c, a.unknown);
-        return;
-    }
-    if (a.npos < 2) {
-        rh_err_msg(c, "invalid_args",
-                   "registry.wait requires <path> <timeout-ms>");
-        return;
-    }
-    if (!split_root(a.pos[0], &root, &subkey)) {
+    if (!split_root(path, &root, &subkey)) {
         rh_err_msg(c, "invalid_args", "unknown registry root");
         return;
     }
-    timeout_ms = atoi(a.pos[1]);
-    rc = RegOpenKeyExA(root, subkey, 0, KEY_NOTIFY, &key);
+    rc = RegOpenKeyExA(root, subkey, 0, KEY_NOTIFY | KEY_QUERY_VALUE, &key);
     if (rc != ERROR_SUCCESS) {
-        rh_err(c, "not_found");
+        rh_err(c, (rc == ERROR_ACCESS_DENIED) ? "permission_denied"
+                                              : "not_found");
         return;
     }
     ev = CreateEventA(NULL, TRUE, FALSE, NULL);
@@ -794,21 +797,32 @@ void rh_verb_registry_wait(RhConn* c, const RhRequest* req)
         rh_err(c, "wire_desync");
         return;
     }
-    rc = RegNotifyChangeKeyValue(key, TRUE,
+    rc = RegNotifyChangeKeyValue(key, subtree ? TRUE : FALSE,
                                  REG_NOTIFY_CHANGE_NAME |
                                  REG_NOTIFY_CHANGE_LAST_SET,
                                  ev, TRUE);
-    if (rc != ERROR_SUCCESS) {
-        CloseHandle(ev);
-        RegCloseKey(key);
-        rh_err_msg(c, "not_supported", "registry change notify unavailable");
-        return;
+    if (rc == ERROR_SUCCESS) {
+        wr = WaitForSingleObject(ev, (DWORD)timeout_ms);
+        changed = (wr == WAIT_OBJECT_0) ? 1 : 0;
+    } else {
+        /* Win9x: asynchronous notification unsupported -- poll. Detects
+         * adds/removes and size changes on this key only. */
+        key_fingerprint(key, fp0);
+        start   = GetTickCount();
+        changed = 0;
+        while ((long)(GetTickCount() - start) < timeout_ms) {
+            Sleep(200);
+            key_fingerprint(key, fp1);
+            if (memcmp(fp0, fp1, sizeof(fp0)) != 0) {
+                changed = 1;
+                break;
+            }
+        }
     }
-    wr = WaitForSingleObject(ev, (DWORD)timeout_ms);
     CloseHandle(ev);
     RegCloseKey(key);
-    if (wr == WAIT_TIMEOUT) {
-        rh_err_kv(c, "timeout", "deadline", a.pos[1]);
+    if (!changed) {
+        rh_err_kv(c, "timeout", "path", path);
         return;
     }
     j = (RhJson*)malloc(sizeof(RhJson));
@@ -819,7 +833,7 @@ void rh_verb_registry_wait(RhConn* c, const RhRequest* req)
     rh_json_init(j);
     rh_json_begin_obj(j);
     rh_json_key(j, "path");
-    rh_json_str(j, a.pos[0]);
+    rh_json_str(j, path);
     rh_json_end_obj(j);
     r = rh_json_finish(j);
     if (r == NULL) {
@@ -828,6 +842,26 @@ void rh_verb_registry_wait(RhConn* c, const RhRequest* req)
         rh_ok_json(c, r);
     }
     free(j);
+}
+
+/* v2.0 alias: registry.wait <path> <timeout-ms>. */
+void rh_verb_registry_wait(RhConn* c, const RhRequest* req)
+{
+    RhArgs a;
+    long   timeout_ms;
+
+    rh_args_parse(req, NULL, 0, &a);
+    if (a.unknown != NULL) {
+        rh_err_unknown_flag(c, a.unknown);
+        return;
+    }
+    if (a.npos < 2 || !rh_parse_long(a.pos[1], &timeout_ms) ||
+        timeout_ms < 0) {
+        rh_err_msg(c, "invalid_args",
+                   "registry.wait requires <path> <timeout-ms>");
+        return;
+    }
+    rh_registry_wait_change(c, a.pos[0], 1, timeout_ms);
 }
 
 /* ====================================================================== */

@@ -60,39 +60,62 @@ void rh_verb_clipboard_get(RhConn* c, const RhRequest* req)
 
 void rh_verb_clipboard_set(RhConn* c, const RhRequest* req)
 {
+    static const RhFlagDef defs[] = {
+        { "--format",  RH_FLAG_VALUE },
+        { "--content", RH_FLAG_VALUE }
+    };
     RhArgs  a;
+    long    nl;
     int     n;
     char*   body;
     int     rc;
     HGLOBAL hg;
     char*   dst;
 
-    rh_args_parse(req, NULL, 0, &a);
+    rh_args_parse(req, defs, 2, &a);
     if (a.unknown != NULL) {
         rh_err_unknown_flag(c, a.unknown);
         return;
     }
-    if (a.npos < 1) {
-        rh_err_msg(c, "invalid_args", "clipboard.set requires <length>");
-        return;
-    }
-    n = atoi(a.pos[0]);
-    if (n < 0 || n > RH_CLIP_MAX) {
-        rh_err_msg(c, "invalid_args", "bad payload length");
-        return;
-    }
-    body = (char*)malloc((size_t)(n > 0 ? n : 1));
-    if (body == NULL) {
-        rh_err(c, "wire_desync");
-        return;
-    }
-    if (n > 0) {
-        rc = rh_read_payload(&c->reader, body, n);
-        if (rc != RH_PROTO_OK) {
-            free(body);
+    /* Content: <length> + payload (v2.1 grammar) or --content <text>. The
+     * payload is consumed before any validation error is sent. */
+    if (a.npos >= 1) {
+        if (!rh_parse_long(a.pos[0], &nl) || nl < 0 || nl > RH_CLIP_MAX) {
+            rh_err_msg(c, "invalid_args", "bad payload length");
+            return;
+        }
+        n = (int)nl;
+        body = (char*)malloc((size_t)(n > 0 ? n : 1));
+        if (body == NULL) {
             rh_err(c, "wire_desync");
             return;
         }
+        if (n > 0) {
+            rc = rh_read_payload(&c->reader, body, n);
+            if (rc != RH_PROTO_OK) {
+                free(body);
+                rh_err(c, "wire_desync");
+                return;
+            }
+        }
+    } else if (a.val[1] != NULL) {
+        n = (int)strlen(a.val[1]);
+        body = (char*)malloc((size_t)(n > 0 ? n : 1));
+        if (body == NULL) {
+            rh_err(c, "wire_desync");
+            return;
+        }
+        memcpy(body, a.val[1], (size_t)n);
+    } else {
+        rh_err_msg(c, "invalid_args",
+                   "clipboard.set requires <length> + payload or --content");
+        return;
+    }
+    if (a.missing_val ||
+        (a.val[0] != NULL && strcmp(a.val[0], "text") != 0)) {
+        free(body);
+        rh_err_msg(c, "invalid_args", "format must be text");
+        return;
     }
 
     if (!OpenClipboard(NULL)) {
@@ -127,5 +150,5 @@ void rh_verb_clipboard_set(RhConn* c, const RhRequest* req)
     SetClipboardData(CF_TEXT, hg);
     CloseClipboard();
     free(body);
-    rh_ok(c);
+    rh_ok_json(c, "{\"format\":\"text\"}");
 }

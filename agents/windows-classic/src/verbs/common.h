@@ -139,4 +139,25 @@ void rh_path_join(const char* dir, const char* name, char* out, int cap);
 /* "." or ".." */
 int  rh_is_dot(const char* name);
 
+/* --- monitors (system.info.screens / window.list monitor_index) ------- */
+
+#define RH_MAX_SCREENS 16
+
+typedef struct {
+    RECT bounds;
+    int  primary;   /* first monitor EnumDisplayMonitors reports */
+} RhScreen;
+
+/* Fill `out` in EnumDisplayMonitors order (index = position). On NT 4 /
+ * Win95, which lack the multi-monitor API, reports the one primary
+ * display from GetSystemMetrics. Returns the count (>= 1). */
+int rh_screens(RhScreen* out, int max);
+
+/* Index (as rh_screens) of the monitor nearest `pt`; 0 when the
+ * multi-monitor API is unavailable. */
+int rh_point_monitor_index(POINT pt);
+
+/* Emit a spec Bounds object {x,y,w,h} for `rc` as the current value. */
+void rh_json_bounds(RhJson* j, const RECT* rc);
+
 #endif /* RH_VERBS_COMMON_H */

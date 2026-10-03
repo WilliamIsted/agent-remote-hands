@@ -450,3 +450,104 @@ int rh_is_dot(const char* n)
     return (n[0] == '.' && (n[1] == '\0' ||
             (n[1] == '.' && n[2] == '\0'))) ? 1 : 0;
 }
+
+/* --- monitors ---------------------------------------------------------- */
+
+typedef void* RhHMon;
+typedef BOOL (CALLBACK *RhMonEnumProc)(RhHMon, HDC, LPRECT, LPARAM);
+typedef BOOL (WINAPI *RhEnumDisplayMonitorsFn)(HDC, LPCRECT, RhMonEnumProc,
+                                               LPARAM);
+typedef RhHMon (WINAPI *RhMonitorFromPointFn)(POINT, DWORD);
+
+static RhEnumDisplayMonitorsFn g_enum_mon  = NULL;
+static RhMonitorFromPointFn    g_mon_at_pt = NULL;
+static int                     g_mon_probed = 0;
+
+static void probe_monitor_api(void)
+{
+    HMODULE u32;
+
+    if (g_mon_probed) {
+        return;
+    }
+    g_mon_probed = 1;
+    u32 = GetModuleHandleA("user32.dll");
+    if (u32 == NULL) {
+        return;
+    }
+    g_enum_mon  = (RhEnumDisplayMonitorsFn)GetProcAddress(
+                      u32, "EnumDisplayMonitors");
+    g_mon_at_pt = (RhMonitorFromPointFn)GetProcAddress(
+                      u32, "MonitorFromPoint");
+}
+
+typedef struct {
+    RhScreen* out;
+    int       max;
+    int       n;
+    RhHMon    target;   /* rh_point_monitor_index: monitor to find */
+    int       found;
+} MonCtx;
+
+static BOOL CALLBACK mon_cb(RhHMon m, HDC dc, LPRECT rc, LPARAM lp)
+{
+    MonCtx* ctx = (MonCtx*)lp;
+    (void)dc;
+    if (ctx->target != NULL && m == ctx->target && ctx->found < 0) {
+        ctx->found = ctx->n;
+    }
+    if (ctx->out != NULL && ctx->n < ctx->max) {
+        ctx->out[ctx->n].bounds  = *rc;
+        ctx->out[ctx->n].primary = (ctx->n == 0) ? 1 : 0;
+    }
+    ctx->n += 1;
+    return TRUE;
+}
+
+int rh_screens(RhScreen* out, int max)
+{
+    MonCtx ctx;
+
+    probe_monitor_api();
+    if (g_enum_mon != NULL) {
+        ctx.out = out; ctx.max = max; ctx.n = 0;
+        ctx.target = NULL; ctx.found = -1;
+        g_enum_mon(NULL, NULL, mon_cb, (LPARAM)&ctx);
+        if (ctx.n > 0) {
+            return (ctx.n < max) ? ctx.n : max;
+        }
+    }
+    out[0].bounds.left   = 0;
+    out[0].bounds.top    = 0;
+    out[0].bounds.right  = GetSystemMetrics(SM_CXSCREEN);
+    out[0].bounds.bottom = GetSystemMetrics(SM_CYSCREEN);
+    out[0].primary       = 1;
+    return 1;
+}
+
+int rh_point_monitor_index(POINT pt)
+{
+    MonCtx ctx;
+
+    probe_monitor_api();
+    if (g_enum_mon == NULL || g_mon_at_pt == NULL) {
+        return 0;
+    }
+    ctx.out = NULL; ctx.max = 0; ctx.n = 0; ctx.found = -1;
+    ctx.target = g_mon_at_pt(pt, 0x00000002 /* DEFAULTTONEAREST */);
+    if (ctx.target == NULL) {
+        return 0;
+    }
+    g_enum_mon(NULL, NULL, mon_cb, (LPARAM)&ctx);
+    return (ctx.found >= 0) ? ctx.found : 0;
+}
+
+void rh_json_bounds(RhJson* j, const RECT* rc)
+{
+    rh_json_begin_obj(j);
+    rh_json_key(j, "x"); rh_json_int(j, (i32)rc->left);
+    rh_json_key(j, "y"); rh_json_int(j, (i32)rc->top);
+    rh_json_key(j, "w"); rh_json_int(j, (i32)(rc->right - rc->left));
+    rh_json_key(j, "h"); rh_json_int(j, (i32)(rc->bottom - rc->top));
+    rh_json_end_obj(j);
+}
