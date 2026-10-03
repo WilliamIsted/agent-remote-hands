@@ -205,7 +205,7 @@ int rh_read_request(RhReader* r, RhRequest* req)
             return RH_PROTO_OK;
         }
 
-        if (r->have >= RH_MAX_HEADER_LEN) {
+        if (r->have >= RH_READ_CAP) {
             r->have = 0;             /* header exceeds 65535: resync */
             r->skipping = 1;
             return RH_PROTO_DESYNC;
@@ -261,6 +261,23 @@ int rh_read_payload(RhReader* r, char* out, int n)
             return RH_PROTO_ERR;
         }
         copied += got;
+    }
+    return RH_PROTO_OK;
+}
+
+int rh_discard_payload(RhReader* r, long n)
+{
+    char chunk[4096];
+    int  take;
+    int  rc;
+
+    while (n > 0) {
+        take = (n < (long)sizeof(chunk)) ? (int)n : (int)sizeof(chunk);
+        rc = rh_read_payload(r, chunk, take);
+        if (rc != RH_PROTO_OK) {
+            return rc;
+        }
+        n -= take;
     }
     return RH_PROTO_OK;
 }

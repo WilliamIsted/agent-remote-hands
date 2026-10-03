@@ -48,12 +48,15 @@ typedef unsigned long ULONG_PTR;
 #define RH_MAX_ARG_LEN       512
 #define RH_MAX_ARGS           16
 
-/* JSON response buffer. W8 sized this 8192 for the three system.* verbs.
- * W9 returns directory.list / process.list / window.list / registry.read
- * payloads that routinely exceed 8 KB (a C:\Windows listing is ~12 KB), so
- * the cap is raised. RhJson is heap-allocated by the list handlers (see
- * verbs/common.h rh_json_heap_*) to keep this off the stack. */
-#define RH_MAX_JSON_LEN    65536
+/* JSON response buffer. W8 sized this 8192 for the three system.* verbs;
+ * W9 raised it to 64 KB for directory.list / process.list / window.list.
+ * The v2.1 shapes (window.list --visible-only false with nested bounds,
+ * directory.list with full stat fields, process.list counters) can exceed
+ * 64 KB on a modern desktop, so it is 256 KB. List handlers heap-allocate
+ * their RhJson; the few stack instances (connection.c err_kv*, system.c
+ * info/capabilities) are never nested, and connections run on the main
+ * thread's default 1 MB stack. */
+#define RH_MAX_JSON_LEN    (256 * 1024)
 
 #define RH_PORT_DEFAULT     8765
 

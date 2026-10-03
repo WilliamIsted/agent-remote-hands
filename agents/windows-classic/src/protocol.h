@@ -82,6 +82,10 @@ void rh_tokenize(const char* line, RhRequest* req);
  * header lines; W9 verbs that take a payload need this. */
 int  rh_read_payload(RhReader* r, char* out, int n);
 
+/* Read and throw away `n` payload bytes (error paths that reply before
+ * using the body must still consume it, or the next header desyncs). */
+int  rh_discard_payload(RhReader* r, long n);
+
 /* Response writers (best-effort; wire errors surface on the next recv). */
 void rh_send_ok(SOCKET s);
 void rh_send_ok_json(SOCKET s, const char* json);

@@ -21,8 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* RhJson is RH_MAX_JSON_LEN (64 KB) wide; heap-allocate it for the tiny
- * error/detail documents so a trivial ERR never costs a 64 KB stack frame. */
+/* RhJson is RH_MAX_JSON_LEN (256 KB) wide; heap-allocate it for the tiny
+ * error/detail documents so a trivial ERR never costs a 256 KB stack frame. */
 static RhJson* jnew(void)
 {
     RhJson* j = (RhJson*)malloc(sizeof(RhJson));

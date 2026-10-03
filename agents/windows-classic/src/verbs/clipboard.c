@@ -74,19 +74,27 @@ void rh_verb_clipboard_set(RhConn* c, const RhRequest* req)
 
     rh_args_parse(req, defs, 2, &a);
     if (a.unknown != NULL) {
+        if (a.npos >= 1 && rh_parse_long(a.pos[0], &nl) && nl > 0) {
+            rh_discard_payload(&c->reader, nl);
+        }
         rh_err_unknown_flag(c, a.unknown);
         return;
     }
     /* Content: <length> + payload (v2.1 grammar) or --content <text>. The
      * payload is consumed before any validation error is sent. */
     if (a.npos >= 1) {
+        nl = 0;
         if (!rh_parse_long(a.pos[0], &nl) || nl < 0 || nl > RH_CLIP_MAX) {
+            if (nl > RH_CLIP_MAX) {
+                rh_discard_payload(&c->reader, nl);
+            }
             rh_err_msg(c, "invalid_args", "bad payload length");
             return;
         }
         n = (int)nl;
         body = (char*)malloc((size_t)(n > 0 ? n : 1));
         if (body == NULL) {
+            rh_discard_payload(&c->reader, nl);
             rh_err(c, "wire_desync");
             return;
         }

@@ -101,7 +101,11 @@ static int read_body(RhConn* c, int n, char** out)
     int   rc;
 
     *out = NULL;
-    if (n < 0 || n > RH_FILE_MAX) {
+    if (n < 0) {
+        return -1;
+    }
+    if (n > RH_FILE_MAX) {
+        rh_discard_payload(&c->reader, n);
         return -1;
     }
     if (n == 0) {
@@ -109,6 +113,7 @@ static int read_body(RhConn* c, int n, char** out)
     }
     buf = (char*)malloc((size_t)n);
     if (buf == NULL) {
+        rh_discard_payload(&c->reader, n);
         return -2;
     }
     rc = rh_read_payload(&c->reader, buf, n);
@@ -118,6 +123,17 @@ static int read_body(RhConn* c, int n, char** out)
     }
     *out = buf;
     return n;
+}
+
+/* Early-error helper: if positional `len_pos` is a byte count, consume
+ * that payload so the reply that follows leaves the wire in sync. */
+static void drain_at(RhConn* c, const RhArgs* a, int len_pos)
+{
+    long n;
+    if (len_pos >= 0 && len_pos < a->npos &&
+        rh_parse_long(a->pos[len_pos], &n) && n > 0) {
+        rh_discard_payload(&c->reader, n);
+    }
 }
 
 /* Content for file.write / write_at / create. v2.1 carries it either as a
@@ -403,7 +419,7 @@ void rh_verb_file_read(RhConn* c, const RhRequest* req)
     }
     free(buf);
 
-    /* Hand-built: the content can exceed RhJson's 64 KB cap. */
+    /* Hand-built: the content can exceed RhJson's fixed cap. */
     resp = (char*)malloc((size_t)text_len * 6 + 96);
     if (resp == NULL) {
         free(text);
@@ -464,11 +480,13 @@ void rh_verb_file_write(RhConn* c, const RhRequest* req)
 
     rh_args_parse(req, defs, 4, &a);
     if (a.unknown != NULL) {
+        drain_at(c, &a, a.seen[3] ? 0 : 1);
         rh_err_unknown_flag(c, a.unknown);
         return;
     }
     path = rh_arg_named_or_pos(&a, 3, 0);
     if (path == NULL || a.missing_val) {
+        drain_at(c, &a, a.seen[3] ? 0 : 1);
         rh_err_msg(c, "invalid_args", "file.write requires <path>");
         return;
     }
@@ -557,6 +575,7 @@ void rh_verb_file_write_at(RhConn* c, const RhRequest* req)
 
     rh_args_parse(req, defs, 5, &a);
     if (a.unknown != NULL) {
+        drain_at(c, &a, (a.seen[3] ? 0 : 1) + (a.seen[4] ? 0 : 1));
         rh_err_unknown_flag(c, a.unknown);
         return;
     }
@@ -568,6 +587,7 @@ void rh_verb_file_write_at(RhConn* c, const RhRequest* req)
     off_s = a.seen[4] ? a.val[4] : (next_pos < a.npos ? a.pos[next_pos++]
                                                       : NULL);
     if (path == NULL || off_s == NULL || a.missing_val) {
+        drain_at(c, &a, next_pos);
         rh_err_msg(c, "invalid_args",
                    "file.write_at requires <path> <offset>");
         return;
@@ -911,11 +931,13 @@ void rh_verb_file_create(RhConn* c, const RhRequest* req)
 
     rh_args_parse(req, defs, 4, &a);
     if (a.unknown != NULL) {
+        drain_at(c, &a, a.seen[3] ? 0 : 1);
         rh_err_unknown_flag(c, a.unknown);
         return;
     }
     path = rh_arg_named_or_pos(&a, 3, 0);
     if (path == NULL || a.missing_val) {
+        drain_at(c, &a, a.seen[3] ? 0 : 1);
         rh_err_msg(c, "invalid_args", "file.create requires <path>");
         return;
     }

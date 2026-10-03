@@ -4,6 +4,26 @@
 **Scope:** `agents/windows-classic/` only. Modern and legacy are unaffected.
 **Goal:** classic meets its own v2.1 spec, so the rebuild merge criterion holds against an accurate suite: "v2.1 suite passes against windows-classic with only ledgered known-divergences".
 
+## Status
+
+Fixes 0–7 are implemented on `claude/festive-bardeen-opss89`. The code compile-checks and links with mingw-w64 (i686). It **has not been built with VS6 or run on the VM**, so the next step is a guest build plus a run of the suite.
+
+| Piece | Where |
+|---|---|
+| Accurate v2.1 suite | `tests/conformance-v2.1/`: a verbatim copy of the protocol repo's `v2.1.0-rc.3` suite |
+| Classic-only assertions | `tests/conformance-v2.1/test_classic_v21.py` |
+| Ledger | `tests/conformance-v2.1/KNOWN-DIVERGENCES.md` |
+
+**Correction to the handover's group 1:** the v2.1 suite itself sends **hyphenated** flags (`--timeout-ms`, `--visible-only false`, `--include-counters`, `--delay-seconds`). The snake_case spellings (`--timeout_ms`) came from the v2.2 → v2.1 shim. Fix 0 therefore makes the parser treat `-` and `_` as the same character instead of renaming flags. Both spellings work.
+
+**Spec vs suite conflicts, and how they were resolved:**
+
+- `power.cancel`: classic follows the spec (update tier), and the suite's test is ledgered as stale.
+- `screen.capture`: an unknown format keeps `not_supported` (both the v2.1 and v2.2 suites assert it), and `webp` returns `unsupported_format` (the v2.2 suite).
+- The `directory.delete` fixture uses `file.write` to create a file. The test is ledgered as stale.
+
+**Also fixed beyond the handover's list:** spec shapes for `file.exists`, `file.rename` / `directory.rename` (`{renamed, fallback_used}`), `directory.delete` (the v2.1 name, with `directory.remove` kept as an alias), `window.focus` / `window.move`, `process.shell` (`pid` may be null), and `power.cancel` (`cancelled_until_ms` is now the remaining time, not the deadline).
+
 ---
 
 ## Root causes (from reading the source)
@@ -17,9 +37,9 @@
 
 ## Fix 0 — Arg-parser groundwork (do this first)
 
-- **Spec-named flags.** Every `RhFlagDef` uses the spec's property name with `--` prepended, verbatim (underscores).
+- **Spec-named flags.** Every `RhFlagDef` uses the spec's property name with `--` prepended. Matching treats `-` and `_` as equal, so `--timeout-ms` (v2.1 suite) and `--timeout_ms` (spec-derived callers) both work.
 - **Booleans take a value.** The spec has `atomic` (default `true`) and `visible_only` (default `true`), so `--no-x` cannot express them. Accept both `--flag` (meaning true) and `--flag true|false`. Add `rh_arg_bool(const RhArgs*, int idx, int dflt)`. If a `true`/`false` token follows a boolean flag, consume it. Otherwise treat it as positional.
-- **Hyphenated aliases.** Decide: drop the old names, or keep them as hidden aliases for one release. **Recommendation: drop them.** Classic has not shipped a stable release, and the aliases would only mask stale callers.
+- **Legacy names.** The classic-only spellings `--filter`, `--all` and `--no-atomic` were dropped. The v2.0 positional forms (e.g. `process.wait <pid> <timeout>`) and `--delay` / `--force` on power verbs are still accepted.
 - **Required args.** Where the spec's `required` lists a named arg (e.g. `file.create.path`), accept `--path X` as well as the existing positional form. Prefer one lookup helper, `rh_arg_named_or_pos(a, flag_idx, pos_idx)`, over per-verb special cases.
 
 ## Fix 1 — Unrecognised arguments (group 1)
@@ -130,9 +150,9 @@ Because the reader resyncs at the next newline, the next request just works, and
 
 ## Test plan
 
-1. **Build an accurate v2.1 suite.** Take the v2.2 suite through the shim and exclude the v2.2-only tests (framing / MCP / ws). Commit the exclusion list to `tests/conformance/KNOWN-DIVERGENCES.md` under a new **"classic — v2.1"** section, rather than hand-patching the tests.
+1. **Use the accurate v2.1 suite.** It's the protocol repo's own `v2.1.0-rc.3` suite, vendored as `tests/conformance-v2.1/`. No shim is needed.
 2. **Add a classic-specific test per fix** where the shared suite doesn't already cover it, especially: the boolean `--flag false` form, `window.list` bare array, `system.info` required keys, and `connection.*` present in capabilities.
-3. Run against the VM only (never the host PC): `python -m pytest tests/conformance/ --host <vm-ip> --port 8765 --token-path <tok>`.
+3. Run against the VM only (never the host PC): `python -m pytest tests/conformance-v2.1/ --host <vm-ip> --port 8765 --token-path <tok>`.
 4. **Exit criterion:** the ~60–65 classic failures go to 0. The only remaining failures are ledgered (group 4 n/a, `file.download` env, the NT 4 `process.list` divergence).
 
 ## Suggested commit order
@@ -148,6 +168,6 @@ Per CLAUDE.md, each wire-visible change touches `PROTOCOL.md` (where it still de
 
 ## Open decisions for you
 
-1. Drop the hyphenated flag aliases outright, or keep them for one release? (Recommendation: drop.)
-2. NT 4 `process.list` `not_supported`: ledger it, or remap it? (Recommendation: ledger.)
+1. ~~Drop the hyphenated flag aliases?~~ This question no longer applies: hyphenated names are the v2.1 suite's own spelling, so both spellings are accepted.
+2. NT 4 `process.list` `not_supported`: it's recorded as a known divergence for now. Remap it if you'd rather.
 3. Does this block the rebuild merge? Given the stated merge criterion, it would, unless the criterion is reworded to "against main's suite".
