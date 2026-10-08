@@ -123,46 +123,46 @@ namespace {
 
 const char* role_token(LONG control_type) {
     switch (control_type) {
-        case UIA_ButtonControlTypeId:        return "button";
-        case UIA_CalendarControlTypeId:      return "calendar";
-        case UIA_CheckBoxControlTypeId:      return "checkbox";
-        case UIA_ComboBoxControlTypeId:      return "combobox";
-        case UIA_EditControlTypeId:          return "edit";
-        case UIA_HyperlinkControlTypeId:     return "link";
-        case UIA_ImageControlTypeId:         return "image";
-        case UIA_ListItemControlTypeId:      return "listitem";
-        case UIA_ListControlTypeId:          return "list";
-        case UIA_MenuControlTypeId:          return "menu";
-        case UIA_MenuBarControlTypeId:       return "menubar";
-        case UIA_MenuItemControlTypeId:      return "menuitem";
-        case UIA_ProgressBarControlTypeId:   return "progressbar";
-        case UIA_RadioButtonControlTypeId:   return "radiobutton";
-        case UIA_ScrollBarControlTypeId:     return "scrollbar";
-        case UIA_SliderControlTypeId:        return "slider";
-        case UIA_SpinnerControlTypeId:       return "spinner";
-        case UIA_StatusBarControlTypeId:     return "statusbar";
-        case UIA_TabControlTypeId:           return "tab";
-        case UIA_TabItemControlTypeId:       return "tabitem";
-        case UIA_TextControlTypeId:          return "text";
-        case UIA_ToolBarControlTypeId:       return "toolbar";
-        case UIA_ToolTipControlTypeId:       return "tooltip";
-        case UIA_TreeControlTypeId:          return "tree";
-        case UIA_TreeItemControlTypeId:      return "treeitem";
-        case UIA_CustomControlTypeId:        return "custom";
-        case UIA_GroupControlTypeId:         return "group";
-        case UIA_ThumbControlTypeId:         return "thumb";
-        case UIA_DataGridControlTypeId:      return "datagrid";
-        case UIA_DataItemControlTypeId:      return "dataitem";
-        case UIA_DocumentControlTypeId:      return "document";
-        case UIA_SplitButtonControlTypeId:   return "splitbutton";
-        case UIA_WindowControlTypeId:        return "window";
-        case UIA_PaneControlTypeId:          return "pane";
-        case UIA_HeaderControlTypeId:        return "header";
-        case UIA_HeaderItemControlTypeId:    return "headeritem";
-        case UIA_TableControlTypeId:         return "table";
-        case UIA_TitleBarControlTypeId:      return "titlebar";
-        case UIA_SeparatorControlTypeId:     return "separator";
-        default:                             return "unknown";
+        case UIA_ButtonControlTypeId:        return "Button";
+        case UIA_CalendarControlTypeId:      return "Calendar";
+        case UIA_CheckBoxControlTypeId:      return "CheckBox";
+        case UIA_ComboBoxControlTypeId:      return "ComboBox";
+        case UIA_EditControlTypeId:          return "Edit";
+        case UIA_HyperlinkControlTypeId:     return "Hyperlink";
+        case UIA_ImageControlTypeId:         return "Image";
+        case UIA_ListItemControlTypeId:      return "ListItem";
+        case UIA_ListControlTypeId:          return "List";
+        case UIA_MenuControlTypeId:          return "Menu";
+        case UIA_MenuBarControlTypeId:       return "MenuBar";
+        case UIA_MenuItemControlTypeId:      return "MenuItem";
+        case UIA_ProgressBarControlTypeId:   return "ProgressBar";
+        case UIA_RadioButtonControlTypeId:   return "RadioButton";
+        case UIA_ScrollBarControlTypeId:     return "ScrollBar";
+        case UIA_SliderControlTypeId:        return "Slider";
+        case UIA_SpinnerControlTypeId:       return "Spinner";
+        case UIA_StatusBarControlTypeId:     return "StatusBar";
+        case UIA_TabControlTypeId:           return "Tab";
+        case UIA_TabItemControlTypeId:       return "TabItem";
+        case UIA_TextControlTypeId:          return "Text";
+        case UIA_ToolBarControlTypeId:       return "ToolBar";
+        case UIA_ToolTipControlTypeId:       return "ToolTip";
+        case UIA_TreeControlTypeId:          return "Tree";
+        case UIA_TreeItemControlTypeId:      return "TreeItem";
+        case UIA_CustomControlTypeId:        return "Custom";
+        case UIA_GroupControlTypeId:         return "Group";
+        case UIA_ThumbControlTypeId:         return "Thumb";
+        case UIA_DataGridControlTypeId:      return "DataGrid";
+        case UIA_DataItemControlTypeId:      return "DataItem";
+        case UIA_DocumentControlTypeId:      return "Document";
+        case UIA_SplitButtonControlTypeId:   return "SplitButton";
+        case UIA_WindowControlTypeId:        return "Window";
+        case UIA_PaneControlTypeId:          return "Pane";
+        case UIA_HeaderControlTypeId:        return "Header";
+        case UIA_HeaderItemControlTypeId:    return "HeaderItem";
+        case UIA_TableControlTypeId:         return "Table";
+        case UIA_TitleBarControlTypeId:      return "TitleBar";
+        case UIA_SeparatorControlTypeId:     return "Separator";
+        default:                             return "Custom";
     }
 }
 
@@ -379,7 +379,7 @@ IUIAutomationElement* require_handle(Connection& conn, const SchemaArgs& args,
 
 struct MatchSpec {
     bool        have_role = false;
-    std::string role;                 // exact role-token match
+    std::string role_lower;           // case-insensitive role match (PROTOCOL.md 10.8)
     bool        have_name = false;
     std::string name_lower;           // case-insensitive substring on Name
     bool        have_aid = false;
@@ -405,7 +405,7 @@ bool build_match_spec(Connection& conn, const SchemaArgs& args,
             return false;
         }
         spec.have_role = true;
-        spec.role = *r;
+        spec.role_lower = to_lower_ascii(*r);
     }
     if (args.present("name")) {
         auto n = args.str("name");
@@ -445,7 +445,7 @@ bool element_matches(IUIAutomationElement* elem, const MatchSpec& spec) {
     if (spec.have_role) {
         CONTROLTYPEID ctype = 0;
         if (FAILED(elem->get_CurrentControlType(&ctype))) return false;
-        if (spec.role != role_token(ctype)) return false;
+        if (spec.role_lower != to_lower_ascii(role_token(ctype))) return false;
     }
     if (spec.have_aid) {
         if (element_automation_id(elem) != spec.aid) return false;
