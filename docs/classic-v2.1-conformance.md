@@ -6,7 +6,7 @@
 
 ## Status
 
-Fixes 0–7 are implemented on `claude/festive-bardeen-opss89`. The code compile-checks and links with mingw-w64 (i686). It **has not been built with VS6 or run on the VM**, so the next step is a guest build plus a run of the suite.
+Fixes 0–7 are implemented on `rebuild/v0.3.0`. The code compile-checks and links with mingw-w64 (i686). It **has not been built with VS6 or run on the VM**, so the next step is a guest build plus a run of the suite.
 
 | Piece | Where |
 |---|---|
